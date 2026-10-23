@@ -40,6 +40,15 @@ pub enum IoError {
         reason: String,
     },
 
+    /// Unexpected or missing XML element or attribute in a ParaView `.pvd` collection file.
+    #[error("invalid PVD structure at byte {offset}: {reason}")]
+    InvalidPvdStructure {
+        /// Byte offset in the input buffer.
+        offset: u64,
+        /// Description of the structural issue.
+        reason: String,
+    },
+
     /// Unsupported VTK encoding, compressor, header type, or scalar type.
     #[error("unsupported VTU feature at byte {offset}: {feature}")]
     UnsupportedFeature {

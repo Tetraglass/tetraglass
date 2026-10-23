@@ -7,11 +7,15 @@
 //! Reference: <https://gmsh.info/doc/texinfo/gmsh.html#MSH-file-format> and
 //! <https://gmsh.info/doc/texinfo/gmsh.html#Node-ordering>.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
+use std::sync::Arc;
 
-use tetraglass_core::{CellType, ComponentCount, DataArray, UnstructuredGrid, try_u32_from_usize};
+use tetraglass_core::{
+    CellType, ComponentCount, DataArray, StepLoader, TimeSeries, UnstructuredGrid,
+    try_u32_from_usize,
+};
 
 use crate::error::IoError;
 
@@ -213,10 +217,31 @@ pub fn read_msh_from_path(path: impl AsRef<Path>) -> Result<UnstructuredGrid, Io
     read_msh(&bytes)
 }
 
+/// Reads a Gmsh `.msh` file (single-step or multi-step) from a native file path as a lazy
+/// [`TimeSeries<IoError>`] (`M1.7`).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_msh_series_from_path(path: impl AsRef<Path>) -> Result<TimeSeries<IoError>, IoError> {
+    let bytes = std::fs::read(path)?;
+    read_msh_series(bytes)
+}
+
 /// Parses a Gmsh `.msh` file (version 4.1 or 2.2, ASCII or binary) from a byte slice into an
-/// [`UnstructuredGrid`].
+/// [`UnstructuredGrid`] (returning the first time step if the file contains multiple steps).
 pub fn read_msh(bytes: &[u8]) -> Result<UnstructuredGrid, IoError> {
-    let mut reader = MshCursor::new(bytes);
+    let series = read_msh_series(bytes)?;
+    let first = series.step(0)?;
+    Ok((*first).clone())
+}
+
+/// Parses a Gmsh `.msh` file (version 4.1 or 2.2, ASCII or binary) into a lazy
+/// [`TimeSeries<IoError>`] (`M1.7`).
+///
+/// The mesh geometry (`$Nodes` and `$Elements`) and the headers of `$NodeData` / `$ElementData`
+/// sections are scanned up front, while the per-step field payloads are decoded lazily only when
+/// [`TimeSeries::step`] is requested for that step.
+pub fn read_msh_series(bytes: impl Into<Arc<[u8]>>) -> Result<TimeSeries<IoError>, IoError> {
+    let shared_bytes: Arc<[u8]> = bytes.into();
+    let mut reader = MshCursor::new(&shared_bytes);
 
     let mut format_info: Option<MeshFormatHeader> = None;
     let mut points: Vec<[f64; 3]> = Vec::new();
@@ -225,8 +250,7 @@ pub fn read_msh(bytes: &[u8]) -> Result<UnstructuredGrid, IoError> {
     let mut offsets: Vec<u32> = Vec::new();
     let mut connectivity: Vec<u32> = Vec::new();
     let mut elem_tag_to_idx: HashMap<u64, usize> = HashMap::new();
-    let mut point_data_arrays: Vec<(String, DataArray)> = Vec::new();
-    let mut cell_data_arrays: Vec<(String, DataArray)> = Vec::new();
+    let mut data_sections: Vec<ModelDataSectionSpan> = Vec::new();
 
     let mut saw_nodes = false;
     let mut saw_elements = false;
@@ -289,13 +313,8 @@ pub fn read_msh(bytes: &[u8]) -> Result<UnstructuredGrid, IoError> {
                         reason: "`$NodeData` appeared before `$Nodes`".to_string(),
                     });
                 }
-                let (name, array) =
-                    parse_model_data(&mut reader, hdr, "$EndNodeData", points.len(), |tag| {
-                        node_tag_to_idx.get(&tag).map(|&idx| idx as usize)
-                    })?;
-                if !point_data_arrays.iter().any(|(n, _)| n == &name) {
-                    point_data_arrays.push((name, array));
-                }
+                let span = parse_model_data_span(&mut reader, hdr, true)?;
+                data_sections.push(span);
             }
             "$ElementData" => {
                 let hdr = format_info.ok_or(IoError::InvalidMshStructure {
@@ -308,16 +327,8 @@ pub fn read_msh(bytes: &[u8]) -> Result<UnstructuredGrid, IoError> {
                         reason: "`$ElementData` appeared before `$Elements`".to_string(),
                     });
                 }
-                let (name, array) = parse_model_data(
-                    &mut reader,
-                    hdr,
-                    "$EndElementData",
-                    cell_types.len(),
-                    |tag| elem_tag_to_idx.get(&tag).copied(),
-                )?;
-                if !cell_data_arrays.iter().any(|(n, _)| n == &name) {
-                    cell_data_arrays.push((name, array));
-                }
+                let span = parse_model_data_span(&mut reader, hdr, false)?;
+                data_sections.push(span);
             }
             other_section => {
                 let section_name = &other_section[1..];
@@ -327,12 +338,12 @@ pub fn read_msh(bytes: &[u8]) -> Result<UnstructuredGrid, IoError> {
         }
     }
 
-    if format_info.is_none() {
+    let Some(hdr) = format_info else {
         return Err(IoError::InvalidMshStructure {
             offset: 0,
             reason: "missing `$MeshFormat` section".to_string(),
         });
-    }
+    };
     if !saw_nodes {
         return Err(IoError::InvalidMshStructure {
             offset: reader.pos as u64,
@@ -346,14 +357,98 @@ pub fn read_msh(bytes: &[u8]) -> Result<UnstructuredGrid, IoError> {
         });
     }
 
-    let mut grid = UnstructuredGrid::new(points, cell_types, offsets, connectivity, None)?;
-    for (name, arr) in point_data_arrays {
-        grid.insert_point_data(name, arr)?;
+    let base_grid = Arc::new(UnstructuredGrid::new(
+        points,
+        cell_types,
+        offsets,
+        connectivity,
+        None,
+    )?);
+
+    if data_sections.is_empty() {
+        return Ok(TimeSeries::from_single_shared_grid(0.0, base_grid)?);
     }
-    for (name, arr) in cell_data_arrays {
-        grid.insert_cell_data(name, arr)?;
+
+    // Group sections by their declared `step_index` (integer_tags[0]) in ascending order.
+    let mut steps_map: BTreeMap<i64, (f64, Vec<ModelDataSectionSpan>)> = BTreeMap::new();
+    let mut field_occurrence_counts: HashMap<(bool, String), usize> = HashMap::new();
+    for span in &data_sections {
+        *field_occurrence_counts
+            .entry((span.is_node_data, span.field_name.clone()))
+            .or_insert(0) += 1;
+        let entry = steps_map
+            .entry(span.step_index)
+            .or_insert_with(|| (span.time_value, Vec::new()));
+        entry.1.push(span.clone());
     }
-    Ok(grid)
+
+    // Any field that appears only once in a multi-step file is treated as a static field
+    // carried across all steps unless overridden at that step.
+    let static_sections: Vec<ModelDataSectionSpan> = if steps_map.len() > 1 {
+        data_sections
+            .iter()
+            .filter(|s| {
+                field_occurrence_counts
+                    .get(&(s.is_node_data, s.field_name.clone()))
+                    .copied()
+                    == Some(1)
+            })
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let shared_node_map = Arc::new(node_tag_to_idx);
+    let shared_elem_map = Arc::new(elem_tag_to_idx);
+
+    let mut boxed_steps: Vec<(f64, StepLoader<IoError>)> = Vec::with_capacity(steps_map.len());
+    for (_step_id, (time_val, mut step_spans)) in steps_map {
+        for static_span in &static_sections {
+            let already_present = step_spans.iter().any(|s| {
+                s.is_node_data == static_span.is_node_data && s.field_name == static_span.field_name
+            });
+            if !already_present {
+                step_spans.push(static_span.clone());
+            }
+        }
+
+        let bytes_ref = Arc::clone(&shared_bytes);
+        let grid_template = Arc::clone(&base_grid);
+        let node_map_ref = Arc::clone(&shared_node_map);
+        let elem_map_ref = Arc::clone(&shared_elem_map);
+
+        let loader: StepLoader<IoError> = Arc::new(move || {
+            let mut grid = (*grid_template).clone();
+            let num_pts = grid.num_points();
+            let num_cells = grid.num_cells();
+
+            for span in &step_spans {
+                if span.is_node_data {
+                    if grid.point_data().get(&span.field_name).is_some() {
+                        continue;
+                    }
+                    let arr = decode_model_data_payload(&bytes_ref, hdr, span, num_pts, |tag| {
+                        node_map_ref.get(&tag).map(|&idx| idx as usize)
+                    })?;
+                    grid.insert_point_data(span.field_name.clone(), arr)?;
+                } else {
+                    if grid.cell_data().get(&span.field_name).is_some() {
+                        continue;
+                    }
+                    let arr = decode_model_data_payload(&bytes_ref, hdr, span, num_cells, |tag| {
+                        elem_map_ref.get(&tag).copied()
+                    })?;
+                    grid.insert_cell_data(span.field_name.clone(), arr)?;
+                }
+            }
+            Ok(grid)
+        });
+
+        boxed_steps.push((time_val, loader));
+    }
+
+    Ok(TimeSeries::from_boxed_steps(boxed_steps)?)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1083,20 +1178,27 @@ fn append_permuted_element(
     Ok(())
 }
 
-fn parse_model_data<F>(
+#[derive(Debug, Clone)]
+struct ModelDataSectionSpan {
+    is_node_data: bool,
+    field_name: String,
+    time_value: f64,
+    step_index: i64,
+    comp_count: ComponentCount,
+    num_entries: usize,
+    payload_start: usize,
+    section_end: usize,
+}
+
+fn parse_model_data_span(
     reader: &mut MshCursor<'_>,
     hdr: MeshFormatHeader,
-    end_marker: &str,
-    target_tuples: usize,
-    resolve_tag: F,
-) -> Result<(String, DataArray), IoError>
-where
-    F: Fn(u64) -> Option<usize>,
-{
-    let section_name = if end_marker == "$EndNodeData" {
-        "$NodeData"
+    is_node_data: bool,
+) -> Result<ModelDataSectionSpan, IoError> {
+    let (section_name, end_marker) = if is_node_data {
+        ("$NodeData", "$EndNodeData")
     } else {
-        "$ElementData"
+        ("$ElementData", "$EndElementData")
     };
 
     let (off_s, num_str_line) = reader.read_line_required(section_name)?;
@@ -1131,9 +1233,13 @@ where
             reason: format!("excessive real tag count {num_real_tags} in `{section_name}`"),
         });
     }
-    for _ in 0..num_real_tags {
+    let mut time_value = 0.0;
+    for i in 0..num_real_tags {
         let (r_off, r_line) = reader.read_line_required(section_name)?;
-        let _ = parse_f64(r_line.trim(), section_name, r_off)?;
+        let val = parse_f64(r_line.trim(), section_name, r_off)?;
+        if i == 0 {
+            time_value = val;
+        }
     }
 
     let (off_i, num_int_line) = reader.read_line_required(section_name)?;
@@ -1152,6 +1258,7 @@ where
         int_tags.push(parse_i64(i_line.trim(), section_name, i_off)?);
     }
 
+    let step_index = int_tags[0];
     let num_comp_i64 = int_tags[1];
     let num_entries_i64 = int_tags[2];
     if num_comp_i64 <= 0 || num_entries_i64 < 0 {
@@ -1166,14 +1273,7 @@ where
     let num_entries = num_entries_i64 as usize;
     let comp_count = ComponentCount::try_from(num_comp)?;
 
-    let total_values = target_tuples
-        .checked_mul(num_comp)
-        .ok_or(IoError::InvalidMshStructure {
-            offset: off_i as u64,
-            reason: format!("value count overflow in `{section_name}`"),
-        })?;
-    let mut values = vec![0.0f64; total_values];
-
+    let payload_start = reader.pos;
     if hdr.is_binary {
         let bytes_per_entry = 4usize
             .checked_add(
@@ -1196,31 +1296,10 @@ where
                 ),
             });
         }
-
-        for _ in 0..num_entries {
-            let rec_off = reader.pos;
-            let tag_i32 = reader.read_i32(hdr.byte_order, &field_name)?;
-            if tag_i32 <= 0 {
-                return Err(IoError::InvalidMshStructure {
-                    offset: rec_off as u64,
-                    reason: format!(
-                        "non-positive tag {tag_i32} in `{section_name}` `{field_name}`"
-                    ),
-                });
-            }
-            let tuple_idx =
-                resolve_tag(tag_i32 as u64).ok_or_else(|| IoError::InvalidMshStructure {
-                    offset: rec_off as u64,
-                    reason: format!(
-                        "`{section_name}` `{field_name}` references unknown tag {tag_i32}"
-                    ),
-                })?;
-            let base = tuple_idx * num_comp;
-            for c in 0..num_comp {
-                values[base + c] = reader.read_f64(hdr.byte_order, &field_name)?;
-            }
-        }
+        let payload_bytes = num_entries * bytes_per_entry;
+        reader.pos += payload_bytes;
         reader.skip_optional_line_ending();
+        reader.expect_end_marker(end_marker)?;
     } else {
         if num_entries > reader.remaining() / 2 {
             return Err(IoError::InvalidMshStructure {
@@ -1230,24 +1309,98 @@ where
                 ),
             });
         }
-        let mut tok = AsciiSectionTokens::new(reader, &field_name, end_marker);
-        for _ in 0..num_entries {
+        skip_until_end_marker(reader, end_marker, payload_start)?;
+    }
+    let section_end = reader.pos;
+
+    Ok(ModelDataSectionSpan {
+        is_node_data,
+        field_name,
+        time_value,
+        step_index,
+        comp_count,
+        num_entries,
+        payload_start,
+        section_end,
+    })
+}
+
+fn decode_model_data_payload<F>(
+    bytes: &[u8],
+    hdr: MeshFormatHeader,
+    span: &ModelDataSectionSpan,
+    target_tuples: usize,
+    resolve_tag: F,
+) -> Result<DataArray, IoError>
+where
+    F: Fn(u64) -> Option<usize>,
+{
+    let (section_name, end_marker) = if span.is_node_data {
+        ("$NodeData", "$EndNodeData")
+    } else {
+        ("$ElementData", "$EndElementData")
+    };
+    let num_comp = span.comp_count.as_usize();
+    let total_values = target_tuples
+        .checked_mul(num_comp)
+        .ok_or(IoError::InvalidMshStructure {
+            offset: span.payload_start as u64,
+            reason: format!("value count overflow in `{section_name}`"),
+        })?;
+    let mut values = vec![0.0f64; total_values];
+
+    let mut sub_reader = MshCursor {
+        bytes: &bytes[..span.section_end],
+        pos: span.payload_start,
+    };
+
+    if hdr.is_binary {
+        for _ in 0..span.num_entries {
+            let rec_off = sub_reader.pos;
+            let tag_i32 = sub_reader.read_i32(hdr.byte_order, &span.field_name)?;
+            if tag_i32 <= 0 {
+                return Err(IoError::InvalidMshStructure {
+                    offset: rec_off as u64,
+                    reason: format!(
+                        "non-positive tag {tag_i32} in `{section_name}` `{}`",
+                        span.field_name
+                    ),
+                });
+            }
+            let tuple_idx =
+                resolve_tag(tag_i32 as u64).ok_or_else(|| IoError::InvalidMshStructure {
+                    offset: rec_off as u64,
+                    reason: format!(
+                        "`{section_name}` `{}` references unknown tag {tag_i32}",
+                        span.field_name
+                    ),
+                })?;
+            let base = tuple_idx * num_comp;
+            for c in 0..num_comp {
+                values[base + c] = sub_reader.read_f64(hdr.byte_order, &span.field_name)?;
+            }
+        }
+    } else {
+        let mut tok = AsciiSectionTokens::new(&mut sub_reader, &span.field_name, end_marker);
+        for _ in 0..span.num_entries {
             let rec_off = tok.pos();
             let tag = tok.next_u64()?;
             let tuple_idx = resolve_tag(tag).ok_or_else(|| IoError::InvalidMshStructure {
                 offset: rec_off as u64,
-                reason: format!("`{section_name}` `{field_name}` references unknown tag {tag}"),
+                reason: format!(
+                    "`{section_name}` `{}` references unknown tag {tag}",
+                    span.field_name
+                ),
             })?;
             let base = tuple_idx * num_comp;
             for c in 0..num_comp {
                 values[base + c] = tok.next_f64()?;
             }
         }
+        sub_reader.expect_end_marker(end_marker)?;
     }
 
-    reader.expect_end_marker(end_marker)?;
-    let array = DataArray::from_f64(comp_count, values)?;
-    Ok((field_name, array))
+    Ok(DataArray::from_f64(span.comp_count, values)?)
 }
 
 fn skip_until_end_marker(

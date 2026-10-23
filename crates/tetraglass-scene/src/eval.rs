@@ -12,14 +12,15 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use tetraglass_core::{
-    ArrayBuffer, Attributes, BoundingBox, SurfaceMesh, UnstructuredGrid, ValueRange,
+    ArrayBuffer, Attributes, BoundingBox, SurfaceMesh, TimeSeries, UnstructuredGrid, ValueRange,
 };
 use tetraglass_filters::extract_external_surface;
+use tetraglass_io::IoError;
 
 use crate::{
     ArrayAssociation, ColorbarSpec, ColormapName, DatasetMetadata, Filter, ParsedArrayRef,
-    RangeSpec, Representation, RepresentationStyle, ResolvedComponent, Scene, SceneError,
-    validate_scene_with_metadata,
+    RangePreset, RangeSpec, Representation, RepresentationStyle, ResolvedComponent, Scene,
+    SceneError, TimeSelector, ValidationIssue, ValidationReport, validate_scene_with_metadata,
 };
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
@@ -255,6 +256,10 @@ pub struct EvaluatedScene {
     pub representations: Vec<EvaluatedRepresentation>,
     /// Combined world-space bounding box framed by `scene.view.camera.fit`.
     pub camera_bounds: Option<BoundingBox>,
+    /// Resolved zero-based time step index (`0` for static single-step datasets).
+    pub time_step: usize,
+    /// Resolved simulation time value (`0.0` for static single-step datasets).
+    pub time_value: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -264,7 +269,7 @@ struct LoadedSource {
     metadata: DatasetMetadata,
 }
 
-/// Lazy scene pipeline evaluator with input-hash caching (`M1.3`).
+/// Lazy scene pipeline evaluator with input-hash caching (`M1.3`, `M1.7`).
 ///
 /// Tracks `filter_executions` and `cache_hits` so callers and tests can verify that
 /// changing view-only settings (`colormap`, `camera`, `range`, `background`, `output`)
@@ -272,6 +277,7 @@ struct LoadedSource {
 #[derive(Debug, Default)]
 pub struct SceneEvaluator {
     sources: BTreeMap<String, LoadedSource>,
+    series_sources: BTreeMap<String, TimeSeries<IoError>>,
     surface_cache: HashMap<PipelineHash, Arc<SurfaceMesh>>,
     filter_executions: usize,
     cache_hits: usize,
@@ -302,14 +308,41 @@ impl SceneEvaluator {
     /// Inserts or replaces a named source [`Arc<UnstructuredGrid>`].
     pub fn insert_shared_source(&mut self, name: impl Into<String>, grid: Arc<UnstructuredGrid>) {
         let name = name.into();
+        self.series_sources.remove(&name);
+        self.insert_shared_source_with_time_steps(name, grid, Vec::new());
+    }
+
+    /// Inserts or replaces a named lazy [`TimeSeries`] source (`M1.7`).
+    ///
+    /// No step is parsed when this method is called; the active step is resolved and
+    /// loaded lazily during [`Self::evaluate_scene`] or [`Self::evaluate_scene_at_time`].
+    pub fn insert_series_source(&mut self, name: impl Into<String>, series: TimeSeries<IoError>) {
+        let name = name.into();
+        self.sources.remove(&name);
+        self.series_sources.insert(name, series);
+    }
+
+    /// Returns a reference to a registered [`TimeSeries`] source by name, if present.
+    #[must_use]
+    pub fn series_source(&self, name: &str) -> Option<&TimeSeries<IoError>> {
+        self.series_sources.get(name)
+    }
+
+    fn insert_shared_source_with_time_steps(
+        &mut self,
+        name: String,
+        grid: Arc<UnstructuredGrid>,
+        time_steps: Vec<f64>,
+    ) {
         // Fast path: if the exact same Arc is already stored for this source name, keep its hash.
         if let Some(existing) = self.sources.get(&name)
             && Arc::ptr_eq(&existing.grid, &grid)
+            && existing.metadata.time_steps == time_steps
         {
             return;
         }
         let content_hash = hash_unstructured_grid(&grid);
-        let metadata = DatasetMetadata::from_grid(&grid);
+        let metadata = DatasetMetadata::from_grid(&grid).with_time_steps(time_steps);
         self.sources.insert(
             name,
             LoadedSource {
@@ -322,6 +355,7 @@ impl SceneEvaluator {
 
     /// Removes a loaded source by name, returning its [`Arc<UnstructuredGrid>`] if present.
     pub fn remove_source(&mut self, name: &str) -> Option<Arc<UnstructuredGrid>> {
+        self.series_sources.remove(name);
         self.sources.remove(name).map(|s| s.grid)
     }
 
@@ -436,12 +470,70 @@ impl SceneEvaluator {
         Ok(surface)
     }
 
-    /// Validates `scene` against the loaded sources and lazily evaluates all visible
-    /// representations and camera bounds.
+    /// Validates `scene` against the loaded sources (resolving any [`TimeSeries`] sources at
+    /// `scene.output.time`, defaulting to [`TimeSelector::FIRST`]) and lazily evaluates all
+    /// visible representations and camera bounds.
     ///
     /// Filters in `scene.filters` that are not referenced by any visible representation
     /// in `scene.view.show` (or by `scene.view.camera.fit`) are never executed.
     pub fn evaluate_scene(&mut self, scene: &Scene) -> Result<EvaluatedScene, SceneError> {
+        let time_selector = scene
+            .output
+            .as_ref()
+            .map_or(TimeSelector::FIRST, |o| o.time);
+        self.evaluate_scene_at_time(scene, time_selector)
+    }
+
+    /// Evaluates `scene` at an explicit [`TimeSelector`], lazily loading only the resolved
+    /// time step from any registered [`TimeSeries`] sources (`M1.7`).
+    pub fn evaluate_scene_at_time(
+        &mut self,
+        scene: &Scene,
+        time_selector: TimeSelector,
+    ) -> Result<EvaluatedScene, SceneError> {
+        let mut resolved_step = 0usize;
+        let mut resolved_time = 0.0f64;
+
+        // Materialize the requested step for each registered TimeSeries source referenced by `scene`.
+        let series_names: Vec<String> = self.series_sources.keys().cloned().collect();
+        for name in series_names {
+            if !scene.sources.contains_key(&name) {
+                continue;
+            }
+            let (grid, times, step_idx, step_time) = {
+                let series = self.series_sources.get(&name).expect("series exists");
+                let times = series.times().to_vec();
+                match time_selector.resolve_step(&times) {
+                    Ok((idx, t)) => {
+                        let grid = series.step(idx)?;
+                        (grid, times, idx, t)
+                    }
+                    Err(err_msg) => {
+                        let path = match time_selector {
+                            TimeSelector::Step(_) => "output.time.step",
+                            _ => "output.time",
+                        };
+                        let suggestion = Some(format!(
+                            "use \"first\", \"last\", a step in 0..={}, or a time in [{}, {}]",
+                            times.len().saturating_sub(1),
+                            times.first().copied().unwrap_or(0.0),
+                            times.last().copied().unwrap_or(0.0)
+                        ));
+                        return Err(SceneError::Validation(ValidationReport {
+                            issues: vec![ValidationIssue::new(
+                                path,
+                                format!("on source \"{name}\": {err_msg}"),
+                                suggestion,
+                            )],
+                        }));
+                    }
+                }
+            };
+            resolved_step = step_idx;
+            resolved_time = step_time;
+            self.insert_shared_source_with_time_steps(name, grid, times);
+        }
+
         let metadata_map: BTreeMap<String, DatasetMetadata> = self
             .sources
             .iter()
@@ -466,7 +558,9 @@ impl SceneEvaluator {
 
             let color = rep.color.resolve_rgb().unwrap_or([0.827, 0.827, 0.827]);
             let edge_color = rep.edge_color.resolve_rgb().unwrap_or([0.0, 0.0, 0.0]);
-            let coloring = resolve_representation_coloring(rep, &surface)?;
+            let root_series = find_root_source_name(&rep.input, scene)
+                .and_then(|src_name| self.series_sources.get(src_name));
+            let coloring = resolve_representation_coloring(rep, &surface, root_series)?;
 
             representations.push(EvaluatedRepresentation {
                 representation_index: idx,
@@ -511,8 +605,22 @@ impl SceneEvaluator {
         Ok(EvaluatedScene {
             representations,
             camera_bounds,
+            time_step: resolved_step,
+            time_value: resolved_time,
         })
     }
+}
+
+fn find_root_source_name<'a>(dataset_name: &'a str, scene: &'a Scene) -> Option<&'a str> {
+    let mut current = dataset_name;
+    for _ in 0..=scene.filters.len() {
+        if scene.sources.contains_key(current) {
+            return Some(current);
+        }
+        let filter = scene.filters.get(current)?;
+        current = filter.input();
+    }
+    None
 }
 
 fn union_bounds(a: BoundingBox, b: BoundingBox) -> BoundingBox {
@@ -533,6 +641,7 @@ fn union_bounds(a: BoundingBox, b: BoundingBox) -> BoundingBox {
 fn resolve_representation_coloring(
     rep: &Representation,
     surface: &SurfaceMesh,
+    root_series: Option<&TimeSeries<IoError>>,
 ) -> Result<Option<EvaluatedColoring>, SceneError> {
     let Some(raw_ref) = &rep.color_by else {
         return Ok(None);
@@ -591,7 +700,35 @@ fn resolve_representation_coloring(
     .unwrap_or(ValueRange { min: 0.0, max: 0.0 });
 
     let effective_range = match rep.range {
-        RangeSpec::Preset(_) => [data_range.min, data_range.max],
+        RangeSpec::Preset(RangePreset::Auto) => [data_range.min, data_range.max],
+        RangeSpec::Preset(RangePreset::AutoAllSteps) => {
+            if let Some(series) = root_series
+                && series.len() > 1
+            {
+                let mut min_v = data_range.min;
+                let mut max_v = data_range.max;
+                for step_idx in 0..series.len() {
+                    let step_grid = series.step(step_idx)?;
+                    let step_arr = match association {
+                        ArrayAssociation::Point => step_grid.point_data().get(&parsed.name),
+                        ArrayAssociation::Cell => step_grid.cell_data().get(&parsed.name),
+                    };
+                    if let Some(arr) = step_arr {
+                        let r = match component {
+                            ResolvedComponent::Magnitude => arr.magnitude_range(),
+                            ResolvedComponent::Component(idx) => arr.component_range(idx),
+                        };
+                        if let Some(r) = r {
+                            min_v = min_v.min(r.min);
+                            max_v = max_v.max(r.max);
+                        }
+                    }
+                }
+                [min_v, max_v]
+            } else {
+                [data_range.min, data_range.max]
+            }
+        }
         RangeSpec::Bounds(bounds) => bounds,
     };
 

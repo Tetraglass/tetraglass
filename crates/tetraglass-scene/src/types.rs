@@ -766,6 +766,55 @@ impl TimeSelector {
     pub const fn step(step: usize) -> Self {
         Self::Step(TimeStepIndex { step })
     }
+
+    /// Resolves this [`TimeSelector`] against a slice of available simulation time steps,
+    /// returning `(step_index, time_value)` on success or a descriptive error message.
+    pub fn resolve_step(self, times: &[f64]) -> Result<(usize, f64), String> {
+        if times.is_empty() {
+            return Err("time series contains no time steps".to_string());
+        }
+        match self {
+            Self::Preset(TimePreset::First) => Ok((0, times[0])),
+            Self::Preset(TimePreset::Last) => {
+                let last = times.len() - 1;
+                Ok((last, times[last]))
+            }
+            Self::Step(TimeStepIndex { step }) => {
+                if let Some(&t) = times.get(step) {
+                    Ok((step, t))
+                } else {
+                    Err(format!(
+                        "step index {step} is out of bounds (available steps: 0..={})",
+                        times.len() - 1
+                    ))
+                }
+            }
+            Self::Value(target) => {
+                if !target.is_finite() {
+                    return Err("output time value must be a finite number".to_string());
+                }
+                let mut min_t = f64::INFINITY;
+                let mut max_t = f64::NEG_INFINITY;
+                let mut best_idx = 0;
+                let mut best_diff = f64::INFINITY;
+                for (idx, &t) in times.iter().enumerate() {
+                    min_t = min_t.min(t);
+                    max_t = max_t.max(t);
+                    let diff = (t - target).abs();
+                    if diff < best_diff {
+                        best_diff = diff;
+                        best_idx = idx;
+                    }
+                }
+                if target < min_t - 1e-9 || target > max_t + 1e-9 {
+                    return Err(format!(
+                        "time {target} is outside the available time range [{min_t}, {max_t}]"
+                    ));
+                }
+                Ok((best_idx, times[best_idx]))
+            }
+        }
+    }
 }
 
 /// Animation frame range configuration (`output.frames`, M4).

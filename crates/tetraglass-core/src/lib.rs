@@ -9,12 +9,14 @@ mod array;
 mod cell;
 mod error;
 mod grid;
+mod series;
 mod surface;
 
 pub use array::{ArrayBuffer, Attributes, ComponentCount, DataArray, ScalarType, ValueRange};
 pub use cell::{CellType, PolyhedronFaceIter, PolyhedronFaces};
 pub use error::{CoreError, try_u32_from_i64, try_u32_from_u64, try_u32_from_usize};
 pub use grid::{BoundingBox, UnstructuredGrid};
+pub use series::{DEFAULT_STEP_CACHE_CAPACITY, StepLoader, TimeSeries};
 pub use surface::SurfaceMesh;
 
 #[cfg(test)]
@@ -370,6 +372,69 @@ mod tests {
                 name: "bad".to_string(),
                 expected: 4,
                 actual: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn time_series_loads_lazily_and_evicts_lru_steps() {
+        let series: TimeSeries<CoreError> = TimeSeries::from_steps((0..4).map(|i| {
+            let t = f64::from(i) * 0.5;
+            (t, move || {
+                let mut g = UnstructuredGrid::new(
+                    sample_tet_points(),
+                    vec![CellType::Tetra],
+                    vec![4],
+                    vec![0, 1, 2, 3],
+                    None,
+                )?;
+                let arr = DataArray::from_f64(ComponentCount::Scalar, vec![t; 4])?;
+                g.insert_point_data("transient", arr)?;
+                Ok(g)
+            })
+        }))
+        .unwrap()
+        .with_cache_capacity(2);
+
+        assert_eq!(series.len(), 4);
+        assert_eq!(series.times(), &[0.0, 0.5, 1.0, 1.5]);
+        assert_eq!(series.time_bounds(), [0.0, 1.5]);
+        assert_eq!(series.nearest_step_for_time(0.9), 2);
+        assert_eq!(series.load_executions(), 0);
+        assert_eq!(series.cached_step_count(), 0);
+
+        // Request step 2 first: only step 2 is parsed.
+        let s2 = series.step(2).unwrap();
+        assert_eq!(series.load_executions(), 1);
+        assert_eq!(series.cache_hits(), 0);
+        assert!(series.is_step_cached(2));
+        assert!(!series.is_step_cached(0));
+        assert_eq!(
+            s2.point_data().get("transient").unwrap().value_as_f64(0, 0),
+            Some(1.0)
+        );
+
+        // Request step 2 again: served from cache without re-running loader.
+        let s2_again = series.step(2).unwrap();
+        assert!(Arc::ptr_eq(&s2, &s2_again));
+        assert_eq!(series.load_executions(), 1);
+        assert_eq!(series.cache_hits(), 1);
+
+        // Load step 0, then step 3 -> capacity is 2, so step 2 (oldest) is evicted.
+        let _ = series.step(0).unwrap();
+        assert_eq!(series.cached_step_count(), 2);
+        let _ = series.step(3).unwrap();
+        assert_eq!(series.cached_step_count(), 2);
+        assert!(!series.is_step_cached(2));
+        assert!(series.is_step_cached(0));
+        assert!(series.is_step_cached(3));
+
+        // Out-of-bounds step returns TimeStepOutOfBounds
+        assert_eq!(
+            series.step(99),
+            Err(CoreError::TimeStepOutOfBounds {
+                step_index: 99,
+                num_steps: 4,
             })
         );
     }

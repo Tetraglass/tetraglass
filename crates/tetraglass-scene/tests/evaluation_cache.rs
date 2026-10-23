@@ -3,10 +3,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tetraglass_io::read_vtu_from_path;
+use tetraglass_io::{read_pvd_series_from_path, read_vtu_from_path};
 use tetraglass_scene::{
-    ArrayAssociation, BackgroundSpec, ColorSpec, ColormapName, LightingPreset, RangeSpec,
-    ResolvedComponent, Scene, SceneEvaluator, VectorAxis, hash_unstructured_grid,
+    ArrayAssociation, BackgroundSpec, ColorSpec, ColormapName, LightingPreset, RangePreset,
+    RangeSpec, ResolvedComponent, Scene, SceneEvaluator, TimeSelector, VectorAxis,
+    hash_unstructured_grid,
 };
 
 fn testdata_vtu(name: &str) -> PathBuf {
@@ -261,4 +262,102 @@ fn content_hash_is_deterministic_and_invalidates_on_data_change() {
     let eval_hex = evaluator.evaluate_scene(&scene).unwrap();
     assert_eq!(evaluator.filter_executions(), 2);
     assert_eq!(eval_hex.representations[0].surface.num_faces(), 24);
+}
+
+#[test]
+fn time_series_scene_evaluation_loads_steps_lazily_and_supports_auto_all_steps_range() {
+    let pvd_path = testdata_vtu("series.pvd");
+    let series = read_pvd_series_from_path(&pvd_path).expect("parse series.pvd");
+    assert_eq!(series.load_executions(), 0);
+
+    let mut evaluator = SceneEvaluator::new();
+    evaluator.insert_series_source("series", series);
+
+    let mut scene = Scene::from_json_str(
+        r#"{
+            "version": 1,
+            "sources": {
+                "series": { "file": "testdata/vtk/series.pvd" }
+            },
+            "view": {
+                "show": [
+                    {
+                        "input": "series",
+                        "color_by": "transient",
+                        "range": "auto"
+                    }
+                ]
+            },
+            "output": {
+                "image": "out.png",
+                "time": "first"
+            }
+        }"#,
+    )
+    .unwrap();
+
+    // 1. Evaluate at "first" (step 0, t = 0.0). Only step 0 should be loaded.
+    let eval_first = evaluator.evaluate_scene(&scene).expect("evaluate at first");
+    assert_eq!(eval_first.time_step, 0);
+    assert_eq!(eval_first.time_value, 0.0);
+    assert_eq!(
+        evaluator.series_source("series").unwrap().load_executions(),
+        1
+    );
+    let col_first = eval_first.representations[0].coloring.as_ref().unwrap();
+    assert!(
+        (col_first.effective_range[0] - 0.0).abs() < 1e-12
+            && (col_first.effective_range[1] - 6.0).abs() < 1e-12
+    );
+
+    // 2. Evaluate at "last" (step 2, t = 1.0). Step 1 is skipped; only step 2 is loaded.
+    scene.output.as_mut().unwrap().time = TimeSelector::LAST;
+    let eval_last = evaluator.evaluate_scene(&scene).expect("evaluate at last");
+    assert_eq!(eval_last.time_step, 2);
+    assert_eq!(eval_last.time_value, 1.0);
+    let series_ref = evaluator.series_source("series").unwrap();
+    assert_eq!(series_ref.load_executions(), 2);
+    assert!(series_ref.is_step_cached(0));
+    assert!(!series_ref.is_step_cached(1));
+    assert!(series_ref.is_step_cached(2));
+    let col_last = eval_last.representations[0].coloring.as_ref().unwrap();
+    assert!(
+        (col_last.effective_range[0] - 1.0).abs() < 1e-12
+            && (col_last.effective_range[1] - 7.0).abs() < 1e-12
+    );
+
+    // 3. Evaluate at explicit time value 0.5 (step 1) and then step index { "step": 1 } (cached).
+    scene.output.as_mut().unwrap().time = TimeSelector::Value(0.5);
+    let eval_mid = evaluator
+        .evaluate_scene(&scene)
+        .expect("evaluate at t = 0.5");
+    assert_eq!(eval_mid.time_step, 1);
+    assert_eq!(eval_mid.time_value, 0.5);
+    assert_eq!(
+        evaluator.series_source("series").unwrap().load_executions(),
+        3
+    );
+
+    let eval_step1 = evaluator
+        .evaluate_scene_at_time(&scene, TimeSelector::step(1))
+        .expect("evaluate at step 1");
+    assert_eq!(eval_step1.time_step, 1);
+    assert_eq!(
+        evaluator.series_source("series").unwrap().load_executions(),
+        3
+    );
+
+    // 4. Evaluate with `range: "auto_all_steps"` at step 0 -> range spans [0.0, 7.0] across steps 0..=2.
+    scene.output.as_mut().unwrap().time = TimeSelector::FIRST;
+    scene.view.show[0].range = RangeSpec::Preset(RangePreset::AutoAllSteps);
+    let eval_all_range = evaluator
+        .evaluate_scene(&scene)
+        .expect("evaluate with auto_all_steps");
+    let col_all = eval_all_range.representations[0].coloring.as_ref().unwrap();
+    assert!(
+        (col_all.effective_range[0] - 0.0).abs() < 1e-12
+            && (col_all.effective_range[1] - 7.0).abs() < 1e-12,
+        "expected [0.0, 7.0] across all steps, got {:?}",
+        col_all.effective_range
+    );
 }

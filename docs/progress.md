@@ -138,3 +138,14 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-009 and D-018).
 - Dependencies added: none.
 - Follow-ups: M1.7 Time series (`.pvd` collections and multi-step Gmsh files as lazy time series; `"time"` in the scene output).
+
+## 2026-10-23: M1.7 Time series
+- Done: implemented lazy time-series storage and evaluation across `tetraglass-core`, `tetraglass-io`, `tetraglass-scene`, and `tetraglass-cli`:
+  - `tetraglass-core`: added `TimeSeries<E>`, `StepLoader<E>`, and `DEFAULT_STEP_CACHE_CAPACITY` (`4`) with lazy per-step loader closures, bounded LRU step cache eviction, `load_executions()` / `cache_hits()` counters, and time resolution helpers.
+  - `tetraglass-io`: added ParaView `.pvd` collection reader (`PvdEntry`, `parse_pvd_entries`, `read_pvd_series_with_loader`, `read_pvd_series_from_path`, `read_pvd_from_path`), multi-step Gmsh `.msh` lazy series reader (`read_msh_series`, `read_msh_series_from_path`) that scans `$NodeData`/`$ElementData` headers and decodes per-step payloads only on demand, and unified series helpers (`read_vtu_series`, `read_series_from_path`).
+  - `tetraglass-scene`: added `TimeSelector::resolve_step`, `DatasetMetadata::time_steps` validation for `output.time`, `SceneEvaluator::insert_series_source` / `evaluate_scene_at_time`, `EvaluatedScene::time_step` / `time_value`, and `RangePreset::AutoAllSteps` (`"auto_all_steps"`) scalar range evaluation across all steps.
+  - `tetraglass-cli`: wired `.pvd` and multi-step `.msh` lazy series into `inspect` (populating `time_steps`), `validate` (checking `output.time`), and `render` (selecting the step requested by `output.time` and reporting `time_step` and `time` in `RenderSummary`).
+- Tests: unit test `time_series_loads_lazily_and_evicts_lru_steps` in `tetraglass-core`; integration tests in `crates/tetraglass-io/tests/time_series.rs` (proving lazy `.vtu` loading for `testdata/vtk/series.pvd`, lazy ASCII/binary step decoding for multi-step `.msh`, and `.pvd` truncation/corruption handling), `crates/tetraglass-scene/tests/evaluation_cache.rs` (testing `"first"`, `"last"`, `0.5`, `{ "step": 1 }`, and `"auto_all_steps"`), and `crates/tetraglass-cli/tests/cli.rs` (`inspect --json` and `render` on `series.pvd`).
+- Decisions: none (implemented per D-004, `docs/scene-format.md`, and `.agents/skills/add-reader/SKILL.md`).
+- Dependencies added: none.
+- Follow-ups: M1.8 Viewer v0 (eframe desktop app: open a scene, hot reload on file change, time slider, field and colormap pickers).

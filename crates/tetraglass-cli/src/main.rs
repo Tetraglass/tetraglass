@@ -9,9 +9,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use serde::{Deserialize, Serialize};
-use tetraglass_core::{Attributes, BoundingBox, CellType, ScalarType, UnstructuredGrid};
+use tetraglass_core::{
+    Attributes, BoundingBox, CellType, ScalarType, TimeSeries, UnstructuredGrid,
+};
 use tetraglass_io::{
-    MeshFormat, detect_format_from_bytes, detect_format_from_extension, read_msh, read_vtu,
+    IoError, MeshFormat, detect_format_from_bytes, detect_format_from_extension, read_msh_series,
+    read_pvd_series_with_loader, read_vtu_series,
 };
 use tetraglass_render::{
     Annotations, Camera, ColorBy, ColorbarAnnotation, ColorbarPlacement, ColormapKind,
@@ -172,8 +175,16 @@ fn cmd_inspect(args: &[String]) -> Result<String, CliFailure> {
     };
 
     let path = Path::new(file_path_str);
-    let (format, grid) = load_mesh_from_path(path, None)?;
-    let summary = build_inspect_summary(file_path_str, format, &grid);
+    let (format, series) = load_series_from_path(path, None)?;
+    let grid = series
+        .step(0)
+        .map_err(|e| CliFailure::Message(format!("failed to load `{}`: {e}", path.display())))?;
+    let time_steps = if format == MeshFormat::Pvd || series.len() > 1 {
+        series.times().to_vec()
+    } else {
+        Vec::new()
+    };
+    let summary = build_inspect_summary(file_path_str, format, &grid, time_steps);
 
     if json_flag {
         serde_json::to_string_pretty(&summary).map_err(|e| CliFailure::Message(e.to_string()))
@@ -186,6 +197,7 @@ fn build_inspect_summary(
     file: &str,
     format: MeshFormat,
     grid: &UnstructuredGrid,
+    time_steps: Vec<f64>,
 ) -> InspectSummary {
     let mut cell_types: BTreeMap<String, usize> = BTreeMap::new();
     for &ct in grid.cell_types() {
@@ -206,7 +218,7 @@ fn build_inspect_summary(
         cell_types,
         point_arrays: summarize_attributes(grid.point_data()),
         cell_arrays: summarize_attributes(grid.cell_data()),
-        time_steps: Vec::new(),
+        time_steps,
     }
 }
 
@@ -427,10 +439,21 @@ fn cmd_validate(args: &[String]) -> Result<String, CliFailure> {
     for (name, source) in &scene.sources {
         let resolved_path = resolve_relative_path(base_dir, &source.file);
         let explicit_format = source.format.map(MeshFormat::from);
-        match load_mesh_from_path(&resolved_path, explicit_format) {
-            Ok((_, grid)) => {
-                metadata_map.insert(name.clone(), DatasetMetadata::from_grid(&grid));
-            }
+        match load_series_from_path(&resolved_path, explicit_format) {
+            Ok((_, series)) => match series.step(0) {
+                Ok(grid) => {
+                    let meta =
+                        DatasetMetadata::from_grid(&grid).with_time_steps(series.times().to_vec());
+                    metadata_map.insert(name.clone(), meta);
+                }
+                Err(e) => {
+                    io_issues.push(ValidationIssue::new(
+                        format!("sources.{name}.file"),
+                        format!("failed to load `{}`: {e}", resolved_path.display()),
+                        None,
+                    ));
+                }
+            },
             Err(CliFailure::Message(msg)) => {
                 io_issues.push(ValidationIssue::new(
                     format!("sources.{name}.file"),
@@ -528,6 +551,8 @@ struct RenderSummary {
     size: [u32; 2],
     msaa: u32,
     engine: RenderEngine,
+    time_step: usize,
+    time: f64,
     representations: Vec<RenderRepresentationSummary>,
     camera: RenderCameraSummary,
 }
@@ -639,13 +664,13 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
         ));
     }
 
-    // Load all sources referenced in the scene.
+    // Load all sources referenced in the scene as lazy TimeSeries.
     let mut evaluator = SceneEvaluator::new();
     for (name, source) in &scene.sources {
         let resolved_path = resolve_relative_path(base_dir, &source.file);
         let explicit_format = source.format.map(MeshFormat::from);
-        let (_, grid) = load_mesh_from_path(&resolved_path, explicit_format)?;
-        evaluator.insert_source(name.clone(), grid);
+        let (_, series) = load_series_from_path(&resolved_path, explicit_format)?;
+        evaluator.insert_series_source(name.clone(), series);
     }
 
     let evaluated = evaluator
@@ -726,6 +751,8 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
         size,
         msaa,
         engine,
+        time_step: evaluated.time_step,
+        time: evaluated.time_value,
         representations: rep_summaries,
         camera: RenderCameraSummary {
             fit: scene.view.camera.fit.clone(),
@@ -880,10 +907,10 @@ fn resolve_relative_path(base_dir: &Path, file: &str) -> PathBuf {
     }
 }
 
-fn load_mesh_from_path(
+fn load_series_from_path(
     path: &Path,
     explicit_format: Option<MeshFormat>,
-) -> Result<(MeshFormat, UnstructuredGrid), CliFailure> {
+) -> Result<(MeshFormat, TimeSeries<IoError>), CliFailure> {
     let bytes = std::fs::read(path)
         .map_err(|e| CliFailure::Message(format!("cannot read `{}`: {e}", path.display())))?;
     let format = explicit_format
@@ -902,16 +929,30 @@ fn load_mesh_from_path(
 
     match format {
         MeshFormat::Vtu => {
-            let grid = read_vtu(&bytes).map_err(|e| {
+            let series = read_vtu_series(bytes).map_err(|e| {
                 CliFailure::Message(format!("failed to parse `{}`: {e}", path.display()))
             })?;
-            Ok((format, grid))
+            Ok((format, series))
         }
         MeshFormat::Gmsh => {
-            let grid = read_msh(&bytes).map_err(|e| {
+            let series = read_msh_series(bytes).map_err(|e| {
                 CliFailure::Message(format!("failed to parse `{}`: {e}", path.display()))
             })?;
-            Ok((format, grid))
+            Ok((format, series))
+        }
+        MeshFormat::Pvd => {
+            let base_dir = path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf();
+            let series = read_pvd_series_with_loader(&bytes, move |rel_file| {
+                let step_path = resolve_relative_path(&base_dir, rel_file);
+                Ok(std::fs::read(step_path)?)
+            })
+            .map_err(|e| {
+                CliFailure::Message(format!("failed to parse `{}`: {e}", path.display()))
+            })?;
+            Ok((format, series))
         }
         other => Err(CliFailure::Message(format!(
             "format `{}` is not yet supported in this milestone (`{}`)",

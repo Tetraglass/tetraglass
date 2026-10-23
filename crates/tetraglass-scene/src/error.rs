@@ -21,6 +21,21 @@ pub enum SceneError {
     #[error("filter evaluation error: {0}")]
     Filter(#[from] tetraglass_filters::FilterError),
 
+    /// Error returned by core grid or time-series validation.
+    #[error("core error: {0}")]
+    Core(#[from] tetraglass_core::CoreError),
+
+    /// Error returned when lazily loading a time-series step from `tetraglass-io`.
+    #[error("mesh I/O error: {0}")]
+    MeshIo(#[from] tetraglass_io::IoError),
+
+    /// Invalid time step or time value selection during scene evaluation.
+    #[error("invalid time selection: {reason}")]
+    InvalidTimeSelection {
+        /// Explanation of why the time selection failed.
+        reason: String,
+    },
+
     /// Referenced source or filter dataset was not found during evaluation.
     #[error("unknown or unloaded dataset `{name}`")]
     MissingDataset {

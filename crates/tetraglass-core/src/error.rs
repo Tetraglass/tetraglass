@@ -154,6 +154,26 @@ pub enum CoreError {
         /// Actual number of tuples in the provided `DataArray`.
         actual: usize,
     },
+
+    /// A [`crate::TimeSeries`] was constructed with zero steps.
+    #[error("time series must contain at least one time step")]
+    EmptyTimeSeries,
+
+    /// A time step in a [`crate::TimeSeries`] had a non-finite (`NaN` or infinite) time value.
+    #[error("time step {step_index} has a non-finite time value")]
+    InvalidTimeValue {
+        /// Zero-based index of the offending time step.
+        step_index: usize,
+    },
+
+    /// A requested time step index exceeded the number of steps in the [`crate::TimeSeries`].
+    #[error("time step index {step_index} is out of bounds for series of length {num_steps}")]
+    TimeStepOutOfBounds {
+        /// Requested zero-based step index.
+        step_index: usize,
+        /// Total number of steps in the series.
+        num_steps: usize,
+    },
 }
 
 /// Converts a `u64` index to `u32`, returning [`CoreError::IndexOverflow`] if it exceeds `u32::MAX`.

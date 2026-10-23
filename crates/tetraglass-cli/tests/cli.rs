@@ -108,6 +108,26 @@ fn inspect_command_outputs_text_and_json() {
     assert_eq!(msh_val["cell_types"]["quadratic_tetra"], 6);
     assert_eq!(msh_val["point_arrays"].as_array().unwrap().len(), 3);
     assert_eq!(msh_val["cell_arrays"].as_array().unwrap().len(), 1);
+
+    // 4. Structured `--json` output on a ParaView `.pvd` time series (`M1.7`)
+    let pvd_path = workspace_root().join("testdata/vtk/series.pvd");
+    let pvd_out = tetraglass_bin()
+        .arg("inspect")
+        .arg(&pvd_path)
+        .arg("--json")
+        .output()
+        .expect("run `tetraglass inspect --json` on .pvd");
+    assert!(
+        pvd_out.status.success(),
+        "inspect .pvd failed: {}",
+        String::from_utf8_lossy(&pvd_out.stderr)
+    );
+    let pvd_val: serde_json::Value =
+        serde_json::from_slice(&pvd_out.stdout).expect("parse pvd inspect JSON");
+    assert_eq!(pvd_val["format"], "pvd");
+    assert_eq!(pvd_val["num_points"], 8);
+    assert_eq!(pvd_val["num_cells"], 6);
+    assert_eq!(pvd_val["time_steps"], serde_json::json!([0.0, 0.5, 1.0]));
 }
 
 #[test]
@@ -365,4 +385,58 @@ fn render_command_writes_png_and_prints_json_summary() {
         "expected annotations (title, colorbar, axes) to add > 4000 foreground pixels, got {}",
         cmp_vs_unannotated.differing_pixels
     );
+
+    // Render a `.pvd` time-series scene at `"time": "last"` (`t = 1.0`) and verify the summary (`M1.7`).
+    let pvd_abs = root.join("testdata/vtk/series.pvd");
+    let pvd_scene_path = test_dir.join("cli_series_pvd_scene.json");
+    let pvd_png_path = test_dir.join("cli_series_pvd_last.png");
+    let _ = std::fs::remove_file(&pvd_png_path);
+
+    let pvd_scene_json = serde_json::json!({
+        "version": 1,
+        "sources": {
+            "series": { "file": pvd_abs.display().to_string() }
+        },
+        "view": {
+            "show": [
+                {
+                    "input": "series",
+                    "color_by": "transient",
+                    "colormap": "viridis"
+                }
+            ]
+        },
+        "output": {
+            "image": "series_last.png",
+            "size": [400, 300],
+            "time": "last"
+        }
+    });
+    std::fs::write(
+        &pvd_scene_path,
+        serde_json::to_string_pretty(&pvd_scene_json).unwrap(),
+    )
+    .unwrap();
+
+    let pvd_render_out = tetraglass_bin()
+        .arg("render")
+        .arg(&pvd_scene_path)
+        .arg("-o")
+        .arg(&pvd_png_path)
+        .output()
+        .expect("run `tetraglass render` on pvd series");
+    assert!(
+        pvd_render_out.status.success(),
+        "`tetraglass render` on pvd failed: {}",
+        String::from_utf8_lossy(&pvd_render_out.stderr)
+    );
+    let pvd_summary: serde_json::Value =
+        serde_json::from_slice(&pvd_render_out.stdout).expect("parse pvd render summary");
+    assert_eq!(pvd_summary["time_step"], 2);
+    assert_eq!(pvd_summary["time"], 1.0);
+    assert_eq!(
+        pvd_summary["representations"][0]["data_range"],
+        serde_json::json!([1.0, 7.0])
+    );
+    assert!(pvd_png_path.exists());
 }

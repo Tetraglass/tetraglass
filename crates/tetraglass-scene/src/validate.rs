@@ -55,13 +55,15 @@ impl ArrayMetadata {
     }
 }
 
-/// Summary of point and cell attribute arrays on a dataset used for scene validation.
+/// Summary of point and cell attribute arrays and time steps on a dataset used for scene validation.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DatasetMetadata {
     /// Point attribute arrays keyed by name.
     pub point_arrays: BTreeMap<String, ArrayMetadata>,
     /// Cell attribute arrays keyed by name.
     pub cell_arrays: BTreeMap<String, ArrayMetadata>,
+    /// Available simulation time steps when the dataset is a time series (empty if unspecified).
+    pub time_steps: Vec<f64>,
 }
 
 impl DatasetMetadata {
@@ -77,6 +79,13 @@ impl DatasetMetadata {
         Self::from_attributes(surface.point_data(), surface.cell_data())
     }
 
+    /// Attaches the available simulation time steps to this [`DatasetMetadata`].
+    #[must_use]
+    pub fn with_time_steps(mut self, time_steps: Vec<f64>) -> Self {
+        self.time_steps = time_steps;
+        self
+    }
+
     fn from_attributes(point_data: &Attributes, cell_data: &Attributes) -> Self {
         let point_arrays = point_data
             .iter()
@@ -89,6 +98,7 @@ impl DatasetMetadata {
         Self {
             point_arrays,
             cell_arrays,
+            time_steps: Vec::new(),
         }
     }
 
@@ -615,6 +625,30 @@ fn validate_impl(
                 "output time value must be a finite number",
                 None,
             ));
+        } else if let Some(loaded) = loaded_sources {
+            for (src_name, meta) in loaded {
+                if !scene.sources.contains_key(src_name) || meta.time_steps.is_empty() {
+                    continue;
+                }
+                if let Err(err_msg) = output.time.resolve_step(&meta.time_steps) {
+                    let path = match output.time {
+                        TimeSelector::Step(_) => "output.time.step",
+                        _ => "output.time",
+                    };
+                    let suggestion = Some(format!(
+                        "use \"first\", \"last\", a step in 0..={}, or a time in [{}, {}]",
+                        meta.time_steps.len().saturating_sub(1),
+                        meta.time_steps.first().copied().unwrap_or(0.0),
+                        meta.time_steps.last().copied().unwrap_or(0.0)
+                    ));
+                    issues.push(ValidationIssue::new(
+                        path,
+                        format!("on source \"{src_name}\": {err_msg}"),
+                        suggestion,
+                    ));
+                    break;
+                }
+            }
         }
 
         if let Some(frames) = &output.frames {
