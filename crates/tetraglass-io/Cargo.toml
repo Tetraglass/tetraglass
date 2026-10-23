@@ -1,0 +1,15 @@
+[package]
+name = "tetraglass-io"
+description = "Readers and writers for VTK and Gmsh files, working on byte buffers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tetraglass-core.workspace = true

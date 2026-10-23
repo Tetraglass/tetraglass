@@ -2,7 +2,7 @@
 
 Milestones run in order. `/next-task` picks the first unticked task of the first unfinished milestone. Each task should fit one or two evening sessions; split bigger ones into lettered sub-tasks (M2.3a, M2.3b) before starting. Dates are estimates at roughly 8 to 10 hours a week.
 
-Status: **M0 not started.**
+Status: **M0 in progress.**
 
 ---
 
@@ -10,7 +10,7 @@ Status: **M0 not started.**
 
 **Gate:** a .vtu file renders colored by a field, both inside an egui app and to a PNG.
 
-- [ ] **M0.1 Bootstrap.** Confirm the `tetraglass-*` crate names are still free, then create the workspace, xtask, CI and license policy (`/bootstrap-workspace`). Reserving the names on crates.io is the developer's step. *Done when:* `cargo xtask verify` passes locally and in CI.
+- [x] **M0.1 Bootstrap.** Confirm the `tetraglass-*` crate names are still free, then create the workspace, xtask, CI and license policy (`/bootstrap-workspace`). Reserving the names on crates.io is the developer's step. *Done when:* `cargo xtask verify` passes locally and in CI.
 - [ ] **M0.2 Test data v1.** Generate the required set in `/make-test-data`. *Done when:* every file listed there exists, with scripts and `testdata/README.md`.
 - [ ] **M0.3 Reader evaluation.** Try vtkio on every `.vtu` test file and mshio on every `.msh` file. Record what loads, what fails (higher-order, polyhedra, appended or compressed data, `$NodeData`), and decide reuse or own reader. *Done when:* a decision entry exists in `docs/decisions.md` and the open question is closed.
 - [ ] **M0.4 Core types.** `UnstructuredGrid` (points, cell types, offsets, connectivity, polyhedron face streams), `CellType` including Lagrange order, typed `DataArray` with components and `Arc` storage, point and cell attributes, bounds and cached ranges. *Done when:* unit tests cover construction, validation of inconsistent input, and range computation. Confirms D-013 (u32 indices).

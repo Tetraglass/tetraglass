@@ -1,0 +1,15 @@
+[package]
+name = "tetraglass-filters"
+description = "Linearization, surface extraction and visualization filters on tetrahedral views."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tetraglass-core.workspace = true

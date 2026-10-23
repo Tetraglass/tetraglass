@@ -1,0 +1,18 @@
+[package]
+name = "tetraglass-render"
+description = "wgpu renderer drawing into host-provided textures, plus a headless helper."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+tetraglass-core.workspace = true
+tetraglass-scene.workspace = true
+wgpu.workspace = true

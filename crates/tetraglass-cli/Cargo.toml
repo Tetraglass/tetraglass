@@ -1,0 +1,24 @@
+[package]
+name = "tetraglass-cli"
+description = "Command-line tool: inspect, render, validate, schema, view, export."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "tetraglass"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+tetraglass-core.workspace = true
+tetraglass-egui.workspace = true
+tetraglass-filters.workspace = true
+tetraglass-io.workspace = true
+tetraglass-render.workspace = true
+tetraglass-scene.workspace = true
