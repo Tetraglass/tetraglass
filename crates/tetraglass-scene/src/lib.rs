@@ -39,6 +39,7 @@
 mod array_ref;
 mod error;
 mod types;
+mod validate;
 
 pub use array_ref::{
     ArrayAssociation, ComponentSelector, ParsedArrayRef, ResolvedComponent, TensorComponent,
@@ -52,6 +53,10 @@ pub use types::{
     Filter, FramesConfig, LightingPreset, Output, ProjectionKind, RangePreset, RangeSpec,
     RenderEngine, Representation, RepresentationStyle, SCENE_VERSION, Scene, Source, SourceFormat,
     TimePreset, TimeSelector, TimeStepIndex, View,
+};
+pub use validate::{
+    ArrayMetadata, DatasetMetadata, ValidationIssue, ValidationReport, closest_match,
+    damerau_levenshtein, validate_scene, validate_scene_structure, validate_scene_with_metadata,
 };
 
 /// Generates the authoritative JSON Schema for [`Scene`] (used by `tetraglass schema`).

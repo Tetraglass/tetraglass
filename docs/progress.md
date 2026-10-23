@@ -97,3 +97,10 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-004, `docs/scene-format.md`, and `.agents/rules/scene-schema.md`).
 - Dependencies added: `serde` (1.0.229 with `derive`), `serde_json` (1.0.154), and `schemars` (1.2.3) in `[workspace.dependencies]` and `tetraglass-scene`; linked existing workspace dependency `thiserror` into `tetraglass-scene`.
 - Follow-ups: M1.2 Validation (semantic validation against loaded data, errors with JSON paths and edit-distance suggestions).
+
+## 2026-10-23: M1.2 Validation
+- Done: implemented semantic scene validation in `tetraglass-scene` (`validate_scene`, `validate_scene_structure`, `validate_scene_with_metadata`, `Scene::validate`, `Scene::validate_structure`, `Scene::validate_with_metadata`, `DatasetMetadata`, `ArrayMetadata`, `ValidationIssue`, `ValidationReport`, `closest_match`, `damerau_levenshtein`) checking schema version, `snake_case` naming, source format inference, filter graph existence and acyclicity, representation parameters, CSS/RGB colors, camera framing/angles, `log_scale` positivity, and array/association/component validity against loaded datasets with JSON paths and edit-distance suggestions.
+- Tests: `crates/tetraglass-scene/tests/validation.rs` covering valid scenes with `testdata/vtk/mixed_linear.vtu`, array typo suggestions (`"presure"` -> `"pressure"`), association disambiguation (`"point:cell_id"` -> `"cell:cell_id"`), invalid scalar/vector component selectors, filter cycles, `snake_case` name suggestions, color name suggestions, `log_scale` range checks, camera/output bounds, and Damerau-Levenshtein transpositions.
+- Decisions: none (implemented per `docs/scene-format.md` and `.agents/rules/scene-schema.md`).
+- Dependencies added: none (implemented Damerau-Levenshtein edit distance in-house per `.agents/rules/dependencies.md`).
+- Follow-ups: M1.3 Evaluation and cache (lazy pipeline evaluation cached by input hash; colormap or camera changes never re-run filters).

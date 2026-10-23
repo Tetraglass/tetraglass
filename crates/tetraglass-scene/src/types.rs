@@ -83,6 +83,27 @@ impl Scene {
         let bytes = std::fs::read(path)?;
         Self::from_json_bytes(&bytes)
     }
+
+    /// Validates this [`Scene`] structurally (without requiring loaded mesh data).
+    pub fn validate_structure(&self) -> Result<(), crate::ValidationReport> {
+        crate::validate_scene_structure(self)
+    }
+
+    /// Validates this [`Scene`] both structurally and semantically against loaded source [`tetraglass_core::UnstructuredGrid`]s.
+    pub fn validate(
+        &self,
+        sources: &BTreeMap<String, tetraglass_core::UnstructuredGrid>,
+    ) -> Result<(), crate::ValidationReport> {
+        crate::validate_scene(self, sources)
+    }
+
+    /// Validates this [`Scene`] against pre-extracted [`crate::DatasetMetadata`] for each source.
+    pub fn validate_with_metadata(
+        &self,
+        sources: &BTreeMap<String, crate::DatasetMetadata>,
+    ) -> Result<(), crate::ValidationReport> {
+        crate::validate_scene_with_metadata(self, sources)
+    }
 }
 
 /// A named input dataset read from a mesh file (`sources.<name>`).
