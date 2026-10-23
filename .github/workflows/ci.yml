@@ -28,3 +28,12 @@ jobs:
           tool: cargo-deny
       - name: Verify
         run: cargo xtask verify
+      - name: Upload render test outputs and diffs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: render-tests
+          path: |
+            target/render-tests/*.png
+            target/render-diffs/*.png
+          if-no-files-found: ignore

@@ -25,7 +25,7 @@ tetraglass-egui = { path = "crates/tetraglass-egui", version = "0.0.0" }
 # External crates: add each version once here, then use `name.workspace = true`.
 base64 = "0.22"
 bytemuck = { version = "1", features = ["derive"] }
-eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "default_fonts"] }
+eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "default_fonts", "x11"] }
 egui = "0.37.0"
 egui-wgpu = "0.37.0"
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }

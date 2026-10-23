@@ -254,23 +254,39 @@ pub struct HeadlessContext {
 
 impl HeadlessContext {
     /// Initializes a headless `wgpu` adapter, device, and queue using WebGPU default limits.
+    ///
+    /// Respects standard `wgpu` environment variables (`WGPU_BACKEND`, `WGPU_ADAPTER_NAME`)
+    /// as well as `TETRAGLASS_FORCE_FALLBACK_ADAPTER=1` to explicitly select software adapters
+    /// such as Mesa `lavapipe`.
     pub fn new() -> Result<Self, RenderError> {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
 
-        let adapter = match block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: None,
-            ..Default::default()
-        })) {
-            Ok(adapter) => adapter,
-            Err(_) => block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        let force_fallback = std::env::var("TETRAGLASS_FORCE_FALLBACK_ADAPTER")
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+
+        let adapter = if force_fallback {
+            block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::None,
                 force_fallback_adapter: true,
                 compatible_surface: None,
                 ..Default::default()
-            }))?,
+            }))?
+        } else {
+            match block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: None,
+                ..Default::default()
+            })) {
+                Ok(adapter) => adapter,
+                Err(_) => block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::None,
+                    force_fallback_adapter: true,
+                    compatible_surface: None,
+                    ..Default::default()
+                }))?,
+            }
         };
 
         let adapter_info = adapter.get_info();

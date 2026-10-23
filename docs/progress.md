@@ -75,3 +75,10 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-003 and `.agents/rules/rendering.md`).
 - Dependencies added: `eframe` (0.37.0 with `wgpu` and `default_fonts`, matching `egui 0.37.0` / `egui-wgpu 0.37.0` / `wgpu 30.0.1`, used as a dev-dependency for `examples/egui_viewport.rs`); linked existing workspace dependencies `tetraglass-core` and `log` into `tetraglass-egui`.
 - Follow-ups: M0.9 CI rendering (run render integration tests on Mesa lavapipe in CI and store the first baseline image).
+
+## 2026-10-23: M0.9 CI rendering
+- Done: committed initial baseline images (`tests/baselines/mixed_linear_linear.png` and `tests/baselines/mixed_linear_cell_id.png`), made baseline comparison mandatory in `crates/tetraglass-render/tests/render_mixed_linear.rs`, added `TETRAGLASS_FORCE_FALLBACK_ADAPTER=1` support in `HeadlessContext::new()`, enabled `x11` on `eframe` so Linux CI builds all targets cleanly, and configured `.github/workflows/ci.yml` to upload `target/render-tests/` and `target/render-diffs/` artifacts on every run.
+- Tests: `crates/tetraglass-render/tests/render_mixed_linear.rs` verifying both point-colored (`linear`) and cell-colored (`cell_id`) renders against `tests/baselines/` on CI (`lavapipe`) and locally.
+- Decisions: none (implemented per `.agents/rules/testing.md` and `/render-check`).
+- Dependencies added: enabled `x11` feature on existing `eframe 0.37.0` dev-dependency for Linux `winit` compilation.
+- Follow-ups: M0.10 Milestone gate (`/milestone-gate`).

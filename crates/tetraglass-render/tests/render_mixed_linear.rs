@@ -1,6 +1,6 @@
 //! Headless rendering integration tests for `tetraglass-render` (M0.7).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tetraglass_filters::extract_external_surface;
 use tetraglass_io::read_vtu_from_path;
@@ -15,6 +15,33 @@ fn workspace_root() -> PathBuf {
         .and_then(|p| p.parent())
         .expect("workspace root")
         .to_path_buf()
+}
+
+fn assert_matches_baseline(root: &Path, file_name: &str, image: &RenderedImage) {
+    let baseline_path = root.join("tests/baselines").join(file_name);
+    assert!(
+        baseline_path.exists(),
+        "missing baseline image at {}",
+        baseline_path.display()
+    );
+    let baseline = RenderedImage::load_png(&baseline_path).expect("load baseline PNG");
+    let cmp = image
+        .compare_with_baseline(&baseline)
+        .expect("compare with baseline");
+    if !cmp.passed {
+        let diff_path = root.join("target/render-diffs").join(file_name);
+        cmp.diff_image
+            .save_png(&diff_path)
+            .expect("write diff image");
+        panic!(
+            "{file_name} differed from baseline in {} / {} pixels ({:.3}%, max channel diff {}), diff written to {}",
+            cmp.differing_pixels,
+            cmp.total_pixels,
+            cmp.diff_fraction * 100.0,
+            cmp.max_channel_diff,
+            diff_path.display()
+        );
+    }
 }
 
 #[test]
@@ -110,29 +137,6 @@ fn render_mixed_linear_colored_by_linear_and_cell_id() {
     assert_eq!(cmp_self.differing_pixels, 0);
     assert_eq!(cmp_self.max_channel_diff, 0);
 
-    // Optional baseline comparison when `tests/baselines/mixed_linear_linear.png` is present (M0.9).
-    let baseline_path = root.join("tests/baselines/mixed_linear_linear.png");
-    if baseline_path.exists() {
-        let baseline = RenderedImage::load_png(&baseline_path).expect("load baseline PNG");
-        let cmp = image
-            .compare_with_baseline(&baseline)
-            .expect("compare with baseline");
-        if !cmp.passed {
-            let diff_path = root.join("target/render-diffs/mixed_linear_linear.png");
-            cmp.diff_image
-                .save_png(&diff_path)
-                .expect("write diff image");
-            panic!(
-                "mixed_linear_linear.png differed from baseline in {} / {} pixels ({:.3}%, max channel diff {}), diff written to {}",
-                cmp.differing_pixels,
-                cmp.total_pixels,
-                cmp.diff_fraction * 100.0,
-                cmp.max_channel_diff,
-                diff_path.display()
-            );
-        }
-    }
-
     // Also test flat cell-data rendering (`cell_id`) and style switching on an existing GpuSurface.
     let renderer =
         Renderer::new(ctx.device(), ctx.queue(), DEFAULT_COLOR_FORMAT, 4).expect("create renderer");
@@ -182,6 +186,10 @@ fn render_mixed_linear_colored_by_linear_and_cell_id() {
         cmp_point_vs_cell.differing_pixels > 5000,
         "expected cell_id rendering to differ from point linear rendering"
     );
+
+    // Compare both rendered images against the committed baselines in `tests/baselines/`.
+    assert_matches_baseline(&root, "mixed_linear_linear.png", &image);
+    assert_matches_baseline(&root, "mixed_linear_cell_id.png", &cell_image);
 }
 
 #[test]
