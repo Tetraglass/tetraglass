@@ -16,9 +16,12 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
 tetraglass-core.workspace = true
 tetraglass-egui.workspace = true
 tetraglass-filters.workspace = true
 tetraglass-io.workspace = true
 tetraglass-render.workspace = true
 tetraglass-scene.workspace = true
+thiserror.workspace = true

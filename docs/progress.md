@@ -111,3 +111,16 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-004 and `docs/design-plan.md`).
 - Dependencies added: none.
 - Follow-ups: M1.4 CLI (`inspect`, `render`, `validate`, `schema` in `tetraglass-cli`, plus a snapshot test of the schema output).
+
+
+## 2026-10-23: M1.4 CLI
+
+- Implemented the `tetraglass` command-line binary in `crates/tetraglass-cli/src/main.rs` supporting four commands:
+  - `tetraglass schema`: prints the JSON Schema for scene format v1 to stdout.
+  - `tetraglass inspect <file> [--json]`: loads a `.vtu` mesh and prints bounds, point/cell counts, cell-type histogram, and point/cell array metadata (component count, data type, value range) in human-readable text or structured JSON (`InspectSummary`).
+  - `tetraglass validate <scene.json> [--json]`: parses and semantically validates a scene against its referenced source files relative to the scene directory, reporting JSON paths, messages, and edit-distance suggestions in text or JSON (`ValidationReport`), exiting with code `1` on errors.
+  - `tetraglass render <scene.json> [-o <out.png>] [--engine <raster|cycles>]`: validates and evaluates a scene via `SceneEvaluator`, converts the evaluated representation to a `SurfaceMesh`, maps the scene camera (`orbit` / `look_at`, `auto_fit`), background color, MSAA sample count, and output dimensions to `tetraglass-render`'s `HeadlessRenderer`, writes the PNG image, and emits a JSON summary (`RenderSummary`) to stdout.
+- Committed the authoritative v1 scene JSON Schema snapshot in `crates/tetraglass-cli/tests/snapshots/scene-v1.schema.json`.
+- Tests added: integration test suite in `crates/tetraglass-cli/tests/cli.rs` covering `schema` snapshot comparison, `inspect` (text and `--json`), `validate` (valid and invalid scenes, text and `--json`), and `render` (verifying JSON summary output and comparing the rendered `800x600` PNG against `tests/baselines/mixed_linear_linear.png`).
+- Decisions / dependencies: linked workspace dependencies `serde`, `serde_json`, and `thiserror` into `tetraglass-cli`.
+- Follow-ups: M1.5 Annotations (colorbar with tick labels, title text, and axes triad drawn by the renderer with a pure-Rust font rasterizer).

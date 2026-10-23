@@ -1,0 +1,791 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Scene",
+  "description": "Top-level declarative scene description (`docs/scene-format.md`, version 1).\n\nEvery frontend (JSON files, the CLI, the desktop/web viewer, and the Rust builder API)\nproduces and consumes this type.",
+  "type": "object",
+  "properties": {
+    "filters": {
+      "description": "Named derived datasets produced by visualization filters. Keys must be lowercase\n`snake_case` and unique across `sources` and `filters`.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Filter"
+      },
+      "default": {}
+    },
+    "output": {
+      "description": "Headless image output configuration (required by `tetraglass render`, optional for interactive viewing).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Output"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "sources": {
+      "description": "Named input datasets read from mesh files. Keys must be lowercase `snake_case`\nand unique across `sources` and `filters`.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Source"
+      }
+    },
+    "version": {
+      "description": "Schema version number (must be `1` for v1 scenes).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "view": {
+      "description": "Viewport configuration: visible representations, camera, lighting, background and annotations.",
+      "$ref": "#/$defs/View"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "sources",
+    "view"
+  ],
+  "$defs": {
+    "BackgroundGradient": {
+      "description": "Vertical top-to-bottom background color gradient (`{ \"top\": ..., \"bottom\": ... }`).",
+      "type": "object",
+      "properties": {
+        "bottom": {
+          "description": "Color at the bottom edge of the viewport.",
+          "$ref": "#/$defs/ColorSpec"
+        },
+        "top": {
+          "description": "Color at the top edge of the viewport.",
+          "$ref": "#/$defs/ColorSpec"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "top",
+        "bottom"
+      ]
+    },
+    "BackgroundSpec": {
+      "description": "Viewport background specification (`view.background`): a solid [`ColorSpec`] (default: `\"white\"`)\nor a vertical [`BackgroundGradient`].",
+      "anyOf": [
+        {
+          "description": "Solid background color.",
+          "$ref": "#/$defs/ColorSpec"
+        },
+        {
+          "description": "Vertical top-to-bottom color gradient.",
+          "$ref": "#/$defs/BackgroundGradient"
+        }
+      ]
+    },
+    "CameraConfig": {
+      "description": "Camera configuration in `view.camera` (`docs/scene-format.md`).",
+      "type": "object",
+      "properties": {
+        "azimuth": {
+          "description": "Horizontal orbit angle in degrees around the focal point, applied after fitting (default: `0.0`).",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "elevation": {
+          "description": "Vertical elevation angle in degrees around the focal point, applied after fitting (default: `0.0`).",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "fit": {
+          "description": "Target bounds to frame: `\"all\"` (default) or the name of a specific source or filter.\nIgnored when [`Self::position`] is explicitly provided.",
+          "type": "string",
+          "default": "all"
+        },
+        "focal_point": {
+          "description": "Explicit world-space focal point `[x, y, z]`. Defaults to the fitted bounds center when omitted.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "position": {
+          "description": "Explicit world-space camera eye position `[x, y, z]`. Overrides `fit`, angles, and `zoom`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "projection": {
+          "description": "Camera projection mode: `\"perspective\"` (default) or `\"orthographic\"`.",
+          "$ref": "#/$defs/ProjectionKind",
+          "default": "perspective"
+        },
+        "roll": {
+          "description": "Roll angle in degrees around the viewing direction, applied after fitting (default: `0.0`).",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "view_angle": {
+          "description": "Vertical field-of-view angle in degrees for perspective projection (default: `30.0`).",
+          "type": "number",
+          "format": "double",
+          "default": 30.0
+        },
+        "view_up": {
+          "description": "Explicit world-space up vector `[x, y, z]`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "zoom": {
+          "description": "Zoom factor applied after fitting; values greater than `1.0` move closer (default: `1.0`).",
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ColorSpec": {
+      "description": "A color specification: either a CSS color name (such as `\"white\"` or `\"lightgray\"`)\nor a linear `[r, g, b]` triple with components in `0.0..=1.0`.",
+      "anyOf": [
+        {
+          "description": "Named CSS color (for example `\"white\"`, `\"black\"`, `\"lightgray\"`, `\"red\"`, `\"steelblue\"`).",
+          "type": "string"
+        },
+        {
+          "description": "Explicit `[r, g, b]` color with each channel in `0.0..=1.0`.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        }
+      ]
+    },
+    "ColorbarOptions": {
+      "description": "Detailed colorbar options (`{ \"title\": \"...\", \"position\": \"right\" }`).",
+      "type": "object",
+      "properties": {
+        "position": {
+          "description": "Placement of the colorbar in the viewport (default: `\"right\"`).",
+          "$ref": "#/$defs/ColorbarPosition",
+          "default": "right"
+        },
+        "title": {
+          "description": "Optional title label displayed on the colorbar (defaults to the array name when omitted).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "ColorbarPosition": {
+      "description": "Placement of a colorbar legend inside the viewport.",
+      "oneOf": [
+        {
+          "description": "Vertical colorbar on the right edge of the viewport (default).",
+          "type": "string",
+          "const": "right"
+        },
+        {
+          "description": "Vertical colorbar on the left edge of the viewport.",
+          "type": "string",
+          "const": "left"
+        },
+        {
+          "description": "Horizontal colorbar along the bottom edge of the viewport.",
+          "type": "string",
+          "const": "bottom"
+        },
+        {
+          "description": "Horizontal colorbar along the top edge of the viewport.",
+          "type": "string",
+          "const": "top"
+        }
+      ]
+    },
+    "ColorbarSpec": {
+      "description": "Colorbar setting on a [`Representation`]: `false` (default), `true`, or [`ColorbarOptions`].",
+      "anyOf": [
+        {
+          "description": "Simple boolean toggle (`true` or `false`).",
+          "type": "boolean"
+        },
+        {
+          "description": "Enabled colorbar with custom title or position.",
+          "$ref": "#/$defs/ColorbarOptions"
+        }
+      ]
+    },
+    "ColormapName": {
+      "description": "Built-in colormap names (`docs/scene-format.md`).",
+      "oneOf": [
+        {
+          "description": "Perceptually uniform sequential blue-green-yellow colormap (default).",
+          "type": "string",
+          "const": "viridis"
+        },
+        {
+          "description": "Perceptually uniform, color-vision-deficiency-friendly blue-yellow colormap.",
+          "type": "string",
+          "const": "cividis"
+        },
+        {
+          "description": "Diverging blue-white-red colormap (`\"cool_warm\"`).",
+          "type": "string",
+          "const": "cool_warm"
+        },
+        {
+          "description": "High-contrast rainbow-like sequential colormap (`\"turbo\"`).",
+          "type": "string",
+          "const": "turbo"
+        },
+        {
+          "description": "Linear black-to-white grayscale ramp (`\"grayscale\"`).",
+          "type": "string",
+          "const": "grayscale"
+        }
+      ]
+    },
+    "CyclesConfig": {
+      "description": "Blender Cycles ray-tracing options (`output.cycles`, M3).",
+      "type": "object",
+      "properties": {
+        "device": {
+          "description": "Compute device selection (for example `\"auto\"`, `\"cpu\"`, `\"gpu\"`, default: `\"auto\"`).",
+          "type": "string",
+          "default": "auto"
+        },
+        "samples": {
+          "description": "Path-tracing sample count per pixel (default: `128`).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 128,
+          "minimum": 0
+        },
+        "save_blend": {
+          "description": "Optional `.blend` output path to save the constructed Blender scene alongside rendering.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "Filter": {
+      "description": "Visualization filter definition (`filters.<name>`).\n\nInternally tagged by `\"type\"`. Milestone M1 implements the `\"surface\"` filter;\n`\"slice\"`, `\"contour\"`, `\"clip\"`, and `\"threshold\"` arrive in M2, and\n`\"streamlines\"`, `\"glyphs\"`, and `\"resample\"` arrive in M4.",
+      "oneOf": [
+        {
+          "description": "Extracts the external boundary surface of the input dataset.",
+          "type": "object",
+          "properties": {
+            "input": {
+              "description": "Name of the input source or filter.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "surface"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "input"
+          ]
+        }
+      ]
+    },
+    "FramesConfig": {
+      "description": "Animation frame range configuration (`output.frames`, M4).",
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "Starting time step or time value.",
+          "$ref": "#/$defs/TimeSelector"
+        },
+        "pattern": {
+          "description": "Output filename pattern (for example `\"frame_%04d.png\"`).",
+          "type": "string"
+        },
+        "to": {
+          "description": "Ending time step or time value.",
+          "$ref": "#/$defs/TimeSelector"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to",
+        "pattern"
+      ]
+    },
+    "LightingPreset": {
+      "description": "Lighting rig preset for `view.lights`.",
+      "oneOf": [
+        {
+          "description": "Headlight plus key and fill lights (default).",
+          "type": "string",
+          "const": "default"
+        },
+        {
+          "description": "Single camera-attached headlight.",
+          "type": "string",
+          "const": "headlight"
+        }
+      ]
+    },
+    "Output": {
+      "description": "Headless render output settings (`output` section in `docs/scene-format.md`).",
+      "type": "object",
+      "properties": {
+        "cycles": {
+          "description": "Optional Blender Cycles ray-tracing settings (M3).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CyclesConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "engine": {
+          "description": "Rendering engine: `\"raster\"` (default) or `\"cycles\"` (M3).",
+          "$ref": "#/$defs/RenderEngine",
+          "default": "raster"
+        },
+        "frames": {
+          "description": "Optional animation frame range settings (M4).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FramesConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "image": {
+          "description": "Output PNG path relative to the scene file (can be overridden by `tetraglass render -o`).",
+          "type": "string"
+        },
+        "msaa": {
+          "description": "Multisample anti-aliasing sample count (`1` or `4`, default: `4`).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 4,
+          "minimum": 0
+        },
+        "size": {
+          "description": "Image width and height in pixels `[width, height]` (default: `[1200, 800]`).",
+          "type": "array",
+          "default": [
+            1200,
+            800
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "time": {
+          "description": "Time step selector for transient datasets (default: `\"first\"`).",
+          "$ref": "#/$defs/TimeSelector",
+          "default": "first"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "image"
+      ]
+    },
+    "ProjectionKind": {
+      "description": "Camera projection mode (`\"perspective\"` or `\"orthographic\"`).",
+      "oneOf": [
+        {
+          "description": "Perspective projection with foreshortening (default).",
+          "type": "string",
+          "const": "perspective"
+        },
+        {
+          "description": "Parallel orthographic projection.",
+          "type": "string",
+          "const": "orthographic"
+        }
+      ]
+    },
+    "RangePreset": {
+      "description": "Automatic range preset for [`RangeSpec`].",
+      "oneOf": [
+        {
+          "description": "Fit to the minimum and maximum of the current time step (`\"auto\"`).",
+          "type": "string",
+          "const": "auto"
+        },
+        {
+          "description": "Fit to the minimum and maximum across all time steps in a series (`\"auto_all_steps\"`).",
+          "type": "string",
+          "const": "auto_all_steps"
+        }
+      ]
+    },
+    "RangeSpec": {
+      "description": "Scalar value range specification for colormap mapping (`\"auto\"`, `\"auto_all_steps\"`, or `[min, max]`).",
+      "anyOf": [
+        {
+          "description": "Automatic range mode (`\"auto\"` or `\"auto_all_steps\"`).",
+          "$ref": "#/$defs/RangePreset"
+        },
+        {
+          "description": "Explicit `[min, max]` value bounds.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        }
+      ]
+    },
+    "RenderEngine": {
+      "description": "Rendering engine backend (`output.engine`).",
+      "oneOf": [
+        {
+          "description": "Built-in wgpu rasterizer (default).",
+          "type": "string",
+          "const": "raster"
+        },
+        {
+          "description": "Headless Blender Cycles path tracer (M3).",
+          "type": "string",
+          "const": "cycles"
+        }
+      ]
+    },
+    "Representation": {
+      "description": "Visual representation of a source or filter in `view.show`.",
+      "type": "object",
+      "properties": {
+        "center": {
+          "description": "Optional reference value mapped to the midpoint of a diverging colormap.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "color": {
+          "description": "Solid surface color used when [`Self::color_by`] is omitted (default: `\"lightgray\"`).",
+          "$ref": "#/$defs/ColorSpec",
+          "default": "lightgray"
+        },
+        "color_by": {
+          "description": "Optional array reference (`\"[point:|cell:]<array>[:<component>]\"`) used for scalar coloring.\nWhen omitted, the representation uses the solid [`Self::color`].",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "colorbar": {
+          "description": "Colorbar legend configuration: `false` (default), `true`, or `{ \"title\": ..., \"position\": ... }`.",
+          "$ref": "#/$defs/ColorbarSpec",
+          "default": false
+        },
+        "colormap": {
+          "description": "Colormap used when [`Self::color_by`] is set (default: `\"viridis\"`).",
+          "$ref": "#/$defs/ColormapName",
+          "default": "viridis"
+        },
+        "edge_color": {
+          "description": "Wireframe and element-edge color for `\"surface_with_edges\"` and `\"wireframe\"` (default: `\"black\"`).",
+          "$ref": "#/$defs/ColorSpec",
+          "default": "black"
+        },
+        "input": {
+          "description": "Name of the source or filter dataset to display.",
+          "type": "string"
+        },
+        "log_scale": {
+          "description": "Whether to map positive scalar values logarithmically (default: `false`).",
+          "type": "boolean",
+          "default": false
+        },
+        "opacity": {
+          "description": "Surface opacity in `0.0..=1.0` (default: `1.0`). Values below `1.0` use order-independent transparency (M3).",
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "point_size": {
+          "description": "Point diameter in pixels for the `\"points\"` style (default: `3.0`).",
+          "type": "number",
+          "format": "double",
+          "default": 3.0
+        },
+        "range": {
+          "description": "Scalar range mapped across the colormap (default: `\"auto\"`).",
+          "$ref": "#/$defs/RangeSpec",
+          "default": "auto"
+        },
+        "style": {
+          "description": "Drawing style (default: `\"surface\"`).",
+          "$ref": "#/$defs/RepresentationStyle",
+          "default": "surface"
+        },
+        "visible": {
+          "description": "Whether this representation is visible (default: `true`).",
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "input"
+      ]
+    },
+    "RepresentationStyle": {
+      "description": "Visual drawing style for a [`Representation`].",
+      "oneOf": [
+        {
+          "description": "Shaded surface (external faces of volume meshes).",
+          "type": "string",
+          "const": "surface"
+        },
+        {
+          "description": "Shaded surface overlaid with element edges.",
+          "type": "string",
+          "const": "surface_with_edges"
+        },
+        {
+          "description": "Element edges only.",
+          "type": "string",
+          "const": "wireframe"
+        },
+        {
+          "description": "Mesh vertices rendered as screen-space points.",
+          "type": "string",
+          "const": "points"
+        },
+        {
+          "description": "Polyline rendering for streamlines (M4).",
+          "type": "string",
+          "const": "lines"
+        },
+        {
+          "description": "Shaded tube rendering for streamlines (M4).",
+          "type": "string",
+          "const": "tubes"
+        },
+        {
+          "description": "Direct volume rendering of a resampled grid (M4).",
+          "type": "string",
+          "const": "volume"
+        }
+      ]
+    },
+    "Source": {
+      "description": "A named input dataset read from a mesh file (`sources.<name>`).",
+      "type": "object",
+      "properties": {
+        "file": {
+          "description": "Path to the mesh file, resolved relative to the scene file (`.vtu`, `.vtk`, `.pvd`, `.msh`).",
+          "type": "string"
+        },
+        "format": {
+          "description": "Optional explicit mesh format override. When omitted, the format is inferred from the file extension.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "linearize_level": {
+          "description": "Reference-space subdivision level for higher-order cells (default: `2`, used from M2 onward).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 2,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "file"
+      ]
+    },
+    "SourceFormat": {
+      "description": "Supported mesh file format identifiers in a scene [`Source`].",
+      "oneOf": [
+        {
+          "description": "VTK XML UnstructuredGrid (`.vtu`).",
+          "type": "string",
+          "const": "vtu"
+        },
+        {
+          "description": "Legacy VTK UnstructuredGrid (`.vtk`).",
+          "type": "string",
+          "const": "vtk"
+        },
+        {
+          "description": "ParaView XML time-series collection (`.pvd`).",
+          "type": "string",
+          "const": "pvd"
+        },
+        {
+          "description": "Gmsh MSH 2.2 or 4.1 mesh (`.msh`).",
+          "type": "string",
+          "const": "msh"
+        }
+      ]
+    },
+    "TimePreset": {
+      "description": "Named time-step preset (`\"first\"` or `\"last\"`).",
+      "oneOf": [
+        {
+          "description": "First time step in the time series (default).",
+          "type": "string",
+          "const": "first"
+        },
+        {
+          "description": "Last time step in the time series.",
+          "type": "string",
+          "const": "last"
+        }
+      ]
+    },
+    "TimeSelector": {
+      "description": "Selector for choosing a time step in a transient dataset (`\"first\"`, `\"last\"`, `{ \"step\": n }`, or a time value).",
+      "anyOf": [
+        {
+          "description": "Named time preset (`\"first\"` or `\"last\"`).",
+          "$ref": "#/$defs/TimePreset"
+        },
+        {
+          "description": "Explicit zero-based step index (`{ \"step\": n }`).",
+          "$ref": "#/$defs/TimeStepIndex"
+        },
+        {
+          "description": "Continuous simulation time value (for example `0.5`).",
+          "type": "number",
+          "format": "double"
+        }
+      ]
+    },
+    "TimeStepIndex": {
+      "description": "Explicit zero-based time-step index selector (`{ \"step\": n }`).",
+      "type": "object",
+      "properties": {
+        "step": {
+          "description": "Zero-based index of the time step in the series.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "step"
+      ]
+    },
+    "View": {
+      "description": "Viewport specification (`view`): representations to draw, camera, lighting, background and annotations.",
+      "type": "object",
+      "properties": {
+        "axes": {
+          "description": "Whether to draw the orientation axes triad in the corner of the viewport (default: `true`).",
+          "type": "boolean",
+          "default": true
+        },
+        "background": {
+          "description": "Viewport background color or vertical gradient (default: `\"white\"`).",
+          "$ref": "#/$defs/BackgroundSpec",
+          "default": "white"
+        },
+        "camera": {
+          "description": "Camera framing, orientation, zoom and projection settings.",
+          "$ref": "#/$defs/CameraConfig",
+          "default": {
+            "azimuth": 0.0,
+            "elevation": 0.0,
+            "fit": "all",
+            "focal_point": null,
+            "position": null,
+            "projection": "perspective",
+            "roll": 0.0,
+            "view_angle": 30.0,
+            "view_up": null,
+            "zoom": 1.0
+          }
+        },
+        "lights": {
+          "description": "Lighting rig preset (`\"default\"` or `\"headlight\"`).",
+          "$ref": "#/$defs/LightingPreset",
+          "default": "default"
+        },
+        "show": {
+          "description": "Ordered list of dataset representations to display in the viewport.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Representation"
+          }
+        },
+        "title": {
+          "description": "Optional title text drawn at the top of the image.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "show"
+      ]
+    }
+  }
+}
