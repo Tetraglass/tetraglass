@@ -104,3 +104,10 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per `docs/scene-format.md` and `.agents/rules/scene-schema.md`).
 - Dependencies added: none (implemented Damerau-Levenshtein edit distance in-house per `.agents/rules/dependencies.md`).
 - Follow-ups: M1.3 Evaluation and cache (lazy pipeline evaluation cached by input hash; colormap or camera changes never re-run filters).
+
+## 2026-10-23: M1.3 Evaluation and cache
+- Done: implemented lazy pipeline evaluation and input-hash caching in `tetraglass-scene` (`SceneEvaluator`, `EvaluatedScene`, `EvaluatedRepresentation`, `EvaluatedColoring`, `EvaluatedDataset`, `PipelineHash`, `hash_unstructured_grid`) with deterministic 64-bit FNV-1a content hashing, implicit external surface deduplication for volume sources, camera bounds resolution, and `filter_executions`/`cache_hits` counters.
+- Tests: `crates/tetraglass-scene/tests/evaluation_cache.rs` verifying with `filter_executions()` and `cache_hits()` that changing colormap, range, `color_by` array/component, camera, lights, background, or output never re-runs filters, unreferenced filters and hidden representations are skipped lazily, explicit `surface` filters and implicit volume surfaces share the same cache entry, and changing input mesh data invalidates the cache.
+- Decisions: none (implemented per D-004 and `docs/design-plan.md`).
+- Dependencies added: none.
+- Follow-ups: M1.4 CLI (`inspect`, `render`, `validate`, `schema` in `tetraglass-cli`, plus a snapshot test of the schema output).

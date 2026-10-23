@@ -27,7 +27,7 @@ Status: **M0 complete (2026-10-23); M1 next.**
 
 - [x] **M1.1 Scene types.** Scene structs per `docs/scene-format.md` v1 (sources, view with representations, camera, output; the `surface` filter only), serde and `JsonSchema` derives, explicit defaults.
 - [x] **M1.2 Validation.** Semantic validation against loaded data, errors with JSON paths and edit-distance suggestions.
-- [ ] **M1.3 Evaluation and cache.** Lazy pipeline evaluation cached by input hash; colormap or camera changes never re-run filters (test with a counter).
+- [x] **M1.3 Evaluation and cache.** Lazy pipeline evaluation cached by input hash; colormap or camera changes never re-run filters (test with a counter).
 - [ ] **M1.4 CLI.** `inspect` (text and `--json`), `render` (PNG plus JSON summary), `validate`, `schema`. Snapshot test of the schema output.
 - [ ] **M1.5 Annotations.** Colorbar with tick labels, title text, axes triad, all drawn by the renderer. Pick a pure-Rust font rasterizer with an allowlisted license.
 - [ ] **M1.6 Gmsh reader.** MSH 4.1 and 2.2, ASCII and binary, `$NodeData` and `$ElementData`, higher-order permutation tables into VTK ordering (`/add-reader`).

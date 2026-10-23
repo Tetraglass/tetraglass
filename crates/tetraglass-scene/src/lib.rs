@@ -38,6 +38,7 @@
 
 mod array_ref;
 mod error;
+mod eval;
 mod types;
 mod validate;
 
@@ -46,6 +47,10 @@ pub use array_ref::{
     VectorAxis,
 };
 pub use error::SceneError;
+pub use eval::{
+    EvaluatedColoring, EvaluatedDataset, EvaluatedRepresentation, EvaluatedScene, PipelineHash,
+    SceneEvaluator, hash_unstructured_grid,
+};
 pub use types::{
     BackgroundGradient, BackgroundSpec, CameraConfig, ColorSpec, ColorbarOptions, ColorbarPosition,
     ColorbarSpec, ColormapName, CyclesConfig, DEFAULT_CYCLES_SAMPLES, DEFAULT_LINEARIZE_LEVEL,
