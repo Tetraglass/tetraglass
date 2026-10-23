@@ -13,3 +13,7 @@ workspace = true
 
 [dependencies]
 tetraglass-core.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tetraglass-io.workspace = true

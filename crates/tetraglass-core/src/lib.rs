@@ -9,11 +9,13 @@ mod array;
 mod cell;
 mod error;
 mod grid;
+mod surface;
 
 pub use array::{ArrayBuffer, Attributes, ComponentCount, DataArray, ScalarType, ValueRange};
 pub use cell::{CellType, PolyhedronFaceIter, PolyhedronFaces};
 pub use error::{CoreError, try_u32_from_i64, try_u32_from_u64, try_u32_from_usize};
 pub use grid::{BoundingBox, UnstructuredGrid};
+pub use surface::SurfaceMesh;
 
 #[cfg(test)]
 mod tests {
