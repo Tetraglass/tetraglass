@@ -1,0 +1,19 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Large downloaded test data
+/testdata/large/
+
+# Python (test data scripts, Blender scripts)
+__pycache__/
+*.pyc
+.venv/
+
+# Blender
+*.blend1
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/

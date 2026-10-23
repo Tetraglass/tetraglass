@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+# Public HTTPS URL derived from `git remote get-url origin` (bootstrap step 1).
+repository = "{{repository}}"
+# Raise to the MSRV of the egui release chosen in bootstrap step 5.
+rust-version = "1.85"
+# Flip to true per crate (or here) when preparing release 0.1.
+publish = false
+
+[workspace.dependencies]
+# Internal crates (keep versions in sync with workspace.package.version).
+{{prefix}}-core = { path = "crates/{{prefix}}-core", version = "0.0.0" }
+{{prefix}}-io = { path = "crates/{{prefix}}-io", version = "0.0.0" }
+{{prefix}}-filters = { path = "crates/{{prefix}}-filters", version = "0.0.0" }
+{{prefix}}-scene = { path = "crates/{{prefix}}-scene", version = "0.0.0" }
+{{prefix}}-render = { path = "crates/{{prefix}}-render", version = "0.0.0" }
+{{prefix}}-egui = { path = "crates/{{prefix}}-egui", version = "0.0.0" }
+
+# External crates: add each version once here, then use `name.workspace = true`.
+log = "0.4"
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Optimize dependencies in dev builds so filters and rendering stay usable while debugging.
+[profile.dev.package."*"]
+opt-level = 2
