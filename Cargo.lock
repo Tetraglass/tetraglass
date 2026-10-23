@@ -1147,8 +1147,13 @@ name = "tetraglass-render"
 version = "0.0.0"
 dependencies = [
  "bytemuck",
+ "flate2",
+ "log",
  "tetraglass-core",
+ "tetraglass-filters",
+ "tetraglass-io",
  "tetraglass-scene",
+ "thiserror",
  "wgpu",
 ]
 

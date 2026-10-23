@@ -13,6 +13,13 @@ workspace = true
 
 [dependencies]
 bytemuck.workspace = true
+flate2.workspace = true
+log.workspace = true
 tetraglass-core.workspace = true
 tetraglass-scene.workspace = true
+thiserror.workspace = true
 wgpu.workspace = true
+
+[dev-dependencies]
+tetraglass-filters.workspace = true
+tetraglass-io.workspace = true
