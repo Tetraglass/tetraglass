@@ -68,3 +68,10 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-002, D-014, and `.agents/rules/rendering.md`).
 - Dependencies added: linked existing workspace dependencies `flate2`, `log`, and `thiserror` into `tetraglass-render`.
 - Follow-ups: M0.8 egui viewport widget in `tetraglass-egui`.
+
+## 2026-10-23: M0.8 egui viewport widget
+- Done: implemented `ViewportState`, `ViewportWidget`, `ViewportResponse`, `FieldOption`, and `available_field_options` in `tetraglass-egui` (rendering offscreen during `egui_wgpu::CallbackTrait::prepare`, registering/updating a non-sRGB `Rgba8Unorm` texture view `OffscreenTarget::egui_texture_view` with `egui_wgpu::Renderer`, and handling orbit/pan/zoom/reset camera input and pixel-size resize tracking), plus the interactive desktop example `crates/tetraglass-egui/examples/egui_viewport.rs` with `.vtu` CLI argument loading, field picker, colormap picker, and log-scale toggle.
+- Tests: `crates/tetraglass-egui/tests/viewport_offscreen.rs` covering field enumeration (`Solid`, scalar and vector point/cell fields), offscreen target resize, `egui_wgpu::Renderer::update_buffers` execution of the `prepare` callback, and style/range updates.
+- Decisions: none (implemented per D-003 and `.agents/rules/rendering.md`).
+- Dependencies added: `eframe` (0.37.0 with `wgpu` and `default_fonts`, matching `egui 0.37.0` / `egui-wgpu 0.37.0` / `wgpu 30.0.1`, used as a dev-dependency for `examples/egui_viewport.rs`); linked existing workspace dependencies `tetraglass-core` and `log` into `tetraglass-egui`.
+- Follow-ups: M0.9 CI rendering (run render integration tests on Mesa lavapipe in CI and store the first baseline image).

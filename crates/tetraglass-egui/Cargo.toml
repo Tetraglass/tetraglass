@@ -14,4 +14,11 @@ workspace = true
 [dependencies]
 egui.workspace = true
 egui-wgpu.workspace = true
+log.workspace = true
+tetraglass-core.workspace = true
 tetraglass-render.workspace = true
+
+[dev-dependencies]
+eframe.workspace = true
+tetraglass-filters.workspace = true
+tetraglass-io.workspace = true

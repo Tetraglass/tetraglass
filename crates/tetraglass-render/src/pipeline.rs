@@ -138,6 +138,15 @@ pub struct OffscreenTarget {
     sample_count: u32,
     color_texture: wgpu::Texture,
     color_view: wgpu::TextureView,
+    egui_color_view: wgpu::TextureView,
+    msaa_color_view: Option<wgpu::TextureView>,
+    depth_view: wgpu::TextureView,
+}
+
+struct TargetAttachments {
+    color_texture: wgpu::Texture,
+    color_view: wgpu::TextureView,
+    egui_color_view: wgpu::TextureView,
     msaa_color_view: Option<wgpu::TextureView>,
     depth_view: wgpu::TextureView,
 }
@@ -158,18 +167,18 @@ impl OffscreenTarget {
             return Err(RenderError::UnsupportedSampleCount { sample_count });
         }
 
-        let (color_texture, color_view, msaa_color_view, depth_view) =
-            Self::create_attachments(device, width, height, format, sample_count);
+        let att = Self::create_attachments(device, width, height, format, sample_count);
 
         Ok(Self {
             width,
             height,
             format,
             sample_count,
-            color_texture,
-            color_view,
-            msaa_color_view,
-            depth_view,
+            color_texture: att.color_texture,
+            color_view: att.color_view,
+            egui_color_view: att.egui_color_view,
+            msaa_color_view: att.msaa_color_view,
+            depth_view: att.depth_view,
         })
     }
 
@@ -188,14 +197,14 @@ impl OffscreenTarget {
         if self.width == width && self.height == height {
             return Ok(false);
         }
-        let (color_texture, color_view, msaa_color_view, depth_view) =
-            Self::create_attachments(device, width, height, self.format, self.sample_count);
+        let att = Self::create_attachments(device, width, height, self.format, self.sample_count);
         self.width = width;
         self.height = height;
-        self.color_texture = color_texture;
-        self.color_view = color_view;
-        self.msaa_color_view = msaa_color_view;
-        self.depth_view = depth_view;
+        self.color_texture = att.color_texture;
+        self.color_view = att.color_view;
+        self.egui_color_view = att.egui_color_view;
+        self.msaa_color_view = att.msaa_color_view;
+        self.depth_view = att.depth_view;
         Ok(true)
     }
 
@@ -229,10 +238,17 @@ impl OffscreenTarget {
         &self.color_texture
     }
 
-    /// Returns the 1x resolved color [`wgpu::TextureView`] (for egui texture registration).
+    /// Returns the 1x resolved render-attachment [`wgpu::TextureView`].
     #[must_use]
     pub const fn color_view(&self) -> &wgpu::TextureView {
         &self.color_view
+    }
+
+    /// Returns a non-sRGB (`*Unorm`) [`wgpu::TextureView`] of the resolved color texture
+    /// for registration with `egui_wgpu::Renderer::register_native_texture`.
+    #[must_use]
+    pub const fn egui_texture_view(&self) -> &wgpu::TextureView {
+        &self.egui_color_view
     }
 
     fn create_attachments(
@@ -241,16 +257,19 @@ impl OffscreenTarget {
         height: u32,
         format: wgpu::TextureFormat,
         sample_count: u32,
-    ) -> (
-        wgpu::Texture,
-        wgpu::TextureView,
-        Option<wgpu::TextureView>,
-        wgpu::TextureView,
-    ) {
+    ) -> TargetAttachments {
         let size = wgpu::Extent3d {
             width,
             height,
             depth_or_array_layers: 1,
+        };
+
+        let non_srgb_format = format.remove_srgb_suffix();
+        let view_formats_storage = [non_srgb_format];
+        let view_formats: &[wgpu::TextureFormat] = if non_srgb_format != format {
+            &view_formats_storage
+        } else {
+            &[]
         };
 
         let color_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -263,9 +282,13 @@ impl OffscreenTarget {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
+            view_formats,
         });
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let egui_color_view = color_texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(non_srgb_format),
+            ..Default::default()
+        });
 
         let msaa_color_view = if sample_count > 1 {
             let msaa_tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -295,7 +318,13 @@ impl OffscreenTarget {
         });
         let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-        (color_texture, color_view, msaa_color_view, depth_view)
+        TargetAttachments {
+            color_texture,
+            color_view,
+            egui_color_view,
+            msaa_color_view,
+            depth_view,
+        }
     }
 }
 
