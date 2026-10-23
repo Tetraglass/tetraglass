@@ -11,6 +11,7 @@ use std::thread::{self, Thread};
 
 use tetraglass_core::{BoundingBox, SurfaceMesh};
 
+use crate::annotations::Annotations;
 use crate::camera::Camera;
 use crate::error::RenderError;
 use crate::pipeline::{DEFAULT_COLOR_FORMAT, OffscreenTarget, Renderer, SurfaceStyle};
@@ -37,6 +38,8 @@ pub struct HeadlessRenderOptions {
     pub style: SurfaceStyle,
     /// Explicit camera, or `None` to fit the surface bounds at `azimuth = 30°, elevation = 20°`.
     pub camera: Option<Camera>,
+    /// Viewport overlay annotations (title text, colorbars, and orientation axes triad).
+    pub annotations: Annotations,
 }
 
 impl Default for HeadlessRenderOptions {
@@ -48,6 +51,7 @@ impl Default for HeadlessRenderOptions {
             background_srgb: [1.0, 1.0, 1.0, 1.0],
             style: SurfaceStyle::default(),
             camera: None,
+            annotations: Annotations::default(),
         }
     }
 }
@@ -365,13 +369,15 @@ impl HeadlessContext {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("tetraglass_headless_encoder"),
             });
-        renderer.render(
+        renderer.render_with_annotations(
+            &self.device,
             &mut encoder,
             &self.queue,
             &target,
             &camera,
             options.background_srgb,
             &[&gpu_surface],
+            &options.annotations,
         )?;
         self.queue.submit(std::iter::once(encoder.finish()));
 

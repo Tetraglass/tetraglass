@@ -212,7 +212,8 @@ fn render_command_writes_png_and_prints_json_summary() {
                 "fit": "all",
                 "azimuth": 30.0,
                 "elevation": 20.0
-            }
+            },
+            "axes": false
         },
         "output": {
             "image": "default_out.png",
@@ -273,5 +274,73 @@ fn render_command_writes_png_and_prints_json_summary() {
         cmp.differing_pixels,
         cmp.total_pixels,
         cmp.diff_fraction * 100.0
+    );
+
+    // Also render a scene with `colorbar: true`, `axes: true`, and `title` enabled and verify
+    // that the CLI draws the annotations into the output PNG.
+    let annotated_scene_path = test_dir.join("cli_mixed_linear_annotated_scene.json");
+    let annotated_png_path = test_dir.join("cli_mixed_linear_annotated.png");
+    let _ = std::fs::remove_file(&annotated_png_path);
+
+    let annotated_scene_json = serde_json::json!({
+        "version": 1,
+        "sources": {
+            "mesh": { "file": vtu_abs.display().to_string() }
+        },
+        "view": {
+            "show": [
+                {
+                    "input": "mesh",
+                    "color_by": "linear",
+                    "colormap": "viridis",
+                    "colorbar": { "title": "linear", "position": "right" }
+                }
+            ],
+            "camera": {
+                "fit": "all",
+                "azimuth": 30.0,
+                "elevation": 20.0
+            },
+            "axes": true,
+            "title": "Mixed Linear Mesh"
+        },
+        "output": {
+            "image": "annotated_out.png",
+            "size": [800, 600],
+            "msaa": 4
+        }
+    });
+    std::fs::write(
+        &annotated_scene_path,
+        serde_json::to_string_pretty(&annotated_scene_json).unwrap(),
+    )
+    .unwrap();
+
+    let annotated_out = tetraglass_bin()
+        .arg("render")
+        .arg(&annotated_scene_path)
+        .arg("-o")
+        .arg(&annotated_png_path)
+        .output()
+        .expect("run `tetraglass render` with annotations");
+    assert!(
+        annotated_out.status.success(),
+        "`tetraglass render` annotated failed: {}",
+        String::from_utf8_lossy(&annotated_out.stderr)
+    );
+
+    let annotated_img =
+        RenderedImage::load_png(&annotated_png_path).expect("load annotated CLI PNG");
+    let cmp_vs_unannotated = annotated_img
+        .compare(
+            &rendered,
+            DEFAULT_CHANNEL_TOLERANCE,
+            DEFAULT_MAX_DIFF_FRACTION,
+        )
+        .expect("compare annotated vs unannotated");
+    assert!(
+        cmp_vs_unannotated.differing_pixels > 4000,
+        "expected annotations (title, colorbar, axes) to add > 4000 foreground pixels, got {}",
+        cmp_vs_unannotated.differing_pixels
     );
 }

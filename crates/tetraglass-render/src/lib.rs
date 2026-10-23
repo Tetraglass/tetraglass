@@ -14,13 +14,19 @@
 //!   textures (`Viridis`, `Cividis`, `CoolWarm`). Switching colormap, range, or log scale updates
 //!   only a uniform buffer.
 
+pub mod annotations;
 pub mod camera;
 pub mod colormap;
 pub mod error;
 pub mod headless;
 pub mod pipeline;
 pub mod png;
+pub mod text;
 
+pub use annotations::{
+    Annotations, ColorbarAnnotation, ColorbarPlacement, ColorbarTick, DEFAULT_COLORBAR_TICKS,
+    compute_colorbar_ticks, format_tick_value,
+};
 pub use camera::Camera;
 pub use colormap::ColormapKind;
 pub use error::{FieldAssociation, RenderError};
@@ -32,3 +38,4 @@ pub use pipeline::{
     ColorBy, DEFAULT_COLOR_FORMAT, DEPTH_FORMAT, GpuSurface, OffscreenTarget, Renderer,
     ScalarComponent, SurfaceStyle,
 };
+pub use text::{EmbeddedFont, FontRasterizer, RasterizedText, TextMetrics};

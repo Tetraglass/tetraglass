@@ -12,14 +12,15 @@ use serde::{Deserialize, Serialize};
 use tetraglass_core::{Attributes, BoundingBox, CellType, ScalarType, UnstructuredGrid};
 use tetraglass_io::{MeshFormat, detect_format_from_bytes, detect_format_from_extension, read_vtu};
 use tetraglass_render::{
-    Camera, ColorBy, ColormapKind, DEFAULT_COLOR_FORMAT, GpuSurface, HeadlessContext,
-    OffscreenTarget, Renderer, ScalarComponent, SurfaceStyle,
+    Annotations, Camera, ColorBy, ColorbarAnnotation, ColorbarPlacement, ColormapKind,
+    DEFAULT_COLOR_FORMAT, DEFAULT_COLORBAR_TICKS, GpuSurface, HeadlessContext, OffscreenTarget,
+    Renderer, ScalarComponent, SurfaceStyle,
 };
 use tetraglass_scene::{
-    ArrayAssociation, BackgroundSpec, ColormapName, DEFAULT_MSAA_SAMPLES, DEFAULT_OUTPUT_SIZE,
-    DatasetMetadata, EvaluatedColoring, EvaluatedRepresentation, RenderEngine, RepresentationStyle,
-    ResolvedComponent, Scene, SceneEvaluator, ValidationIssue, ValidationReport,
-    scene_json_schema_string, validate_scene_with_metadata,
+    ArrayAssociation, BackgroundSpec, ColorbarSpec, ColormapName, DEFAULT_MSAA_SAMPLES,
+    DEFAULT_OUTPUT_SIZE, DatasetMetadata, EvaluatedColoring, EvaluatedRepresentation,
+    EvaluatedScene, RenderEngine, RepresentationStyle, ResolvedComponent, Scene, SceneEvaluator,
+    ValidationIssue, ValidationReport, scene_json_schema_string, validate_scene_with_metadata,
 };
 
 fn main() -> ExitCode {
@@ -674,15 +675,18 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
     }
 
     let gpu_refs: Vec<&GpuSurface> = gpu_surfaces.iter().collect();
+    let annotations = build_annotations_from_scene(&scene, &evaluated);
     let mut encoder = ctx.device().create_command_encoder(&Default::default());
     renderer
-        .render(
+        .render_with_annotations(
+            ctx.device(),
             &mut encoder,
             ctx.queue(),
             &target,
             &camera,
             background_srgb,
             &gpu_refs,
+            &annotations,
         )
         .map_err(|e| CliFailure::Message(e.to_string()))?;
     ctx.queue().submit(std::iter::once(encoder.finish()));
@@ -736,6 +740,41 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
     };
 
     serde_json::to_string_pretty(&summary).map_err(|e| CliFailure::Message(e.to_string()))
+}
+
+fn build_annotations_from_scene(scene: &Scene, evaluated: &EvaluatedScene) -> Annotations {
+    let mut colorbars = Vec::new();
+    for rep in &evaluated.representations {
+        if !rep.colorbar.is_enabled() {
+            continue;
+        }
+        let Some(coloring) = &rep.coloring else {
+            continue;
+        };
+        let (title, position) = match &rep.colorbar {
+            ColorbarSpec::Enabled(_) => (Some(coloring.raw_ref.clone()), ColorbarPlacement::Right),
+            ColorbarSpec::Options(opts) => (
+                opts.title
+                    .clone()
+                    .or_else(|| Some(coloring.raw_ref.clone())),
+                ColorbarPlacement::from(opts.position),
+            ),
+        };
+        colorbars.push(ColorbarAnnotation {
+            colormap: map_colormap_kind(coloring.colormap),
+            range: coloring.effective_range,
+            use_log_scale: coloring.log_scale,
+            title,
+            position,
+            tick_count: DEFAULT_COLORBAR_TICKS,
+        });
+    }
+
+    Annotations {
+        title: scene.view.title.clone(),
+        axes: scene.view.axes,
+        colorbars,
+    }
 }
 
 fn build_camera_from_scene(scene: &Scene, bounds: BoundingBox) -> Camera {

@@ -68,6 +68,7 @@ fn render_mixed_linear_colored_by_linear_and_cell_id() {
             solid_color_srgb: [0.8, 0.8, 0.8, 1.0],
         },
         camera: Some(camera.clone()),
+        ..HeadlessRenderOptions::default()
     };
 
     let image = ctx

@@ -13,11 +13,14 @@ workspace = true
 
 [dependencies]
 bytemuck.workspace = true
+epaint_default_fonts.workspace = true
 flate2.workspace = true
 log.workspace = true
+skrifa.workspace = true
 tetraglass-core.workspace = true
 tetraglass-scene.workspace = true
 thiserror.workspace = true
+vello_cpu.workspace = true
 wgpu.workspace = true
 
 [dev-dependencies]

@@ -28,13 +28,16 @@ bytemuck = { version = "1", features = ["derive"] }
 eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "default_fonts", "x11"] }
 egui = "0.37.0"
 egui-wgpu = "0.37.0"
+epaint_default_fonts = "0.37.0"
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 log = "0.4"
 quick-xml = "0.41"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+skrifa = { version = "0.44.0", default-features = false, features = ["std", "autohint_shaping"] }
 thiserror = "2"
+vello_cpu = { version = "0.2.0", default-features = false, features = ["std", "u8_pipeline"] }
 wgpu = "30.0.1"
 
 [workspace.lints.rust]

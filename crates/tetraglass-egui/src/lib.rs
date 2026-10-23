@@ -16,8 +16,8 @@ use egui::{Color32, Pos2, Rect, Response, Sense, TextureId, Ui, Vec2, pos2};
 use egui_wgpu::wgpu;
 use tetraglass_core::{BoundingBox, SurfaceMesh};
 use tetraglass_render::{
-    Camera, ColorBy, DEFAULT_COLOR_FORMAT, GpuSurface, OffscreenTarget, RenderError, Renderer,
-    ScalarComponent, SurfaceStyle,
+    Annotations, Camera, ColorBy, DEFAULT_COLOR_FORMAT, GpuSurface, OffscreenTarget, RenderError,
+    Renderer, ScalarComponent, SurfaceStyle,
 };
 
 /// A selectable coloring option for a [`SurfaceMesh`] in a UI field picker.
@@ -113,6 +113,7 @@ struct ViewportGpuInner {
     default_bounds: Option<BoundingBox>,
     background_srgb: [f32; 4],
     style: SurfaceStyle,
+    annotations: Annotations,
 }
 
 /// Persistent GPU and camera state for an embeddable 3D [`ViewportWidget`].
@@ -161,6 +162,7 @@ impl ViewportState {
             default_bounds: None,
             background_srgb: [1.0, 1.0, 1.0, 1.0],
             style: SurfaceStyle::default(),
+            annotations: Annotations::default(),
         };
 
         Ok(Self {
@@ -276,6 +278,22 @@ impl ViewportState {
         }
     }
 
+    /// Returns a clone of the current viewport [`Annotations`].
+    #[must_use]
+    pub fn annotations(&self) -> Annotations {
+        self.inner
+            .lock()
+            .map(|g| g.annotations.clone())
+            .unwrap_or_default()
+    }
+
+    /// Sets the viewport [`Annotations`] (title, axes triad, and colorbars) drawn by the renderer.
+    pub fn set_annotations(&mut self, annotations: Annotations) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.annotations = annotations;
+        }
+    }
+
     /// Returns the registered `egui` [`TextureId`] for the resolved offscreen target.
     #[must_use]
     pub const fn texture_id(&self) -> TextureId {
@@ -338,7 +356,7 @@ struct ViewportPrepareCallback {
 impl egui_wgpu::CallbackTrait for ViewportPrepareCallback {
     fn prepare(
         &self,
-        _device: &wgpu::Device,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         _screen_descriptor: &egui_wgpu::ScreenDescriptor,
         egui_encoder: &mut wgpu::CommandEncoder,
@@ -346,13 +364,15 @@ impl egui_wgpu::CallbackTrait for ViewportPrepareCallback {
     ) -> Vec<wgpu::CommandBuffer> {
         if let Ok(guard) = self.inner.lock() {
             let surfaces: Vec<&GpuSurface> = guard.gpu_surface.iter().collect();
-            if let Err(err) = guard.renderer.render(
+            if let Err(err) = guard.renderer.render_with_annotations(
+                device,
                 egui_encoder,
                 queue,
                 &guard.target,
                 &guard.camera,
                 guard.background_srgb,
                 &surfaces,
+                &guard.annotations,
             ) {
                 log::error!("tetraglass-egui offscreen prepare failed: {err}");
             }

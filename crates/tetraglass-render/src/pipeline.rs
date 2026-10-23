@@ -4,6 +4,9 @@ use bytemuck::{Pod, Zeroable};
 use tetraglass_core::{BoundingBox, DataArray, SurfaceMesh, ValueRange};
 use wgpu::util::DeviceExt;
 
+use crate::annotations::{
+    AnnotationUniforms, AnnotationVertex, Annotations, build_annotation_batch,
+};
 use crate::camera::Camera;
 use crate::colormap::ColormapKind;
 use crate::error::{FieldAssociation, RenderError};
@@ -430,6 +433,10 @@ pub struct Renderer {
     frame_bind_groups: [wgpu::BindGroup; 3],
     surface_bind_group_layout: wgpu::BindGroupLayout,
     surface_pipeline: wgpu::RenderPipeline,
+    annotation_uniform_buffer: wgpu::Buffer,
+    annotation_sampler: wgpu::Sampler,
+    annotation_bind_group_layout: wgpu::BindGroupLayout,
+    annotation_pipeline: wgpu::RenderPipeline,
 }
 
 impl Renderer {
@@ -665,6 +672,145 @@ impl Renderer {
             cache: None,
         });
 
+        let annotation_shader_source = concat!(
+            include_str!("shaders/common.wgsl"),
+            "\n",
+            include_str!("shaders/annotations.wgsl")
+        );
+        let annotation_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("tetraglass_annotation_shader"),
+            source: wgpu::ShaderSource::Wgsl(annotation_shader_source.into()),
+        });
+
+        let annotation_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tetraglass_annotation_uniforms"),
+            size: std::mem::size_of::<AnnotationUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let annotation_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("tetraglass_annotation_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let annotation_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("tetraglass_annotation_bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let annotation_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("tetraglass_annotation_pipeline_layout"),
+                bind_group_layouts: &[Some(&annotation_bind_group_layout)],
+                immediate_size: 0,
+            });
+
+        let annotation_vertex_buffers = [Some(wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<AnnotationVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 8,
+                    shader_location: 1,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 16,
+                    shader_location: 2,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Uint32,
+                    offset: 32,
+                    shader_location: 3,
+                },
+            ],
+        })];
+
+        let annotation_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("tetraglass_annotation_pipeline"),
+            layout: Some(&annotation_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &annotation_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &annotation_vertex_buffers,
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &annotation_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         Ok(Self {
             target_format,
             sample_count,
@@ -672,6 +818,10 @@ impl Renderer {
             frame_bind_groups,
             surface_bind_group_layout,
             surface_pipeline,
+            annotation_uniform_buffer,
+            annotation_sampler,
+            annotation_bind_group_layout,
+            annotation_pipeline,
         })
     }
 
@@ -856,7 +1006,7 @@ impl Renderer {
         Ok(())
     }
 
-    /// Records a render pass into `encoder`, drawing `surfaces` into `target`.
+    /// Records a render pass into `encoder`, drawing `surfaces` into `target` with no overlay annotations.
     pub fn render(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -864,6 +1014,51 @@ impl Renderer {
         target: &OffscreenTarget,
         camera: &Camera,
         background_srgb: [f32; 4],
+        surfaces: &[&GpuSurface],
+    ) -> Result<(), RenderError> {
+        self.render_internal(
+            None,
+            encoder,
+            queue,
+            target,
+            (camera, background_srgb),
+            surfaces,
+        )
+    }
+
+    /// Records a render pass into `encoder`, drawing `surfaces` and `annotations` (colorbars,
+    /// title text, and 3D orientation axes triad) into `target`.
+    // Mirrors `Renderer::render` with the host `device` and `annotations` added so callers do not
+    // need to construct an intermediate descriptor struct per frame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_with_annotations(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        target: &OffscreenTarget,
+        camera: &Camera,
+        background_srgb: [f32; 4],
+        surfaces: &[&GpuSurface],
+        annotations: &Annotations,
+    ) -> Result<(), RenderError> {
+        self.render_internal(
+            Some((device, annotations)),
+            encoder,
+            queue,
+            target,
+            (camera, background_srgb),
+            surfaces,
+        )
+    }
+
+    fn render_internal(
+        &self,
+        annotations_ctx: Option<(&wgpu::Device, &Annotations)>,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        target: &OffscreenTarget,
+        (camera, background_srgb): (&Camera, [f32; 4]),
         surfaces: &[&GpuSurface],
     ) -> Result<(), RenderError> {
         if target.format() != self.target_format {
@@ -893,6 +1088,79 @@ impl Renderer {
             0,
             bytemuck::bytes_of(&frame_uniforms),
         );
+
+        let prepared_annotations = if let Some((dev, annotations)) = annotations_ctx
+            && !annotations.is_empty()
+        {
+            let batch = build_annotation_batch(
+                annotations,
+                camera,
+                target.width(),
+                target.height(),
+                background_srgb,
+            );
+            if !batch.vertices.is_empty() {
+                let overlay_uniforms = AnnotationUniforms {
+                    viewport_size: [target.width() as f32, target.height() as f32],
+                    _pad: [0.0, 0.0],
+                };
+                queue.write_buffer(
+                    &self.annotation_uniform_buffer,
+                    0,
+                    bytemuck::bytes_of(&overlay_uniforms),
+                );
+
+                let vbuf = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("tetraglass_annotation_vbuf"),
+                    contents: bytemuck::cast_slice(&batch.vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+
+                let atlas_tex = dev.create_texture_with_data(
+                    queue,
+                    &wgpu::TextureDescriptor {
+                        label: Some("tetraglass_annotation_atlas"),
+                        size: wgpu::Extent3d {
+                            width: batch.atlas_width,
+                            height: batch.atlas_height,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::R8Unorm,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    },
+                    wgpu::util::TextureDataOrder::LayerMajor,
+                    &batch.atlas_r8,
+                );
+                let atlas_view = atlas_tex.create_view(&wgpu::TextureViewDescriptor::default());
+                let bg = dev.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("tetraglass_annotation_bg"),
+                    layout: &self.annotation_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.annotation_uniform_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&atlas_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.annotation_sampler),
+                        },
+                    ],
+                });
+                Some((vbuf, bg, batch.vertices.len() as u32))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         let clear_linear = srgb_rgba_to_linear_color(background_srgb);
         let (color_attachment_view, resolve_target) = match &target.msaa_color_view {
@@ -939,6 +1207,13 @@ impl Renderer {
             pass.set_vertex_buffer(0, surface.geometry_buffer.slice(..));
             pass.set_vertex_buffer(1, surface.scalar_buffer.slice(..));
             pass.draw(0..surface.vertex_count, 0..1);
+        }
+
+        if let Some((ref vbuf, ref bg, vcount)) = prepared_annotations {
+            pass.set_pipeline(&self.annotation_pipeline);
+            pass.set_bind_group(0, bg, &[]);
+            pass.set_vertex_buffer(0, vbuf.slice(..));
+            pass.draw(0..vcount, 0..1);
         }
 
         Ok(())
