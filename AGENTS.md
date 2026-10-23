@@ -59,7 +59,7 @@ A task is done when all of these are true:
 - New behavior has tests; every bug fix has a regression test.
 - Public items have rustdoc; changed user-facing behavior is reflected in `docs/`.
 - The task is ticked in `docs/roadmap.md` and an entry is appended to `docs/progress.md`.
-- A Conventional Commits message is proposed (for example `feat(filters): add slice filter`).
+- Changes are committed locally with a Conventional Commits message (for example `feat(filters): add slice filter`).
 
 ## Stop and ask the human when
 

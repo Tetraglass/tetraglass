@@ -55,7 +55,7 @@ Run `/verify` and fix every failure. Do not weaken, skip or delete tests to get 
 - `docs/scene-format.md` when the scene changed.
 - `docs/design-plan.md` only if the design itself changed, together with a new entry in `docs/decisions.md`.
 
-## 7. Record
+## 7. Record and commit
 
 Tick the task in `docs/roadmap.md`. Append to `docs/progress.md`:
 
@@ -68,7 +68,7 @@ Tick the task in `docs/roadmap.md`. Append to `docs/progress.md`:
 - Follow-ups: anything discovered but not done.
 ```
 
-Propose a Conventional Commits message, for example `feat(core): add unstructured grid and typed arrays`.
+Stage all task changes and create a local git commit using a Conventional Commits message, for example `feat(core): add unstructured grid and typed arrays`. Do not push unless the user asks.
 
 ## 8. Next
 
