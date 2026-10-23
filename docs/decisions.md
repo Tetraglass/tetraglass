@@ -16,7 +16,7 @@ Binding decisions for this project. Agents must not contradict an **Accepted** d
 | D-010 | 2026-10-22 | Accepted | Ray tracing: Blender first (export plus headless Cycles renders driven by the CLI), a built-in compute path tracer later, wgpu ray queries optional after that. | Publication quality early with no renderer work. |
 | D-011 | 2026-10-22 | Accepted | Rust crates are MIT OR Apache-2.0. Code using Blender's Python API lives in `blender/` under GPL-3.0-or-later; the interface is data files and CLI arguments only; Blender is never bundled. | Matches Blender's licensing FAQ while keeping the library permissive. |
 | D-012 | 2026-10-22 | Accepted | vtk-pure-rs is out of scope: not used, evaluated or depended on. | The developer's decision. |
-| D-013 | 2026-10-22 | Proposed (confirm in M0.4) | Connectivity uses u32 indices, checked on load. | Halves index memory; consistent with D-001 and GPU index buffers. |
+| D-013 | 2026-10-22 | Accepted | Connectivity uses u32 indices, checked on load (confirmed in M0.4). | Halves index memory; consistent with D-001 and GPU index buffers. |
 | D-014 | 2026-10-22 | Accepted | f64 positions and fields on the CPU; f32 relative to the dataset center on the GPU. | Precision on large-coordinate CFD domains. |
 | D-015 | 2026-10-22 | Proposed (confirm in M0.9) | Image baselines are produced on Mesa lavapipe, the CI driver; comparison tolerance per `.agents/rules/testing.md`. | Stable, GPU-independent visual regression tests. |
 | D-016 | 2026-10-22 | Accepted | Antigravity procedures are Agent Skills in `.agents/skills/`, not legacy workflows. | Antigravity retired legacy workflows on 2026-10-19. |
