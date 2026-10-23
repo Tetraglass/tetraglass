@@ -86,6 +86,28 @@ fn inspect_command_outputs_text_and_json() {
     assert_eq!(value["cell_types"]["tetra"], 1);
     assert_eq!(value["point_arrays"].as_array().unwrap().len(), 3);
     assert_eq!(value["cell_arrays"].as_array().unwrap().len(), 1);
+
+    // 3. Structured `--json` output on a Gmsh `.msh` file (`M1.6`)
+    let msh_path = workspace_root().join("testdata/gmsh/tet2_v41.msh");
+    let msh_out = tetraglass_bin()
+        .arg("inspect")
+        .arg(&msh_path)
+        .arg("--json")
+        .output()
+        .expect("run `tetraglass inspect --json` on .msh");
+    assert!(
+        msh_out.status.success(),
+        "inspect .msh failed: {}",
+        String::from_utf8_lossy(&msh_out.stderr)
+    );
+    let msh_val: serde_json::Value =
+        serde_json::from_slice(&msh_out.stdout).expect("parse msh inspect JSON");
+    assert_eq!(msh_val["format"], "msh");
+    assert_eq!(msh_val["num_points"], 27);
+    assert_eq!(msh_val["num_cells"], 6);
+    assert_eq!(msh_val["cell_types"]["quadratic_tetra"], 6);
+    assert_eq!(msh_val["point_arrays"].as_array().unwrap().len(), 3);
+    assert_eq!(msh_val["cell_arrays"].as_array().unwrap().len(), 1);
 }
 
 #[test]

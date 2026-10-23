@@ -2142,12 +2142,15 @@ dependencies = [
 name = "tetraglass-cli"
 version = "0.0.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "tetraglass-core",
  "tetraglass-egui",
  "tetraglass-filters",
  "tetraglass-io",
  "tetraglass-render",
  "tetraglass-scene",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2196,13 +2199,16 @@ name = "tetraglass-render"
 version = "0.0.0"
 dependencies = [
  "bytemuck",
+ "epaint_default_fonts",
  "flate2",
  "log",
+ "skrifa",
  "tetraglass-core",
  "tetraglass-filters",
  "tetraglass-io",
  "tetraglass-scene",
  "thiserror 2.0.21",
+ "vello_cpu",
  "wgpu",
 ]
 

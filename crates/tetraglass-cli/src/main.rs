@@ -10,7 +10,9 @@ use std::process::ExitCode;
 
 use serde::{Deserialize, Serialize};
 use tetraglass_core::{Attributes, BoundingBox, CellType, ScalarType, UnstructuredGrid};
-use tetraglass_io::{MeshFormat, detect_format_from_bytes, detect_format_from_extension, read_vtu};
+use tetraglass_io::{
+    MeshFormat, detect_format_from_bytes, detect_format_from_extension, read_msh, read_vtu,
+};
 use tetraglass_render::{
     Annotations, Camera, ColorBy, ColorbarAnnotation, ColorbarPlacement, ColormapKind,
     DEFAULT_COLOR_FORMAT, DEFAULT_COLORBAR_TICKS, GpuSurface, HeadlessContext, OffscreenTarget,
@@ -901,6 +903,12 @@ fn load_mesh_from_path(
     match format {
         MeshFormat::Vtu => {
             let grid = read_vtu(&bytes).map_err(|e| {
+                CliFailure::Message(format!("failed to parse `{}`: {e}", path.display()))
+            })?;
+            Ok((format, grid))
+        }
+        MeshFormat::Gmsh => {
+            let grid = read_msh(&bytes).map_err(|e| {
                 CliFailure::Message(format!("failed to parse `{}`: {e}", path.display()))
             })?;
             Ok((format, grid))

@@ -31,6 +31,15 @@ pub enum IoError {
         reason: String,
     },
 
+    /// Unexpected or malformed section, header, or tag in a Gmsh `.msh` file.
+    #[error("invalid MSH structure at byte {offset}: {reason}")]
+    InvalidMshStructure {
+        /// Byte offset in the input buffer.
+        offset: u64,
+        /// Description of the structural issue.
+        reason: String,
+    },
+
     /// Unsupported VTK encoding, compressor, header type, or scalar type.
     #[error("unsupported VTU feature at byte {offset}: {feature}")]
     UnsupportedFeature {
