@@ -328,7 +328,7 @@ The biggest risk is scope against evenings-and-weekends time; every other risk i
 **Open questions:**
 
 - [x] Project name and crate namespace: Tetraglass, with crates named `tetraglass-*` and the repository at github.com/Tetraglass/tetraglass.
-- [ ] Reuse vtkio and mshio, or write focused readers? Decide in M0 with real test files.
+- [x] Reuse vtkio and mshio, or write focused readers? Write focused in-house readers in `tetraglass-io` (D-018).
 - [ ] Which public FEM/CFD datasets become the reference test set, and under what licenses?
 - [ ] Which Blender versions to support, and do the GPL-licensed Blender scripts live in a separate folder or their own repository?
 - [ ] When to add Python bindings: on demand, after 0.2.

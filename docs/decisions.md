@@ -21,11 +21,12 @@ Binding decisions for this project. Agents must not contradict an **Accepted** d
 | D-015 | 2026-10-22 | Proposed (confirm in M0.9) | Image baselines are produced on Mesa lavapipe, the CI driver; comparison tolerance per `.agents/rules/testing.md`. | Stable, GPU-independent visual regression tests. |
 | D-016 | 2026-10-22 | Accepted | Antigravity procedures are Agent Skills in `.agents/skills/`, not legacy workflows. | Antigravity retired legacy workflows on 2026-10-19. |
 | D-017 | 2026-10-22 | Accepted | The project is named Tetraglass. Crates are `tetraglass-core`, `tetraglass-io` and so on; the umbrella crate and CLI binary are `tetraglass`. The repository is `github.com/Tetraglass/tetraglass`. | Tetra (every cell becomes tetrahedra) plus looking glass. All crate names were free on crates.io on 2026-10-22, and the developer secured the Tetraglass GitHub organization. Replaces the earlier choice Tetrascope, whose GitHub name was taken. |
+| D-018 | 2026-10-23 | Accepted | Write focused in-house readers in `tetraglass-io` for VTK (`.vtu`, `.pvd`, `.vtk`) and Gmsh (`.msh` 4.1 and 2.2) instead of reusing `vtkio` or `mshio`. | Evaluated against the M0.2 `testdata/` suite: `vtkio` 0.7.0-rc2 loads ASCII, inline base64, zlib-appended, quadratic (type 24) and Lagrange (type 72) `.vtu` files, but fails on `polyhedra.vtu` (its `<Cells>` parser rejects any `DataArray` other than `connectivity`, `offsets` and `types`), does not parse `.pvd`, and its `compression` feature pulls in `xz2`/`lzma-sys` (a C dependency that breaks `wasm32-unknown-unknown`, violating D-008). `mshio` 0.4.2 parses MSH 4.1 geometry (`tet2_v41.msh`, `tet2_v41_binary.msh`) but silently drops `$NodeData` and `$ElementData`, and rejects MSH 2.2 (`tet_v22.msh`, `tet_v22_binary.msh`). |
 
 ## Open questions
 
 - [x] Project name, crate prefix and repository: Tetraglass, `github.com/Tetraglass/tetraglass` (D-017).
-- [ ] Reuse vtkio and mshio, or write focused readers (M0.3).
+- [x] Reuse vtkio and mshio, or write focused readers (M0.3): write focused in-house readers in `tetraglass-io` (D-018).
 - [ ] Which public FEM/CFD datasets become the reference test set, and under what licenses.
 - [ ] Supported Blender versions, and whether `blender/` moves to its own repository.
 - [ ] When to add Python bindings (on demand, after 0.2).
