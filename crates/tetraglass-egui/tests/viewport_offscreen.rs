@@ -9,7 +9,7 @@ use tetraglass_egui::{
 };
 use tetraglass_filters::extract_external_surface;
 use tetraglass_io::read_vtu_from_path;
-use tetraglass_render::{DEFAULT_COLOR_FORMAT, HeadlessContext};
+use tetraglass_render::{HeadlessContext, OffscreenTarget};
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -48,7 +48,7 @@ fn viewport_widget_resizes_and_runs_prepare_callback_in_egui_wgpu() {
     let headless = HeadlessContext::new().expect("headless wgpu context");
     let mut egui_renderer = egui_wgpu::Renderer::new(
         headless.device(),
-        DEFAULT_COLOR_FORMAT,
+        wgpu::TextureFormat::Rgba8Unorm,
         egui_wgpu::RendererOptions::default(),
     );
 
@@ -69,46 +69,87 @@ fn viewport_widget_resizes_and_runs_prepare_callback_in_egui_wgpu() {
         .expect("upload surface");
     assert_eq!(viewport.effective_range(), Some([0.0, 7.5]));
 
-    // Run one egui frame with the ViewportWidget at 400x300 logical points (1.0 ppp).
+    // Run an egui frame (800x500 logical points at 1.0 ppp) with a left side panel and the 3D ViewportWidget.
     let ctx = egui::Context::default();
-    let raw_input = egui::RawInput {
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::Vec2::new(400.0, 300.0),
-        )),
-        ..Default::default()
-    };
-
-    let mut full_output = ctx.run_ui(raw_input, |ui| {
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE)
-            .show(ui, |ui| {
-                let resp = ViewportWidget::new(&mut viewport)
-                    .desired_size(egui::Vec2::new(400.0, 300.0))
-                    .show(ui, headless.device(), &mut egui_renderer)
-                    .expect("show ViewportWidget");
-                assert!(resp.resized);
-                assert!(!resp.camera_changed);
-            });
-    });
-
-    assert_eq!(viewport.target_size_px(), (400, 300));
-
-    // Verify `egui_wgpu::Renderer::update_buffers` executes `ViewportPrepareCallback::prepare` cleanly.
-    let primitives = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
-    for (id, deltas) in &full_output.textures_delta.set {
-        for delta in deltas {
-            egui_renderer.update_texture(headless.device(), headless.queue(), *id, delta);
+    let mut full_output = egui::FullOutput::default();
+    for pass in 0..2 {
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::new(800.0, 500.0),
+            )),
+            ..Default::default()
+        };
+        full_output = ctx.run_ui(raw_input, |ui| {
+            egui::Panel::left("tetraglass_controls")
+                .resizable(false)
+                .exact_size(220.0)
+                .show(ui, |ui| {
+                    ui.heading("Tetraglass Viewport");
+                    ui.separator();
+                    ui.label("File: mixed_linear.vtu");
+                    ui.label(format!(
+                        "Volume: {} points, {} cells",
+                        grid.num_points(),
+                        grid.num_cells()
+                    ));
+                    ui.label(format!(
+                        "Surface: {} faces ({} tris)",
+                        surface.num_faces(),
+                        surface.num_triangles()
+                    ));
+                    ui.separator();
+                    ui.label("Color by: Point: linear");
+                    ui.label("Colormap: Viridis");
+                    if let Some([lo, hi]) = viewport.effective_range() {
+                        ui.label(format!("Range: [{lo:.4}, {hi:.4}]"));
+                    }
+                });
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    let resp = ViewportWidget::new(&mut viewport)
+                        .show(ui, headless.device(), &mut egui_renderer)
+                        .expect("show ViewportWidget");
+                    if pass == 0 {
+                        assert!(resp.resized);
+                    }
+                    assert!(!resp.camera_changed);
+                });
+        });
+        for (id, deltas) in &full_output.textures_delta.set {
+            for delta in deltas {
+                egui_renderer.update_texture(headless.device(), headless.queue(), *id, delta);
+            }
         }
+        for id in &full_output.textures_delta.free {
+            egui_renderer.free_texture(id);
+        }
+        full_output.textures_delta.clear();
     }
-    for id in &full_output.textures_delta.free {
-        egui_renderer.free_texture(id);
-    }
-    full_output.textures_delta.clear();
+
+    let (vp_w, vp_h) = viewport.target_size_px();
+    assert!(
+        (550..=600).contains(&vp_w),
+        "unexpected viewport width {vp_w}"
+    );
+    assert_eq!(vp_h, 500);
+
+    // Execute `egui_wgpu::Renderer::update_buffers` (runs `ViewportPrepareCallback::prepare`)
+    // and `egui_wgpu::Renderer::render` into an offscreen 800x500 target, then read back PNG.
+    let primitives = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
     let screen_descriptor = egui_wgpu::ScreenDescriptor {
-        size_in_pixels: [400, 300],
+        size_in_pixels: [800, 500],
         pixels_per_point: full_output.pixels_per_point,
     };
+    let ui_target = OffscreenTarget::new(
+        headless.device(),
+        800,
+        500,
+        wgpu::TextureFormat::Rgba8Unorm,
+        1,
+    )
+    .expect("create ui target");
     let mut encoder = headless
         .device()
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -121,10 +162,61 @@ fn viewport_widget_resizes_and_runs_prepare_callback_in_egui_wgpu() {
         &primitives,
         &screen_descriptor,
     );
+    {
+        let rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("test_egui_ui_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: ui_target.egui_texture_view(),
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.11,
+                        g: 0.11,
+                        b: 0.12,
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        egui_renderer.render(
+            &mut rpass.forget_lifetime(),
+            &primitives,
+            &screen_descriptor,
+        );
+    }
     headless.queue().submit(
         cmd_bufs
             .into_iter()
             .chain(std::iter::once(encoder.finish())),
+    );
+
+    let ui_image = headless
+        .readback_target(&ui_target)
+        .expect("readback composited egui viewport image");
+    let ui_out_path = root.join("target/render-tests/egui_viewport_mixed_linear.png");
+    ui_image
+        .save_png(&ui_out_path)
+        .expect("save egui_viewport_mixed_linear.png");
+
+    // Verify the viewport region (x in 240..790) contains non-white Viridis mesh pixels.
+    let mut viewport_mesh_pixels = 0usize;
+    for y in 20..480 {
+        for x in 240..780 {
+            let [r, g, b, _] = ui_image.pixel(x, y);
+            if r < 245 || g < 245 || b < 245 {
+                viewport_mesh_pixels += 1;
+            }
+        }
+    }
+    assert!(
+        viewport_mesh_pixels > 5000,
+        "expected rendered 3D mesh pixels inside egui viewport region, got {viewport_mesh_pixels}"
     );
 
     // Switch style to vector magnitude and verify range updates.

@@ -82,3 +82,11 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per `.agents/rules/testing.md` and `/render-check`).
 - Dependencies added: enabled `x11` feature on existing `eframe 0.37.0` dev-dependency for Linux `winit` compilation.
 - Follow-ups: M0.10 Milestone gate (`/milestone-gate`).
+
+## 2026-10-23: M0.10 Milestone M0 gate & retrospective
+- Done: verified the M0 gate (*"a `.vtu` file renders colored by a field, both inside an egui app and to a PNG"*), extended `crates/tetraglass-egui/tests/viewport_offscreen.rs` to also execute `egui_wgpu::Renderer::render` into an offscreen target and write `target/render-tests/egui_viewport_mixed_linear.png`, and recorded the gate evidence and images in `docs/milestones/m0-gate.md`.
+- Retrospective:
+  - **Planned vs. actual time:** M0 was estimated for Nov–Dec 2026 and completed ahead of schedule in two days (2026-10-22 to 2026-10-23) because each task was scoped cleanly to a single crate boundary.
+  - **What was cut or moved:** Nothing was cut; in-house `.vtu` parsing (D-018) and `SurfaceMesh` placement in `tetraglass-core` simplified downstream integration in `tetraglass-filters`, `tetraglass-render`, and `tetraglass-egui`.
+  - **What to carry into M1:** Keep enabling Linux windowing features (`x11` without `pkg-config` build-time requirements) whenever adding desktop binaries (`tetraglass-viewer` in M1.8), and keep uploading CI render artifacts so `lavapipe` baselines stay easy to inspect and update. M1 task breakdown (`M1.1`–`M1.11`) looks well-sized as written.
+- Next: M1.1 Scene types (`tetraglass-scene`).

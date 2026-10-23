@@ -2,11 +2,11 @@
 
 Milestones run in order. `/next-task` picks the first unticked task of the first unfinished milestone. Each task should fit one or two evening sessions; split bigger ones into lettered sub-tasks (M2.3a, M2.3b) before starting. Dates are estimates at roughly 8 to 10 hours a week.
 
-Status: **M0 in progress.**
+Status: **M0 complete (2026-10-23); M1 next.**
 
 ---
 
-## M0 Foundations (Nov–Dec 2026)
+## M0 Foundations (Nov–Dec 2026 — Completed 2026-10-23)
 
 **Gate:** a .vtu file renders colored by a field, both inside an egui app and to a PNG.
 
@@ -19,7 +19,7 @@ Status: **M0 in progress.**
 - [x] **M0.7 Headless renderer.** `headless` helper that creates its own device; surface pipeline with positions relative to center, normals, scalar attribute and a viridis colormap texture; offscreen color and depth; PNG readback. *Done when:* an integration test renders `mixed_linear.vtu` colored by `linear` to `target/render-tests/` and the image looks right (`/render-check`).
 - [x] **M0.8 egui viewport widget.** Renders in egui-wgpu's `prepare` into an offscreen target and shows it as a texture; orbit, pan and zoom camera; resize handling. Example `examples/egui_viewport.rs` loads a .vtu given on the command line and offers a field picker. *Done when:* the example runs on the developer's machine at interactive frame rates for the test meshes.
 - [x] **M0.9 CI rendering.** CI runs the render integration test on lavapipe and stores the first baseline image. *Done when:* CI is green with the render test enabled.
-- [ ] **M0.10 Gate.** `/milestone-gate`.
+- [x] **M0.10 Gate.** `/milestone-gate` (`docs/milestones/m0-gate.md`, completed 2026-10-23).
 
 ## M1 Agent loop (Jan–Mar 2027)
 
