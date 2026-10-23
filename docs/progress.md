@@ -47,3 +47,10 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: confirmed D-013 (`u32` connectivity and offset indices, checked on load/construction).
 - Dependencies added: linked existing workspace dependency `thiserror` into `tetraglass-core`.
 - Follow-ups: M0.5 VTU reader and writer in `tetraglass-io`.
+
+## 2026-10-23: M0.5 VTU reader
+- Done: implemented pure-Rust VTK XML `.vtu` reader (`read_vtu`, `read_vtu_from_path`) supporting `ascii`, `binary` (inline base64), and `appended` (`base64` and `raw`) encodings, uncompressed and `vtkZLibDataCompressor`-compressed payloads, `UInt32`/`UInt64` headers, `LittleEndian`/`BigEndian` byte orders, linear, quadratic, Lagrange, and polyhedral cells (both classic `faces`/`faceoffsets` and VTK 9.4+ `face_connectivity` arrays), plus an ASCII `.vtu` writer (`write_vtu`, `write_vtu_to_bytes`) and format detection helpers (`detect_format_from_bytes`, `detect_format_from_extension`).
+- Tests: `crates/tetraglass-io/tests/vtu_roundtrip.rs` covering loading and round-tripping all 11 `testdata/vtk/*.vtu` files, ASCII/binary/appended equivalence, quadratic & Lagrange node-ordering checks, classic & VTU 2.3 polyhedra parsing, and truncation/corruption error handling.
+- Decisions: none (implemented per D-018).
+- Dependencies added: `quick-xml` (0.41, XML streaming parser), `base64` (0.22, binary/appended base64 decoding), `flate2` (1.1 with `rust_backend`, pure-Rust zlib decompression).
+- Follow-ups: M0.6 External surface extraction in `tetraglass-filters`.

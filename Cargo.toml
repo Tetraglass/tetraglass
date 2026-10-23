@@ -23,10 +23,13 @@ tetraglass-render = { path = "crates/tetraglass-render", version = "0.0.0" }
 tetraglass-egui = { path = "crates/tetraglass-egui", version = "0.0.0" }
 
 # External crates: add each version once here, then use `name.workspace = true`.
+base64 = "0.22"
 bytemuck = { version = "1", features = ["derive"] }
 egui = "0.37.0"
 egui-wgpu = "0.37.0"
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 log = "0.4"
+quick-xml = "0.41"
 thiserror = "2"
 wgpu = "30.0.1"
 

@@ -12,4 +12,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+base64.workspace = true
+flate2.workspace = true
+quick-xml.workspace = true
 tetraglass-core.workspace = true
+thiserror.workspace = true
