@@ -617,3 +617,297 @@ fn interactive_clip_uses_shader_plane_while_dragging_and_swaps_in_worker_result(
 
     session.destroy(&mut egui_renderer);
 }
+
+#[test]
+fn webgpu_status_messages_and_wgpu_configuration_enforce_webgpu_only() {
+    use tetraglass_viewer::{WebGpuStatus, webgpu_only_wgpu_configuration};
+
+    assert!(WebGpuStatus::Supported.is_supported());
+    assert!(WebGpuStatus::Supported.error_message().is_none());
+
+    let insecure = WebGpuStatus::NotSecureContext {
+        origin: "http://192.168.1.10:8000".to_string(),
+    }
+    .error_message()
+    .expect("NotSecureContext message");
+    assert!(insecure.title.contains("secure context"));
+    assert!(insecure.to_plain_text().contains("HTTPS or localhost"));
+    assert!(insecure.to_html_fragment().contains("WebGPU"));
+    assert!(insecure.to_html_fragment().contains("WebGL2"));
+
+    let missing_gpu = WebGpuStatus::MissingNavigatorGpu {
+        user_agent: Some("OldBrowser/1.0".to_string()),
+    }
+    .error_message()
+    .expect("MissingNavigatorGpu message");
+    assert!(missing_gpu.summary.contains("navigator.gpu"));
+    assert!(missing_gpu.to_plain_text().contains("Chrome"));
+    assert!(missing_gpu.to_html_fragment().contains("WebGL2"));
+
+    let no_adapter = WebGpuStatus::NoAdapterAvailable {
+        details: Some("adapter <script>blocked</script>".to_string()),
+    }
+    .error_message()
+    .expect("NoAdapterAvailable message");
+    assert!(no_adapter.summary.contains("navigator.gpu"));
+    // Verify HTML escaping of adapter details.
+    let html = no_adapter.to_html_fragment();
+    assert!(html.contains("&lt;script&gt;blocked&lt;/script&gt;"));
+    assert!(!html.contains("<script>blocked</script>"));
+
+    // Verify D-007: WebGPU-only configuration must request BROWSER_WEBGPU and never GL.
+    let cfg = webgpu_only_wgpu_configuration();
+    match cfg.wgpu_setup {
+        egui_wgpu::WgpuSetup::CreateNew(create_new) => {
+            assert_eq!(
+                create_new.instance_descriptor.backends,
+                wgpu::Backends::BROWSER_WEBGPU
+            );
+            assert!(
+                !create_new
+                    .instance_descriptor
+                    .backends
+                    .contains(wgpu::Backends::GL),
+                "WebGL2 backend must never be enabled"
+            );
+        }
+        other => panic!("expected WgpuSetup::CreateNew, got {other:?}"),
+    }
+}
+
+#[test]
+fn url_resolution_and_query_parsing_handle_relative_paths_and_percent_encoding() {
+    use tetraglass_viewer::{
+        extract_url_from_query_str, parse_query_map, resolve_relative_url, url_display_label,
+    };
+
+    assert_eq!(
+        resolve_relative_url(
+            "https://example.org/tetraglass/gallery/slice.json",
+            "../testdata/vtk/mixed_linear.vtu"
+        ),
+        "https://example.org/tetraglass/testdata/vtk/mixed_linear.vtu"
+    );
+    assert_eq!(
+        resolve_relative_url("https://example.org/data/series.pvd", "series_1.vtu"),
+        "https://example.org/data/series_1.vtu"
+    );
+    assert_eq!(
+        resolve_relative_url(
+            "https://example.org/a/b/scene.json?token=123",
+            "/meshes/tet.msh"
+        ),
+        "https://example.org/meshes/tet.msh"
+    );
+    assert_eq!(
+        resolve_relative_url("gallery/slice.json", "../testdata/vtk/mixed_linear.vtu"),
+        "testdata/vtk/mixed_linear.vtu"
+    );
+    assert_eq!(
+        url_display_label("https://example.org/gallery/slice.json?cache=0#top"),
+        "slice.json"
+    );
+
+    let map =
+        parse_query_map("?scene=https%3A%2F%2Fexample.org%2Fgallery%2Fslice.json&foo=bar+baz");
+    assert_eq!(
+        map.get("foo").and_then(|v| v.first()).map(String::as_str),
+        Some("bar baz")
+    );
+    assert_eq!(
+        extract_url_from_query_str("?scene=https%3A%2F%2Fexample.org%2Fgallery%2Fslice.json"),
+        Some("https://example.org/gallery/slice.json".to_string())
+    );
+    assert_eq!(
+        extract_url_from_query_str("?url=testdata/vtk/mixed_linear.vtu"),
+        Some("testdata/vtk/mixed_linear.vtu".to_string())
+    );
+    assert_eq!(
+        extract_url_from_query_str("?file=testdata/gmsh/mixed_linear.msh"),
+        Some("testdata/gmsh/mixed_linear.msh".to_string())
+    );
+    assert_eq!(extract_url_from_query_str("?other=123"), None);
+}
+
+#[derive(Debug)]
+struct MemoryDroppedFile {
+    path: PathBuf,
+    bytes: Vec<u8>,
+}
+
+impl eframe::egui::DroppedFile for MemoryDroppedFile {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        Ok(self.bytes.clone())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn bytes_async(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + '_>> {
+        let bytes = self.bytes.clone();
+        Box::pin(async move { Ok(bytes) })
+    }
+}
+
+#[test]
+fn viewer_session_supports_drag_and_drop_and_url_loading_for_meshes_series_and_scenes() {
+    use std::sync::Arc;
+    use tetraglass_viewer::DroppedFilePayload;
+
+    let root = workspace_root();
+    let vtu_bytes = fs::read(root.join("testdata/vtk/mixed_linear.vtu")).expect("read vtu");
+    let hex_bytes = fs::read(root.join("testdata/vtk/hex_linear.vtu")).expect("read hex_linear");
+    let msh_bytes = fs::read(root.join("testdata/gmsh/tet_v22.msh")).expect("read msh");
+    let pvd_bytes = fs::read(root.join("testdata/vtk/series.pvd")).expect("read pvd");
+    let step0_bytes = fs::read(root.join("testdata/vtk/series_0.vtu")).expect("read step0");
+    let step1_bytes = fs::read(root.join("testdata/vtk/series_1.vtu")).expect("read step1");
+    let step2_bytes = fs::read(root.join("testdata/vtk/series_2.vtu")).expect("read step2");
+    let slice_json_bytes = fs::read(root.join("gallery/slice.json")).expect("read slice.json");
+
+    // Start from the synthetic default demo (used when the web viewer opens with no query URL).
+    let demo_doc = ViewerDocument::default_demo().expect("default_demo");
+    assert!(demo_doc.active_surface().unwrap().num_triangles() > 0);
+
+    let headless = HeadlessContext::new().expect("headless wgpu context");
+    let mut egui_renderer = egui_wgpu::Renderer::new(
+        headless.device(),
+        wgpu::TextureFormat::Rgba8Unorm,
+        egui_wgpu::RendererOptions::default(),
+    );
+    let mut viewport =
+        ViewportState::new(headless.device(), headless.queue(), &mut egui_renderer, 4)
+            .expect("create ViewportState");
+    viewport
+        .ensure_target_size(headless.device(), &mut egui_renderer, 320, 240)
+        .expect("resize viewport");
+
+    let mut session =
+        ViewerSession::new(demo_doc, viewport, headless.device()).expect("create ViewerSession");
+
+    // 1. Drag-and-drop a raw `.msh` file via `ingest_dropped_files`.
+    assert!(
+        session
+            .ingest_dropped_files(
+                [DroppedFilePayload::new(
+                    "mixed_linear.msh",
+                    msh_bytes.clone()
+                )],
+                headless.device(),
+                headless.queue(),
+            )
+            .expect("drop .msh")
+    );
+    assert_eq!(session.document().file_label(), "mixed_linear.msh");
+    assert!(session.last_load_error().is_none());
+
+    // 2. Drag-and-drop a `.json` scene together with its companion `.vtu` mesh (even when `.vtu` is listed first).
+    assert!(
+        session
+            .ingest_dropped_files(
+                [
+                    DroppedFilePayload::new("hex_linear.vtu", hex_bytes.clone()),
+                    DroppedFilePayload::new("slice.json", slice_json_bytes.clone()),
+                ],
+                headless.device(),
+                headless.queue(),
+            )
+            .expect("drop scene + companion mesh")
+    );
+    assert_eq!(session.document().file_label(), "slice.json");
+
+    // 3. Drag-and-drop a `.pvd` time series together with its step `.vtu` files.
+    assert!(
+        session
+            .ingest_dropped_files(
+                [
+                    DroppedFilePayload::new("series_0.vtu", step0_bytes.clone()),
+                    DroppedFilePayload::new("series_1.vtu", step1_bytes.clone()),
+                    DroppedFilePayload::new("series_2.vtu", step2_bytes.clone()),
+                    DroppedFilePayload::new("series.pvd", pvd_bytes.clone()),
+                ],
+                headless.device(),
+                headless.queue(),
+            )
+            .expect("drop pvd + steps")
+    );
+    assert_eq!(session.document().file_label(), "series.pvd");
+    assert_eq!(session.document().num_time_steps(), 3);
+
+    // 4. Simulate dropping a `.vtu` file directly through `egui::RawInput::dropped_files` in `show_ui`.
+    let egui_ctx = eframe::egui::Context::default();
+    let dropped_handle: eframe::egui::DroppedFileHandle = Arc::new(MemoryDroppedFile {
+        path: PathBuf::from("dropped_via_egui.vtu"),
+        bytes: vtu_bytes.clone(),
+    });
+    let raw_input = eframe::egui::RawInput {
+        screen_rect: Some(eframe::egui::Rect::from_min_size(
+            eframe::egui::Pos2::ZERO,
+            eframe::egui::vec2(640.0, 480.0),
+        )),
+        dropped_files: vec![dropped_handle],
+        ..Default::default()
+    };
+    let mut full_output = egui_ctx.run_ui(raw_input, |ui| {
+        session.show_ui(ui, headless.device(), headless.queue(), &mut egui_renderer);
+    });
+    full_output.textures_delta.clear();
+    assert_eq!(session.document().file_label(), "dropped_via_egui.vtu");
+
+    // 5. Load a `.json` scene and a `.pvd` series from simulated remote URLs via `load_from_url_with_fetcher`.
+    let fetcher = |requested_url: &str| -> Result<Vec<u8>, String> {
+        match requested_url {
+            "https://example.org/viz/gallery/slice.json" => Ok(slice_json_bytes.clone()),
+            "https://example.org/viz/testdata/vtk/hex_linear.vtu" => Ok(hex_bytes.clone()),
+            "https://example.org/viz/testdata/vtk/series.pvd" => Ok(pvd_bytes.clone()),
+            "https://example.org/viz/testdata/vtk/series_0.vtu" => Ok(step0_bytes.clone()),
+            "https://example.org/viz/testdata/vtk/series_1.vtu" => Ok(step1_bytes.clone()),
+            "https://example.org/viz/testdata/vtk/series_2.vtu" => Ok(step2_bytes.clone()),
+            other => Err(format!("HTTP 404 for {other}")),
+        }
+    };
+
+    session
+        .load_from_url_with_fetcher(
+            "https://example.org/viz/gallery/slice.json",
+            fetcher,
+            headless.device(),
+            headless.queue(),
+        )
+        .expect("load slice.json from URL");
+    assert_eq!(session.document().file_label(), "slice.json");
+    assert_eq!(
+        session.url_input(),
+        "https://example.org/viz/gallery/slice.json"
+    );
+
+    session
+        .load_from_url_with_fetcher(
+            "https://example.org/viz/testdata/vtk/series.pvd",
+            fetcher,
+            headless.device(),
+            headless.queue(),
+        )
+        .expect("load series.pvd from URL");
+    assert_eq!(session.document().file_label(), "series.pvd");
+    assert_eq!(session.document().num_time_steps(), 3);
+
+    // 6. Verify that a failed URL load records `last_load_error` while preserving the active document.
+    let err = session
+        .load_from_url_with_fetcher(
+            "https://example.org/viz/missing.vtu",
+            fetcher,
+            headless.device(),
+            headless.queue(),
+        )
+        .expect_err("404 URL should fail");
+    assert!(err.to_string().contains("404"));
+    assert!(session.last_load_error().unwrap().contains("404"));
+    assert_eq!(session.document().file_label(), "series.pvd");
+
+    session.destroy(&mut egui_renderer);
+}

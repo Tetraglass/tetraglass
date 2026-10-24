@@ -49,9 +49,9 @@ use egui::{
 use egui_wgpu::wgpu;
 use tetraglass_core::{BoundingBox, SurfaceMesh};
 use tetraglass_render::{
-    Annotations, Camera, ColorBy, DEFAULT_COLOR_FORMAT, GpuSurface, OffscreenTarget, PickTarget,
-    RenderError, Renderer, ScalarComponent, ShaderClipPlane, SurfacePickResult, SurfaceStyle,
-    probe_surface_triangle,
+    Annotations, Camera, ColorBy, DEFAULT_COLOR_FORMAT, GpuSurface, OffscreenTarget,
+    PendingPixelPick, PickTarget, RawPickHit, RenderError, Renderer, ScalarComponent,
+    ShaderClipPlane, SurfacePickResult, SurfaceStyle, probe_surface_triangle,
 };
 
 /// A selectable coloring option for a [`SurfaceMesh`] in a UI field picker.
@@ -152,10 +152,60 @@ struct ViewportGpuInner {
     style: SurfaceStyle,
     annotations: Annotations,
     pending_pick_px: Option<[u32; 2]>,
+    pending_pick_ctx: Option<egui::Context>,
+    in_flight_pick: Option<PendingPixelPick>,
     last_pick: Option<SurfacePickResult>,
 }
 
 impl ViewportGpuInner {
+    fn resolve_raw_pick(
+        &mut self,
+        pixel: [u32; 2],
+        viewport_size: [u32; 2],
+        raw: Option<RawPickHit>,
+    ) -> Option<SurfacePickResult> {
+        let Some(raw) = raw else {
+            self.last_pick = None;
+            return None;
+        };
+
+        let probed = if raw.representation_index == 0 {
+            if let (Some(cpu_surf), Some(gpu_surf)) = (&self.cpu_surface, &self.gpu_surface) {
+                probe_surface_triangle(
+                    cpu_surf,
+                    0,
+                    pixel,
+                    viewport_size,
+                    &self.camera,
+                    gpu_surf.dataset_center(),
+                    raw,
+                    &self.style.color_by,
+                )
+            } else {
+                None
+            }
+        } else {
+            let extra_idx = raw.representation_index - 1;
+            self.extra_surfaces
+                .get(extra_idx)
+                .and_then(|(cpu_surf, gpu_surf, style)| {
+                    probe_surface_triangle(
+                        cpu_surf,
+                        raw.representation_index,
+                        pixel,
+                        viewport_size,
+                        &self.camera,
+                        gpu_surf.dataset_center(),
+                        raw,
+                        &style.color_by,
+                    )
+                })
+        };
+
+        self.last_pick = probed.clone();
+        probed
+    }
+
     fn execute_pick(
         &mut self,
         device: &wgpu::Device,
@@ -175,7 +225,7 @@ impl ViewportGpuInner {
             return Ok(None);
         }
 
-        let Some(raw) = self.renderer.pick_pixel(
+        let raw = self.renderer.pick_pixel(
             device,
             queue,
             &self.pick_target,
@@ -183,48 +233,65 @@ impl ViewportGpuInner {
             &gpu_surfaces,
             x_px,
             y_px,
-        )?
-        else {
-            self.last_pick = None;
-            return Ok(None);
-        };
-
+        )?;
         let viewport_size = [self.pick_target.width(), self.pick_target.height()];
-        let probed = if raw.representation_index == 0 {
-            if let (Some(cpu_surf), Some(gpu_surf)) = (&self.cpu_surface, &self.gpu_surface) {
-                probe_surface_triangle(
-                    cpu_surf,
-                    0,
-                    [x_px, y_px],
-                    viewport_size,
-                    &self.camera,
-                    gpu_surf.dataset_center(),
-                    raw,
-                    &self.style.color_by,
-                )
-            } else {
-                None
-            }
-        } else {
-            let extra_idx = raw.representation_index - 1;
-            self.extra_surfaces
-                .get(extra_idx)
-                .and_then(|(cpu_surf, gpu_surf, style)| {
-                    probe_surface_triangle(
-                        cpu_surf,
-                        raw.representation_index,
-                        [x_px, y_px],
-                        viewport_size,
-                        &self.camera,
-                        gpu_surf.dataset_center(),
-                        raw,
-                        &style.color_by,
-                    )
-                })
-        };
+        Ok(self.resolve_raw_pick([x_px, y_px], viewport_size, raw))
+    }
 
-        self.last_pick = probed.clone();
-        Ok(probed)
+    fn poll_in_flight_pick(&mut self) -> Result<bool, RenderError> {
+        let is_ready = self
+            .in_flight_pick
+            .as_ref()
+            .is_some_and(PendingPixelPick::is_ready);
+        if !is_ready {
+            return Ok(false);
+        }
+        let Some(pending) = self.in_flight_pick.take() else {
+            return Ok(false);
+        };
+        let pixel = pending.pixel();
+        let viewport_size = pending.viewport_size();
+        let raw = pending.finish()?;
+        let _ = self.resolve_raw_pick(pixel, viewport_size, raw);
+        Ok(true)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn start_async_pick(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        x_px: u32,
+        y_px: u32,
+        repaint_ctx: Option<egui::Context>,
+    ) -> Result<(), RenderError> {
+        let mut gpu_surfaces: Vec<&GpuSurface> = Vec::with_capacity(1 + self.extra_surfaces.len());
+        if let Some(primary) = &self.gpu_surface {
+            gpu_surfaces.push(primary);
+        }
+        for (_, extra_gpu, _) in &self.extra_surfaces {
+            gpu_surfaces.push(extra_gpu);
+        }
+        if gpu_surfaces.is_empty() {
+            self.last_pick = None;
+            return Ok(());
+        }
+
+        self.in_flight_pick = self.renderer.begin_pick_pixel(
+            device,
+            queue,
+            &self.pick_target,
+            &self.camera,
+            &gpu_surfaces,
+            x_px,
+            y_px,
+            move || {
+                if let Some(ctx) = repaint_ctx {
+                    ctx.request_repaint();
+                }
+            },
+        )?;
+        Ok(())
     }
 }
 
@@ -280,6 +347,8 @@ impl ViewportState {
             style: SurfaceStyle::default(),
             annotations: Annotations::default(),
             pending_pick_px: None,
+            pending_pick_ctx: None,
+            in_flight_pick: None,
             last_pick: None,
         };
 
@@ -348,6 +417,7 @@ impl ViewportState {
             guard.extra_surfaces.clear();
             guard.last_pick = None;
             guard.pending_pick_px = None;
+            guard.in_flight_pick = None;
         }
         Ok(())
     }
@@ -600,7 +670,10 @@ impl ViewportState {
     /// Returns the most recent [`SurfacePickResult`] from clicking or calling [`Self::pick_at`].
     #[must_use]
     pub fn last_pick(&self) -> Option<SurfacePickResult> {
-        self.inner.lock().ok().and_then(|g| g.last_pick.clone())
+        self.inner.lock().ok().and_then(|mut g| {
+            let _ = g.poll_in_flight_pick();
+            g.last_pick.clone()
+        })
     }
 
     /// Clears the active value-probe result.
@@ -608,6 +681,7 @@ impl ViewportState {
         if let Ok(mut guard) = self.inner.lock() {
             guard.last_pick = None;
             guard.pending_pick_px = None;
+            guard.in_flight_pick = None;
         }
     }
 
@@ -646,10 +720,25 @@ impl egui_wgpu::CallbackTrait for ViewportPrepareCallback {
         _callback_resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         if let Ok(mut guard) = self.inner.lock() {
-            if let Some([x_px, y_px]) = guard.pending_pick_px.take()
-                && let Err(err) = guard.execute_pick(device, queue, x_px, y_px)
-            {
-                log::error!("tetraglass-egui pick failed: {err}");
+            if let Err(err) = guard.poll_in_flight_pick() {
+                log::error!("tetraglass-egui async pick poll failed: {err}");
+            }
+            if let Some([x_px, y_px]) = guard.pending_pick_px.take() {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let _ = guard.pending_pick_ctx.take();
+                    if let Err(err) = guard.execute_pick(device, queue, x_px, y_px) {
+                        log::error!("tetraglass-egui pick failed: {err}");
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let repaint_ctx = guard.pending_pick_ctx.take();
+                    if let Err(err) = guard.start_async_pick(device, queue, x_px, y_px, repaint_ctx)
+                    {
+                        log::error!("tetraglass-egui async pick start failed: {err}");
+                    }
+                }
             }
             let surfaces: Vec<&GpuSurface> = guard
                 .gpu_surface
@@ -769,7 +858,10 @@ impl<'a> ViewportWidget<'a> {
             let rel_y = ((pos.y - rect.min.y) * ppp)
                 .round()
                 .clamp(0.0, (height_px.saturating_sub(1)) as f32) as u32;
-            self.state.request_pick_at(rel_x, rel_y);
+            if let Ok(mut guard) = self.state.inner.lock() {
+                guard.pending_pick_px = Some([rel_x, rel_y]);
+                guard.pending_pick_ctx = Some(ui.ctx().clone());
+            }
             ui.ctx().request_repaint();
         }
 

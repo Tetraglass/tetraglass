@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>Tetraglass WebGPU Viewer</title>
+  <link data-trunk rel="rust" href="../Cargo.toml" data-bin="tetraglass-viewer" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #0b1120;
+      color: #f8fafc;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    #tetraglass_canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+    #tetraglass-webgpu-status {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(11, 17, 32, 0.94);
+      z-index: 100;
+      padding: 1.5rem;
+    }
+  </style>
+</head>
+<body>
+  <div id="tetraglass-webgpu-status" role="alert" aria-live="polite"></div>
+  <canvas id="tetraglass_canvas"></canvas>
+
+  <script type="module">
+    // Early synchronous check so browsers without WebGPU show a clear message immediately,
+    // even before the WASM bundle finishes downloading.
+    const statusBox = document.getElementById("tetraglass-webgpu-status");
+    const canvas = document.getElementById("tetraglass_canvas");
+
+    function showPrecheckError(title, summary, remediation) {
+      if (!statusBox) return;
+      if (canvas) canvas.style.display = "none";
+      statusBox.style.display = "flex";
+      statusBox.innerHTML =
+        `<div class="tetraglass-webgpu-error" style="max-width:640px;margin:2rem auto;padding:1.5rem 1.75rem;` +
+        `border-radius:10px;border:1px solid #d9534f;background:#1b1f27;color:#f8f9fa;line-height:1.55;">` +
+        `<h2 style="margin-top:0;color:#ff6b6b;">${title}</h2>` +
+        `<p>${summary}</p>` +
+        `<p><strong>How to fix:</strong> ${remediation}</p>` +
+        `<p style="margin-bottom:0;font-size:0.9rem;color:#adb5bd;">` +
+        `Tetraglass targets WebGPU exclusively in the browser (no WebGL2 fallback).</p>` +
+        `</div>`;
+    }
+
+    if (window.isSecureContext === false) {
+      showPrecheckError(
+        "WebGPU requires a secure context (HTTPS or localhost)",
+        "This page was loaded over an insecure context, so the browser disables the WebGPU API (navigator.gpu).",
+        "Serve the viewer over https:// or http://localhost (for example `python3 -m http.server` on localhost)."
+      );
+    } else if (!("gpu" in navigator) || !navigator.gpu) {
+      showPrecheckError(
+        "WebGPU is not supported in this browser",
+        "The browser does not expose `navigator.gpu`. Tetraglass requires WebGPU on the web and does not fall back to WebGL2.",
+        "Open this page in a browser with WebGPU enabled: Chrome / Edge 113+, Firefox 141+ (or Nightly with dom.webgpu.enabled), or Safari 18+."
+      );
+    }
+  </script>
+</body>
+</html>

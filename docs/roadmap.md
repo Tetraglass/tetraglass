@@ -2,7 +2,7 @@
 
 Milestones run in order. `/next-task` picks the first unticked task of the first unfinished milestone. Each task should fit one or two evening sessions; split bigger ones into lettered sub-tasks (M2.3a, M2.3b) before starting. Dates are estimates at roughly 8 to 10 hours a week.
 
-Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 next.**
+Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 complete (2026-10-24); M3 in progress.**
 
 ---
 
@@ -37,7 +37,7 @@ Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 next.**
 - [x] **M1.10 Gallery.** At least five gallery scenes with baselines; `author-scene` skill examples checked against the real CLI.
 - [x] **M1.11 Gate.** `/milestone-gate`, including the fresh-agent test (`docs/milestones/m1-gate.md`, completed 2026-10-24).
 
-## M2 Core filters (Apr–Jul 2027)
+## M2 Core filters (Apr–Jul 2027 — Completed 2026-10-24)
 
 **Gate:** release 0.1 on crates.io with docs and a gallery.
 
@@ -59,7 +59,7 @@ Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 next.**
 
 **Gate:** one CFD result shown both in Cycles (via `render --engine cycles`) and in the browser.
 
-- [ ] **M3.1 Web viewer.** WASM build on WebGPU, drag-and-drop and URL loading, a clear message without WebGPU.
+- [x] **M3.1 Web viewer.** WASM build on WebGPU, drag-and-drop and URL loading, a clear message without WebGPU.
 - [ ] **M3.2 Shareable links.** A link to a scene plus data opens in the web viewer.
 - [ ] **M3.3 Transparency.** Weighted blended order-independent transparency.
 - [ ] **M3.4 glTF export.** Baked colors, normalized scalar in a second texture coordinate, one .glb per time step.

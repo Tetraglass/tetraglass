@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 /// Crates whose directory names end with these suffixes must build for wasm32.
-const WASM_CRATE_SUFFIXES: [&str; 4] = ["-core", "-io", "-filters", "-scene"];
+const WASM_CRATE_SUFFIXES: [&str; 7] = [
+    "-core", "-io", "-filters", "-scene", "-render", "-egui", "-viewer",
+];
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
 fn main() -> ExitCode {

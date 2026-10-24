@@ -4,6 +4,7 @@
 //! `tetraglass-render` that creates a `wgpu::Instance`, `Adapter`, `Device`, and `Queue`.
 
 use std::future::Future;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};

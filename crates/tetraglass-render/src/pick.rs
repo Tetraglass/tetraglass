@@ -12,6 +12,8 @@
 //! recover exact barycentric weights, world coordinates, nearest mesh vertex, face and source-cell
 //! IDs, and interpolated values across all point and cell [`DataArray`](tetraglass_core::DataArray)s.
 
+use std::sync::{Arc, Mutex};
+
 use tetraglass_core::SurfaceMesh;
 
 use crate::camera::Camera;
@@ -163,6 +165,71 @@ impl RawPickHit {
             depth: f32::from_bits(texel[2]),
             gpu_scalar: f32::from_bits(texel[3]),
         })
+    }
+}
+
+/// In-flight single-pixel GPU ID buffer readback started by [`crate::Renderer::begin_pick_pixel`].
+///
+/// On native targets [`crate::Renderer::pick_pixel`] polls the device synchronously and calls
+/// [`Self::finish`] immediately; on `wasm32` (WebGPU) the caller polls [`Self::is_ready`] across
+/// animation frames without blocking the browser main thread.
+#[derive(Debug)]
+pub struct PendingPixelPick {
+    pixel: [u32; 2],
+    viewport_size: [u32; 2],
+    staging_buffer: wgpu::Buffer,
+    map_result: Arc<Mutex<Option<Result<(), wgpu::BufferAsyncError>>>>,
+}
+
+impl PendingPixelPick {
+    pub(crate) const fn new(
+        pixel: [u32; 2],
+        viewport_size: [u32; 2],
+        staging_buffer: wgpu::Buffer,
+        map_result: Arc<Mutex<Option<Result<(), wgpu::BufferAsyncError>>>>,
+    ) -> Self {
+        Self {
+            pixel,
+            viewport_size,
+            staging_buffer,
+            map_result,
+        }
+    }
+
+    /// Returns the `[x, y]` physical pixel coordinates being read back.
+    #[must_use]
+    pub const fn pixel(&self) -> [u32; 2] {
+        self.pixel
+    }
+
+    /// Returns the `[width, height]` physical viewport dimensions when the pick pass was recorded.
+    #[must_use]
+    pub const fn viewport_size(&self) -> [u32; 2] {
+        self.viewport_size
+    }
+
+    /// Returns `true` once the asynchronous `map_async` callback has fired.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.map_result.lock().is_ok_and(|slot| slot.is_some())
+    }
+
+    /// Reads the mapped 16-byte `Rgba32Uint` texel, unmaps the staging buffer, and decodes the [`RawPickHit`].
+    pub fn finish(self) -> Result<Option<RawPickHit>, RenderError> {
+        let status = self
+            .map_result
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+            .unwrap_or(Ok(()));
+        status?;
+
+        let mapped = self.staging_buffer.get_mapped_range(..16)?;
+        let texel: [u32; 4] = *bytemuck::from_bytes(&mapped[..16]);
+        drop(mapped);
+        self.staging_buffer.unmap();
+
+        Ok(RawPickHit::from_rgba_u32(texel))
     }
 }
 

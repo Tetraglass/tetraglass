@@ -1,16 +1,23 @@
-//! Desktop viewer binary (`tetraglass-viewer`) for opening and hot-reloading scenes (`M1.8`).
+//! Desktop and WebGPU viewer binary (`tetraglass-viewer`) for opening scenes and meshes (`M1.8`, `M3.1`).
 //!
-//! Run with:
+//! Run natively with:
 //! ```sh
 //! cargo run -p tetraglass-viewer -- path/to/scene.json
 //! ```
+//!
+//! Or compile for WebGPU (`wasm32-unknown-unknown`) and host with `crates/tetraglass-viewer/web/index.html`.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::env;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use std::process::ExitCode;
 
+#[cfg(not(target_arch = "wasm32"))]
 use tetraglass_viewer::{ViewerOptions, run_viewer};
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     match parse_viewer_args(&args) {
@@ -32,6 +39,16 @@ fn main() -> ExitCode {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    wasm_bindgen_futures::spawn_local(async {
+        if let Err(err) = tetraglass_viewer::start_web_viewer_default().await {
+            log::error!("Failed to launch Tetraglass WebGPU viewer: {err:?}");
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn help_text() -> String {
     format!(
         "tetraglass-viewer {}\n\n\
@@ -41,6 +58,7 @@ fn help_text() -> String {
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_viewer_args(args: &[String]) -> Result<Option<ViewerOptions>, String> {
     let mut path: Option<PathBuf> = None;
     let mut max_frames: Option<u64> = None;

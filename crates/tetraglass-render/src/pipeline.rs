@@ -12,7 +12,7 @@ use crate::annotations::{
 use crate::camera::Camera;
 use crate::colormap::ColormapKind;
 use crate::error::{FieldAssociation, RenderError};
-use crate::pick::{PICK_FORMAT, PickTarget, RawPickHit};
+use crate::pick::{PICK_FORMAT, PendingPixelPick, PickTarget, RawPickHit};
 
 /// Default offscreen color texture format (sRGB 8-bit RGBA).
 pub const DEFAULT_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -1591,9 +1591,13 @@ impl Renderer {
         Ok(())
     }
 
-    /// Renders `surfaces` into `target` and synchronously reads back the [`RawPickHit`] at pixel `(x, y)`.
-    #[allow(clippy::too_many_arguments)] // Reason: combines device, queue, target, camera, surfaces, and pixel coordinates
-    pub fn pick_pixel(
+    /// Submits a GPU ID buffer render pass for `surfaces` into `target` and starts an asynchronous
+    /// 1-pixel readback at `(x, y)` without blocking.
+    ///
+    /// On `wasm32` (WebGPU) this avoids blocking the browser main thread; `on_ready` is invoked
+    /// when `map_async` completes so the UI can request a repaint and call [`PendingPixelPick::finish`].
+    #[allow(clippy::too_many_arguments)] // Reason: combines device, queue, target, camera, surfaces, pixel coordinates, and completion callback
+    pub fn begin_pick_pixel(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1602,7 +1606,8 @@ impl Renderer {
         surfaces: &[&GpuSurface],
         x: u32,
         y: u32,
-    ) -> Result<Option<RawPickHit>, RenderError> {
+        on_ready: impl FnOnce() + Send + 'static,
+    ) -> Result<Option<PendingPixelPick>, RenderError> {
         if x >= target.width() || y >= target.height() {
             return Ok(None);
         }
@@ -1650,23 +1655,36 @@ impl Renderer {
                 if let Ok(mut slot) = map_result_clone.lock() {
                     *slot = Some(res);
                 }
+                on_ready();
             });
 
+        Ok(Some(PendingPixelPick::new(
+            [x, y],
+            [target.width(), target.height()],
+            staging_buffer,
+            map_result,
+        )))
+    }
+
+    /// Renders `surfaces` into `target` and synchronously reads back the [`RawPickHit`] at pixel `(x, y)`.
+    #[allow(clippy::too_many_arguments)] // Reason: combines device, queue, target, camera, surfaces, and pixel coordinates
+    pub fn pick_pixel(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &PickTarget,
+        camera: &Camera,
+        surfaces: &[&GpuSurface],
+        x: u32,
+        y: u32,
+    ) -> Result<Option<RawPickHit>, RenderError> {
+        let Some(pending) =
+            self.begin_pick_pixel(device, queue, target, camera, surfaces, x, y, || {})?
+        else {
+            return Ok(None);
+        };
         device.poll(wgpu::PollType::wait_indefinitely())?;
-
-        let status = map_result
-            .lock()
-            .ok()
-            .and_then(|mut slot| slot.take())
-            .unwrap_or(Ok(()));
-        status?;
-
-        let mapped = staging_buffer.get_mapped_range(..16)?;
-        let texel: [u32; 4] = *bytemuck::from_bytes(&mapped[..16]);
-        drop(mapped);
-        staging_buffer.unmap();
-
-        Ok(RawPickHit::from_rgba_u32(texel))
+        pending.finish()
     }
 }
 

@@ -1,4 +1,4 @@
-//! Interactive desktop (`eframe`) viewer for Tetraglass scenes and meshes (`M1.8`).
+//! Interactive desktop and WebGPU (`eframe`) viewer for Tetraglass scenes and meshes (`M1.8`, `M3.1`).
 //!
 //! # Architecture & invariants
 //!
@@ -7,15 +7,21 @@
 //!   without depending on `wgpu`.
 //! - [`ViewerSession`] and [`ViewerApp`] bridge [`ViewerDocument`] to [`tetraglass_egui::ViewportState`]
 //!   and [`tetraglass_egui::ViewportWidget`]. All `wgpu` rendering remains inside `tetraglass-render`.
+//! - [`web_support`] (and `web` on `wasm32-unknown-unknown`) provides WebGPU-only setup (`D-007`),
+//!   clear user-facing diagnostics when WebGPU is unavailable, drag-and-drop byte-buffer ingestion,
+//!   and relative-aware URL loading (`M3.1`).
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use eframe::egui;
-use tetraglass_core::{BoundingBox, SurfaceMesh, TetView, TimeSeries};
+use tetraglass_core::{
+    BoundingBox, SurfaceMesh, SyntheticCellLayout, SyntheticGridSpec, TetView, TimeSeries,
+    UnstructuredGrid,
+};
 use tetraglass_egui::{
     FieldOption, ViewportCamera, ViewportColorBy, ViewportColormap, ViewportScalarComponent,
     ViewportState, ViewportSurfaceStyle, ViewportWidget, available_field_options,
@@ -37,6 +43,59 @@ use tetraglass_scene::{
     TimeSelector, View, validate_scene_with_metadata,
 };
 use thiserror::Error;
+
+pub mod web_support;
+pub use web_support::{
+    DroppedFilePayload, FetchedUrlBundle, InMemoryFileStore, WebGpuErrorMessage, WebGpuStatus,
+    extract_url_from_query_map, extract_url_from_query_str, fetch_url_bundle_with, parse_query_map,
+    resolve_relative_url, url_display_label, webgpu_only_wgpu_configuration,
+};
+
+/// Browser (`wasm32-unknown-unknown`) entry points, WebGPU capability checks, and `fetch` loader (`M3.1`).
+#[cfg(target_arch = "wasm32")]
+pub mod web;
+#[cfg(target_arch = "wasm32")]
+pub use web::{
+    WebViewerHandle, check_webgpu_status_sync, detect_webgpu_status, fetch_bytes_from_url,
+    fetch_url_bundle_async, render_webgpu_error_banner, start_web_viewer_default,
+};
+
+#[derive(Debug, Clone, Copy)]
+struct MonotonicInstant {
+    #[cfg(not(target_arch = "wasm32"))]
+    inner: std::time::Instant,
+    #[cfg(target_arch = "wasm32")]
+    secs: f64,
+}
+
+impl MonotonicInstant {
+    fn now() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self {
+                inner: std::time::Instant::now(),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let secs = web_sys::window()
+                .and_then(|w| w.performance())
+                .map_or(0.0, |p| p.now() / 1000.0);
+            Self { secs }
+        }
+    }
+
+    fn duration_since(self, earlier: Self) -> Duration {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.inner.duration_since(earlier.inner)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Duration::from_secs_f64((self.secs - earlier.secs).max(0.0))
+        }
+    }
+}
 
 /// Default polling interval for checking scene and source files on disk during hot reload.
 pub const DEFAULT_HOT_RELOAD_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -334,6 +393,167 @@ impl ViewerDocument {
         };
         doc.sync_ui_controls_from_scene();
         Ok(doc)
+    }
+
+    /// Creates a synthetic default [`ViewerDocument`] (used when the web viewer opens without a URL parameter).
+    pub fn default_demo() -> Result<Self, ViewerError> {
+        let grid = SyntheticGridSpec::new(6, 6, 6, SyntheticCellLayout::Hexahedra)
+            .generate()
+            .map_err(|e| ViewerError::Validation(format!("synthetic demo mesh error: {e}")))?;
+        Self::from_grid("synthetic_demo.vtu", grid)
+    }
+
+    /// Creates a [`ViewerDocument`] from an in-memory [`UnstructuredGrid`] and display label.
+    pub fn from_grid(
+        file_label: impl Into<String>,
+        grid: UnstructuredGrid,
+    ) -> Result<Self, ViewerError> {
+        let file_label = file_label.into();
+        let default_color_by = grid
+            .point_data()
+            .names()
+            .next()
+            .map(|name| format!("point:{name}"))
+            .or_else(|| {
+                grid.cell_data()
+                    .names()
+                    .next()
+                    .map(|name| format!("cell:{name}"))
+            });
+
+        let mut rep = Representation::new("mesh");
+        rep.colorbar = ColorbarSpec::Enabled(default_color_by.is_some());
+        rep.color_by = default_color_by;
+
+        let mut sources = BTreeMap::new();
+        sources.insert("mesh".to_string(), Source::new(file_label.clone()));
+
+        let mut output = Output::new("out.png");
+        output.time = TimeSelector::LAST;
+
+        let scene = Scene {
+            version: 1,
+            sources,
+            filters: BTreeMap::new(),
+            view: View {
+                show: vec![rep],
+                camera: CameraConfig::default(),
+                lights: LightingPreset::Default,
+                background: BackgroundSpec::Solid(ColorSpec::Named("white".to_string())),
+                axes: true,
+                title: None,
+            },
+            output: Some(output),
+        };
+
+        let mut evaluator = SceneEvaluator::new();
+        evaluator.insert_source("mesh", grid);
+        let evaluated = evaluator.evaluate_scene_at_time(&scene, TimeSelector::LAST)?;
+        let current_step = evaluated.time_step;
+
+        let mut doc = Self {
+            file_label,
+            scene_path: None,
+            is_raw_mesh_path: true,
+            base_dir: PathBuf::new(),
+            scene,
+            evaluator,
+            evaluated,
+            time_steps: vec![0.0],
+            current_step,
+            field_options: Vec::new(),
+            selected_field_idx: 0,
+            colormap: ColormapName::Viridis,
+            use_log_scale: false,
+            show_colorbar: false,
+            show_axes: true,
+            watcher: None,
+            last_reload_error: None,
+            reload_count: 0,
+        };
+        doc.sync_ui_controls_from_scene();
+        Ok(doc)
+    }
+
+    /// Creates a [`ViewerDocument`] from in-memory mesh bytes (`.vtu` or `.msh`).
+    pub fn from_mesh_bytes(
+        file_name: impl Into<String>,
+        bytes: Vec<u8>,
+    ) -> Result<Self, ViewerError> {
+        let store = InMemoryFileStore::new();
+        Self::from_file_bytes_with_store(file_name, bytes, &store)
+    }
+
+    /// Creates a [`ViewerDocument`] from an in-memory primary file (`file_name`, `bytes`) and an
+    /// [`InMemoryFileStore`] supplying any companion files (for `.json` scenes or `.pvd` series).
+    pub fn from_file_bytes_with_store(
+        file_name: impl Into<String>,
+        bytes: Vec<u8>,
+        store: &InMemoryFileStore,
+    ) -> Result<Self, ViewerError> {
+        let file_name = file_name.into();
+        let virtual_path = Path::new(&file_name);
+        let is_json = is_scene_json_path_or_bytes(virtual_path, &bytes);
+        let file_label = virtual_path
+            .file_name()
+            .map_or_else(|| file_name.clone(), |s| s.to_string_lossy().into_owned());
+
+        let (scene, mut evaluator, time_steps) = if is_json {
+            let scene = Scene::from_json_bytes(&bytes)?;
+            let (evaluator, time_steps) =
+                load_and_validate_sources_from_store(&scene, store, None)?;
+            (scene, evaluator, time_steps)
+        } else {
+            build_default_scene_for_mesh_with_store(virtual_path, &bytes, store)?
+        };
+
+        let initial_selector = scene.output.as_ref().map_or(TimeSelector::LAST, |o| o.time);
+        let evaluated = evaluator.evaluate_scene_at_time(&scene, initial_selector)?;
+        let current_step = evaluated.time_step;
+
+        let mut doc = Self {
+            file_label,
+            scene_path: None,
+            is_raw_mesh_path: !is_json,
+            base_dir: PathBuf::new(),
+            scene,
+            evaluator,
+            evaluated,
+            time_steps,
+            current_step,
+            field_options: Vec::new(),
+            selected_field_idx: 0,
+            colormap: ColormapName::Viridis,
+            use_log_scale: false,
+            show_colorbar: false,
+            show_axes: true,
+            watcher: None,
+            last_reload_error: None,
+            reload_count: 0,
+        };
+        doc.sync_ui_controls_from_scene();
+        Ok(doc)
+    }
+
+    /// Creates a [`ViewerDocument`] from a pre-fetched [`FetchedUrlBundle`] (`M3.1`).
+    pub fn from_fetched_bundle(bundle: FetchedUrlBundle) -> Result<Self, ViewerError> {
+        let mut doc = Self::from_file_bytes_with_store(
+            bundle.label.clone(),
+            bundle.primary_bytes,
+            &bundle.companion_files,
+        )?;
+        doc.file_label = bundle.label;
+        Ok(doc)
+    }
+
+    /// Fetches `url` (and any referenced scene sources or `.pvd` step files) using `fetcher` and
+    /// builds a [`ViewerDocument`] (`M3.1`).
+    pub fn from_url_with_fetcher<F>(url: &str, fetcher: F) -> Result<Self, ViewerError>
+    where
+        F: FnMut(&str) -> Result<Vec<u8>, String>,
+    {
+        let bundle = fetch_url_bundle_with(url, fetcher)?;
+        Self::from_fetched_bundle(bundle)
     }
 
     /// Returns the short display label for the opened file.
@@ -1016,8 +1236,8 @@ pub struct ViewerSession {
     doc: ViewerDocument,
     viewport: ViewportState,
     is_playing: bool,
-    last_reload_poll: Instant,
-    last_playback_tick: Instant,
+    last_reload_poll: MonotonicInstant,
+    last_playback_tick: MonotonicInstant,
     clip_state: InteractiveClipState,
     clip_base_hull: Option<Arc<SurfaceMesh>>,
     clip_base_tet_view: Option<Arc<TetView>>,
@@ -1026,6 +1246,14 @@ pub struct ViewerSession {
     clip_tx: mpsc::Sender<CompletedClipJob>,
     clip_rx: mpsc::Receiver<CompletedClipJob>,
     active_exact_clip_surface: Option<Arc<SurfaceMesh>>,
+    file_store: InMemoryFileStore,
+    url_input: String,
+    last_load_error: Option<String>,
+    url_loading_in_progress: bool,
+    async_drop_tx: mpsc::Sender<Result<Vec<DroppedFilePayload>, String>>,
+    async_drop_rx: mpsc::Receiver<Result<Vec<DroppedFilePayload>, String>>,
+    async_url_tx: mpsc::Sender<Result<FetchedUrlBundle, String>>,
+    async_url_rx: mpsc::Receiver<Result<FetchedUrlBundle, String>>,
 }
 
 impl std::fmt::Debug for ViewerSession {
@@ -1034,6 +1262,8 @@ impl std::fmt::Debug for ViewerSession {
             .field("doc", &self.doc)
             .field("is_playing", &self.is_playing)
             .field("clip_state", &self.clip_state)
+            .field("url_input", &self.url_input)
+            .field("last_load_error", &self.last_load_error)
             .finish_non_exhaustive()
     }
 }
@@ -1074,8 +1304,10 @@ impl ViewerSession {
         };
         let clip_showing_hull = !clip_state.enabled;
         let (clip_tx, clip_rx) = mpsc::channel();
+        let (async_drop_tx, async_drop_rx) = mpsc::channel();
+        let (async_url_tx, async_url_rx) = mpsc::channel();
 
-        let now = Instant::now();
+        let now = MonotonicInstant::now();
         Ok(Self {
             doc,
             viewport,
@@ -1090,6 +1322,14 @@ impl ViewerSession {
             clip_tx,
             clip_rx,
             active_exact_clip_surface: None,
+            file_store: InMemoryFileStore::new(),
+            url_input: String::new(),
+            last_load_error: None,
+            url_loading_in_progress: false,
+            async_drop_tx,
+            async_drop_rx,
+            async_url_tx,
+            async_url_rx,
         })
     }
 
@@ -1123,6 +1363,165 @@ impl ViewerSession {
     /// Returns a mutable reference to the [`ViewportState`].
     pub const fn viewport_mut(&mut self) -> &mut ViewportState {
         &mut self.viewport
+    }
+
+    /// Returns the most recent drag-and-drop or URL loading error message, if any (`M3.1`).
+    #[must_use]
+    pub fn last_load_error(&self) -> Option<&str> {
+        self.last_load_error.as_deref()
+    }
+
+    /// Clears the active drag-and-drop or URL loading error message (`M3.1`).
+    pub fn clear_load_error(&mut self) {
+        self.last_load_error = None;
+    }
+
+    /// Returns the current text in the viewer's URL input box (`M3.1`).
+    #[must_use]
+    pub fn url_input(&self) -> &str {
+        &self.url_input
+    }
+
+    /// Sets the text in the viewer's URL input box (`M3.1`).
+    pub fn set_url_input(&mut self, url: impl Into<String>) {
+        self.url_input = url.into();
+    }
+
+    /// Returns a reference to the session's [`InMemoryFileStore`] holding dropped companion files (`M3.1`).
+    #[must_use]
+    pub const fn file_store(&self) -> &InMemoryFileStore {
+        &self.file_store
+    }
+
+    /// Replaces the active [`ViewerDocument`] and uploads its surfaces, camera, background, and
+    /// annotations to the GPU [`ViewportState`] (`M3.1`).
+    pub fn replace_document(
+        &mut self,
+        mut doc: ViewerDocument,
+        device: &egui_wgpu::wgpu::Device,
+        queue: &egui_wgpu::wgpu::Queue,
+    ) -> Result<(), ViewerError> {
+        self.is_playing = false;
+        self.last_load_error = None;
+        self.clip_generation = self.clip_generation.wrapping_add(1);
+        self.active_exact_clip_surface = None;
+        self.viewport.clear_pick();
+        self.viewport.set_clip_plane(queue, None);
+
+        let (clip_base_hull, clip_base_tet_view, clip_state) = match doc.resolve_clip_volume()? {
+            Some((hull, tet_view, state)) => (Some(hull), Some(tet_view), state),
+            None => (None, None, InteractiveClipState::new([0.0, 0.0, 0.0], 1.0)),
+        };
+        self.clip_base_hull = clip_base_hull;
+        self.clip_base_tet_view = clip_base_tet_view;
+        self.clip_state = clip_state;
+        self.clip_showing_hull = !self.clip_state.enabled;
+        self.doc = doc;
+
+        self.sync_viewport_after_doc_change(device, queue, true, true)
+    }
+
+    /// Ingests one or more dropped files (`M3.1`), storing all files in the session's
+    /// [`InMemoryFileStore`] and loading the primary scene (`.json`) or mesh (`.pvd`, `.vtu`, `.msh`).
+    ///
+    /// When a user drops a `.json` scene together with its `.vtu`/`.msh` source files (or a `.pvd`
+    /// together with its step `.vtu` files), [`InMemoryFileStore::select_primary_dropped_file`]
+    /// automatically selects the `.json` or `.pvd` as the entry point while resolving the companion
+    /// files from the store.
+    pub fn ingest_dropped_files(
+        &mut self,
+        files: impl IntoIterator<Item = DroppedFilePayload>,
+        device: &egui_wgpu::wgpu::Device,
+        queue: &egui_wgpu::wgpu::Queue,
+    ) -> Result<bool, ViewerError> {
+        let collected: Vec<DroppedFilePayload> = files.into_iter().collect();
+        let Some(primary_idx) = InMemoryFileStore::select_primary_dropped_file(&collected) else {
+            return Ok(false);
+        };
+        let primary = collected[primary_idx].clone();
+        self.file_store.insert_all(collected);
+
+        match ViewerDocument::from_file_bytes_with_store(
+            primary.name,
+            primary.bytes,
+            &self.file_store,
+        ) {
+            Ok(doc) => {
+                self.replace_document(doc, device, queue)?;
+                Ok(true)
+            }
+            Err(err) => {
+                self.last_load_error = Some(err.to_string());
+                Err(err)
+            }
+        }
+    }
+
+    /// Fetches `url` (and any referenced scene sources or `.pvd` step files) using `fetcher` and
+    /// replaces the active document (`M3.1`).
+    pub fn load_from_url_with_fetcher<F>(
+        &mut self,
+        url: &str,
+        fetcher: F,
+        device: &egui_wgpu::wgpu::Device,
+        queue: &egui_wgpu::wgpu::Queue,
+    ) -> Result<(), ViewerError>
+    where
+        F: FnMut(&str) -> Result<Vec<u8>, String>,
+    {
+        let trimmed = url.trim();
+        self.url_input = trimmed.to_string();
+        match ViewerDocument::from_url_with_fetcher(trimmed, fetcher) {
+            Ok(doc) => {
+                self.replace_document(doc, device, queue)?;
+                Ok(())
+            }
+            Err(err) => {
+                self.last_load_error = Some(err.to_string());
+                Err(err)
+            }
+        }
+    }
+
+    /// Triggers loading a scene or mesh from `url` (`M3.1`).
+    ///
+    /// - On `wasm32-unknown-unknown`, spawns an asynchronous browser `fetch` task that resolves
+    ///   primary and companion URLs and swaps the loaded document in on completion.
+    /// - On native targets, resolves local filesystem paths (or `file://` URLs) and queues the
+    ///   bundle for the next UI frame.
+    pub fn request_load_url(&mut self, url: &str, ctx: Option<egui::Context>) {
+        let trimmed = url.trim().to_string();
+        if trimmed.is_empty() {
+            return;
+        }
+        self.url_input.clone_from(&trimmed);
+        self.last_load_error = None;
+        self.url_loading_in_progress = true;
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let tx = self.async_url_tx.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let res = crate::web::fetch_url_bundle_async(&trimmed).await;
+                let _ = tx.send(res);
+                if let Some(c) = ctx {
+                    c.request_repaint();
+                }
+            });
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let res = fetch_url_bundle_with(&trimmed, |target| {
+                let path_str = target.strip_prefix("file://").unwrap_or(target);
+                fs::read(path_str).map_err(|e| format!("{path_str}: {e}"))
+            })
+            .map_err(|e| e.to_string());
+            let _ = self.async_url_tx.send(res);
+            if let Some(c) = ctx {
+                c.request_repaint();
+            }
+        }
     }
 
     /// Synchronously probes the surface at physical viewport pixel `(x_px, y_px)` using the GPU ID buffer.
@@ -1477,22 +1876,106 @@ impl ViewerSession {
         queue: &egui_wgpu::wgpu::Queue,
         egui_renderer: &mut egui_wgpu::Renderer,
     ) {
-        let now = Instant::now();
+        let now = MonotonicInstant::now();
         if let Err(err) = self.poll_clip_worker(device, queue) {
             log::error!("Interactive clip worker failed: {err}");
         }
-        if self.clip_state.worker_busy {
+        if self.clip_state.worker_busy || self.url_loading_in_progress {
             ui.ctx().request_repaint_after(Duration::from_millis(16));
         }
 
-        if now.duration_since(self.last_reload_poll) >= DEFAULT_HOT_RELOAD_POLL_INTERVAL {
-            self.last_reload_poll = now;
-            if let Err(err) = self.poll_hot_reload(device, queue) {
-                log::error!("Hot reload failed: {err}");
+        // Handle newly dropped files from egui's raw input (`M3.1`).
+        let dropped_handles = ui.ctx().input(|i| i.raw.dropped_files.clone());
+        if !dropped_handles.is_empty() {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let mut payloads = Vec::new();
+                let mut read_err = None;
+                for handle in dropped_handles {
+                    let name = handle.path().to_string_lossy().into_owned();
+                    match handle.bytes() {
+                        Ok(bytes) => payloads.push(DroppedFilePayload::new(name, bytes)),
+                        Err(err) => {
+                            read_err = Some(format!("failed to read dropped file `{name}`: {err}"));
+                            break;
+                        }
+                    }
+                }
+                if let Some(err) = read_err {
+                    let _ = self.async_drop_tx.send(Err(err));
+                } else {
+                    let _ = self.async_drop_tx.send(Ok(payloads));
+                }
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                let tx = self.async_drop_tx.clone();
+                let ctx = ui.ctx().clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    let mut payloads = Vec::new();
+                    for handle in dropped_handles {
+                        let name = handle.path().to_string_lossy().into_owned();
+                        match handle.bytes_async().await {
+                            Ok(bytes) => payloads.push(DroppedFilePayload::new(name, bytes)),
+                            Err(err) => {
+                                let _ = tx.send(Err(format!("failed to read `{name}`: {err}")));
+                                ctx.request_repaint();
+                                return;
+                            }
+                        }
+                    }
+                    let _ = tx.send(Ok(payloads));
+                    ctx.request_repaint();
+                });
             }
         }
-        ui.ctx()
-            .request_repaint_after(DEFAULT_HOT_RELOAD_POLL_INTERVAL);
+
+        // Poll async dropped-file and URL-fetch channels.
+        while let Ok(drop_res) = self.async_drop_rx.try_recv() {
+            match drop_res {
+                Ok(payloads) => {
+                    if let Err(err) = self.ingest_dropped_files(payloads, device, queue) {
+                        log::error!("Failed to ingest dropped files: {err}");
+                    }
+                }
+                Err(err) => {
+                    self.last_load_error = Some(err);
+                }
+            }
+        }
+        while let Ok(url_res) = self.async_url_rx.try_recv() {
+            self.url_loading_in_progress = false;
+            match url_res {
+                Ok(bundle) => {
+                    self.file_store = bundle.companion_files.clone();
+                    match ViewerDocument::from_fetched_bundle(bundle) {
+                        Ok(doc) => {
+                            if let Err(err) = self.replace_document(doc, device, queue) {
+                                self.last_load_error = Some(err.to_string());
+                            }
+                        }
+                        Err(err) => {
+                            self.last_load_error = Some(err.to_string());
+                        }
+                    }
+                }
+                Err(err) => {
+                    self.last_load_error = Some(err);
+                }
+            }
+        }
+
+        if self.doc.scene_path().is_some() {
+            if now.duration_since(self.last_reload_poll) >= DEFAULT_HOT_RELOAD_POLL_INTERVAL {
+                self.last_reload_poll = now;
+                if let Err(err) = self.poll_hot_reload(device, queue) {
+                    log::error!("Hot reload failed: {err}");
+                }
+            }
+            ui.ctx()
+                .request_repaint_after(DEFAULT_HOT_RELOAD_POLL_INTERVAL);
+        }
 
         if self.is_playing && self.doc.num_time_steps() > 1 {
             if now.duration_since(self.last_playback_tick) >= DEFAULT_PLAYBACK_STEP_INTERVAL {
@@ -1515,6 +1998,7 @@ impl ViewerSession {
         let mut colorbar_changed_to: Option<bool> = None;
         let mut axes_changed_to: Option<bool> = None;
         let mut trigger_reload = false;
+        let mut trigger_load_url = false;
         let mut trigger_reset_camera = false;
         let mut trigger_clear_pick = false;
         let mut clip_drag_update: Option<([f64; 3], [f64; 3], ClipKeep)> = None;
@@ -1538,20 +2022,55 @@ impl ViewerSession {
                     ));
                 }
 
+                if self.doc.scene_path().is_some() {
+                    ui.horizontal(|ui| {
+                        if ui.button("Reload file").clicked() {
+                            trigger_reload = true;
+                        }
+                        if self.doc.reload_count() > 0 {
+                            ui.small(format!("(reloaded {}x)", self.doc.reload_count()));
+                        }
+                    });
+                }
+
+                // --- Drag-and-drop & URL loader section (M3.1) ---
+                ui.add_space(4.0);
+                ui.label("Open URL (.vtu / .msh / .pvd / .json):");
                 ui.horizontal(|ui| {
-                    if ui.button("Reload file").clicked() {
-                        trigger_reload = true;
-                    }
-                    if self.doc.reload_count() > 0 {
-                        ui.small(format!("(reloaded {}x)", self.doc.reload_count()));
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.url_input)
+                            .desired_width(185.0)
+                            .hint_text("https://.../scene.json"),
+                    );
+                    let enter_pressed =
+                        resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let load_btn =
+                        ui.add_enabled(!self.url_loading_in_progress, egui::Button::new("Load"));
+                    if load_btn.clicked() || enter_pressed {
+                        trigger_load_url = true;
                     }
                 });
+                if self.url_loading_in_progress {
+                    ui.small("Fetching URL...");
+                } else {
+                    ui.small(
+                        "Tip: drag & drop .vtu, .msh, .pvd, or .json files onto the viewport.",
+                    );
+                }
 
                 if let Some(err_msg) = self.doc.last_reload_error() {
                     ui.add_space(4.0);
                     ui.colored_label(
                         egui::Color32::from_rgb(220, 50, 47),
                         format!("Hot-reload error: {err_msg}"),
+                    );
+                }
+
+                if let Some(err_msg) = self.last_load_error() {
+                    ui.add_space(4.0);
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 50, 47),
+                        format!("Load error: {err_msg}"),
                     );
                 }
 
@@ -1588,7 +2107,7 @@ impl ViewerSession {
                         let play_label = if self.is_playing { "Pause" } else { "Play" };
                         if ui.button(play_label).clicked() {
                             self.is_playing = !self.is_playing;
-                            self.last_playback_tick = Instant::now();
+                            self.last_playback_tick = MonotonicInstant::now();
                         }
                         if ui.button(">").on_hover_text("Next step").clicked()
                             && self.doc.current_time_step() + 1 < num_steps
@@ -1825,6 +2344,11 @@ impl ViewerSession {
                 ui.small("Shift/Right drag: pan | Scroll: zoom | Double-click: reset");
             });
 
+        if trigger_load_url {
+            let url = self.url_input.clone();
+            self.request_load_url(&url, Some(ui.ctx().clone()));
+        }
+
         if trigger_reload
             && let Ok(HotReloadOutcome::Reloaded {
                 geometry_changed,
@@ -1907,6 +2431,37 @@ impl ViewerSession {
                 {
                     ui.colored_label(egui::Color32::RED, format!("Viewport error: {err}"));
                 }
+
+                // Draw a drop overlay when the user hovers files over the window (`M3.1`).
+                let hovered = ui.ctx().input(|i| i.raw.hovered_files.clone());
+                if !hovered.is_empty() {
+                    let rect = ui.max_rect();
+                    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                        egui::Order::Foreground,
+                        ui.scope_id().with("tetraglass_drop_overlay"),
+                    ));
+                    painter.rect_filled(
+                        rect,
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(15, 25, 45, 190),
+                    );
+                    let mut label =
+                        "Drop .vtu, .msh, .pvd, or .json scene files to load\n".to_string();
+                    for file in &hovered {
+                        if let Some(p) = &file.path {
+                            label.push_str(&format!("\n• {}", p.display()));
+                        } else if !file.mime.is_empty() {
+                            label.push_str(&format!("\n• ({})", file.mime));
+                        }
+                    }
+                    painter.text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        label,
+                        egui::FontId::proportional(18.0),
+                        egui::Color32::WHITE,
+                    );
+                }
             });
     }
 
@@ -1921,7 +2476,7 @@ impl ViewerSession {
     }
 }
 
-/// Launch options for [`run_viewer`] and [`ViewerApp`].
+/// Launch options for `run_viewer` and [`ViewerApp`].
 #[derive(Debug, Clone)]
 pub struct ViewerOptions {
     /// Path to the `.json` scene file or mesh file (`.vtu`, `.pvd`, `.msh`) to open.
@@ -1944,7 +2499,7 @@ impl ViewerOptions {
     }
 }
 
-/// Native `eframe` desktop application wrapping a [`ViewerSession`].
+/// Native and WebGPU `eframe` application wrapping a [`ViewerSession`].
 pub struct ViewerApp {
     session: ViewerSession,
     render_state: egui_wgpu::RenderState,
@@ -1976,6 +2531,11 @@ impl ViewerApp {
     pub const fn session(&self) -> &ViewerSession {
         &self.session
     }
+
+    /// Returns a mutable reference to the underlying [`ViewerSession`].
+    pub const fn session_mut(&mut self) -> &mut ViewerSession {
+        &mut self.session
+    }
 }
 
 impl eframe::App for ViewerApp {
@@ -1996,9 +2556,15 @@ impl eframe::App for ViewerApp {
     fn on_exit(&mut self) {
         self.session.destroy_with_render_state(&self.render_state);
     }
+
+    #[cfg(target_arch = "wasm32")]
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
 }
 
 /// Validates and loads the scene at `options.path`, then opens the native `eframe` desktop viewer.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_viewer(options: ViewerOptions) -> Result<(), ViewerError> {
     // Load and validate the document before opening the window so CLI errors are reported cleanly.
     let doc = ViewerDocument::load_path(&options.path)?;
@@ -2159,6 +2725,22 @@ fn build_default_scene_for_mesh(
     bytes: &[u8],
 ) -> Result<(Scene, SceneEvaluator, Vec<f64>), ViewerError> {
     let (_, series) = load_series_from_bytes(path, bytes.to_vec(), None)?;
+    build_default_scene_from_series(path, series)
+}
+
+fn build_default_scene_for_mesh_with_store(
+    path: &Path,
+    bytes: &[u8],
+    store: &InMemoryFileStore,
+) -> Result<(Scene, SceneEvaluator, Vec<f64>), ViewerError> {
+    let (_, series) = load_series_from_store(path, bytes.to_vec(), None, store, None)?;
+    build_default_scene_from_series(path, series)
+}
+
+fn build_default_scene_from_series(
+    path: &Path,
+    series: TimeSeries<IoError>,
+) -> Result<(Scene, SceneEvaluator, Vec<f64>), ViewerError> {
     let first_grid = series.step(0)?;
     let time_steps = series.times().to_vec();
 
@@ -2204,6 +2786,127 @@ fn build_default_scene_for_mesh(
     let mut evaluator = SceneEvaluator::new();
     evaluator.insert_series_source("mesh", series);
     Ok((scene, evaluator, time_steps))
+}
+
+fn load_series_from_store(
+    path: &Path,
+    bytes: Vec<u8>,
+    explicit_format: Option<MeshFormat>,
+    store: &InMemoryFileStore,
+    fallback_dir: Option<&Path>,
+) -> Result<(MeshFormat, TimeSeries<IoError>), ViewerError> {
+    let format = explicit_format
+        .or_else(|| {
+            path.extension()
+                .and_then(|e| e.to_str())
+                .and_then(detect_format_from_extension)
+        })
+        .or_else(|| detect_format_from_bytes(&bytes))
+        .ok_or_else(|| {
+            ViewerError::MeshIo(IoError::UnsupportedFeature {
+                offset: 0,
+                feature: format!("unknown mesh format for `{}`", path.display()),
+            })
+        })?;
+
+    match format {
+        MeshFormat::Vtu => Ok((format, read_vtu_series(bytes)?)),
+        MeshFormat::Gmsh => Ok((format, read_msh_series(bytes)?)),
+        MeshFormat::Pvd => {
+            let store_clone = store.clone();
+            let pvd_dir = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(Path::to_path_buf)
+                .or_else(|| fallback_dir.map(Path::to_path_buf));
+            let series = read_pvd_series_with_loader(&bytes, move |rel_file| {
+                if let Some(step_bytes) = store_clone.get(rel_file) {
+                    return Ok(step_bytes.to_vec());
+                }
+                if let Some(ref base) = pvd_dir {
+                    let candidate = resolve_relative_path(base, rel_file);
+                    let candidate_str = candidate.to_string_lossy();
+                    if let Some(step_bytes) = store_clone.get(&candidate_str) {
+                        return Ok(step_bytes.to_vec());
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if candidate.exists() {
+                        return Ok(fs::read(candidate)?);
+                    }
+                }
+                Err(IoError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!(
+                        "missing PVD step file `{rel_file}` (drop the step .vtu files alongside the .pvd file)"
+                    ),
+                )))
+            })?;
+            Ok((format, series))
+        }
+        other => Err(ViewerError::MeshIo(IoError::UnsupportedFeature {
+            offset: 0,
+            feature: format!("format `{other:?}` not yet supported"),
+        })),
+    }
+}
+
+fn load_and_validate_sources_from_store(
+    scene: &Scene,
+    store: &InMemoryFileStore,
+    fallback_dir: Option<&Path>,
+) -> Result<(SceneEvaluator, Vec<f64>), ViewerError> {
+    let mut evaluator = SceneEvaluator::new();
+    let mut datasets = BTreeMap::new();
+    let mut primary_times = vec![0.0];
+
+    let initial_selector = scene.output.as_ref().map_or(TimeSelector::LAST, |o| o.time);
+
+    for (name, source) in &scene.sources {
+        let src_bytes = if let Some(b) = store.get(&source.file) {
+            b.to_vec()
+        } else if let Some(base) = fallback_dir {
+            let resolved = resolve_relative_path(base, &source.file);
+            let resolved_str = resolved.to_string_lossy();
+            if let Some(b) = store.get(&resolved_str) {
+                b.to_vec()
+            } else {
+                fs::read(&resolved)?
+            }
+        } else {
+            return Err(ViewerError::Validation(format!(
+                "source `{name}` references `{}` which is not loaded in memory; drop `{}` together with the scene JSON file",
+                source.file, source.file
+            )));
+        };
+
+        let explicit_format = source.format.map(MeshFormat::from);
+        let (_, series) = load_series_from_store(
+            Path::new(&source.file),
+            src_bytes,
+            explicit_format,
+            store,
+            fallback_dir,
+        )?;
+        let times = series.times().to_vec();
+        let probe_step = initial_selector
+            .resolve_step(&times)
+            .map_or(0, |(idx, _)| idx);
+        let probe_grid = series.step(probe_step)?;
+        if primary_times.len() <= 1 && !times.is_empty() {
+            primary_times.clone_from(&times);
+        }
+        datasets.insert(
+            name.clone(),
+            DatasetMetadata::from_grid(&probe_grid).with_time_steps(times),
+        );
+        evaluator.insert_series_source(name.clone(), series);
+    }
+
+    if let Err(report) = validate_scene_with_metadata(scene, &datasets) {
+        return Err(ViewerError::Validation(report.to_string()));
+    }
+
+    Ok((evaluator, primary_times))
 }
 
 fn color_by_to_scene_string(color_by: &ViewportColorBy) -> Option<String> {

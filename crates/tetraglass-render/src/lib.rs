@@ -99,7 +99,8 @@ pub use headless::{
     ImageComparison, RenderedImage,
 };
 pub use pick::{
-    PICK_FORMAT, PickProbeValue, PickTarget, RawPickHit, SurfacePickResult, probe_surface_triangle,
+    PICK_FORMAT, PendingPixelPick, PickProbeValue, PickTarget, RawPickHit, SurfacePickResult,
+    probe_surface_triangle,
 };
 pub use pipeline::{
     ColorBy, DEFAULT_COLOR_FORMAT, DEPTH_FORMAT, GpuSurface, OffscreenTarget, Renderer,
