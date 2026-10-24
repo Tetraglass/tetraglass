@@ -264,3 +264,11 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-002 and D-003; `PickTarget` is single-sampled `Rgba32Uint` and only rendered when a pick is requested, keeping normal color rendering untouched).
 - Dependencies added: none.
 - Follow-ups: M2.8 Interactive clipping.
+
+## 2026-10-24 — M2.8 Interactive clipping
+
+- Done: added GPU shader clip-plane support (`ShaderClipKeep`, `ShaderClipPlane`, `SurfaceStyle::clip_plane`, `GpuSurface::clip_plane`, `Renderer::set_surface_clip_plane`, and `clip_plane: vec4<f32>` in `SurfaceUniforms` evaluated per fragment across `fs_main`, `fs_pick`, and `fs_edge`) in `tetraglass-render` so dragging a clip plane updates only a 16-byte GPU uniform (`D-019`); exposed `ViewportState::set_clip_plane`, `ViewportState::set_clip_plane_with_render_state`, `ViewportState::clip_plane`, and preserved `dataset_center` across `fit_camera == false` surface swaps in `tetraglass-egui`; added `SceneEvaluator::evaluate_tet_view` in `tetraglass-scene`; implemented `ViewerDocument::resolve_clip_volume`, `InteractiveClipState`, `ViewerSession::begin_or_update_clip_drag`, `ViewerSession::end_clip_drag`, `ViewerSession::poll_clip_worker`, `ViewerSession::wait_for_clip_worker`, `ViewerSession::disable_interactive_clip`, and the Interactive clip UI controls in `tetraglass-viewer`.
+- Tests: `shader_clip_plane_clips_color_and_pick_passes_and_restores_when_cleared` in `crates/tetraglass-render/tests/picking.rs`, shader clip-plane assertions in `crates/tetraglass-egui/tests/viewport_offscreen.rs`, and `interactive_clip_uses_shader_plane_while_dragging_and_swaps_in_worker_result` in `crates/tetraglass-viewer/tests/viewer_document.rs`.
+- Decisions: none (implemented per D-002, D-003, D-014, and D-019).
+- Dependencies added: `tetraglass-filters` added to `tetraglass-viewer` (`Cargo.toml` workspace dependency).
+- Follow-ups: M2.9 Performance pass.

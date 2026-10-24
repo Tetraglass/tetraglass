@@ -105,6 +105,76 @@ impl ColorBy {
     }
 }
 
+/// Which half-space of a [`ShaderClipPlane`] to keep when rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ShaderClipKeep {
+    /// Keep fragments in the negative half-space (`dot(p - origin, normal) <= 0`), matching `ClipKeep::Back`.
+    #[default]
+    Back,
+    /// Keep fragments in the positive half-space (`dot(p - origin, normal) >= 0`), matching `ClipKeep::Front`.
+    Front,
+}
+
+/// World-space half-space clip plane evaluated per fragment in the surface, pick, and wireframe shaders (`M2.8`).
+///
+/// Used during interactive clip-plane dragging so moving the plane updates only a 16-byte GPU uniform
+/// without re-running CPU filters or re-uploading vertex buffers (`D-019`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShaderClipPlane {
+    /// Point `[x, y, z]` (`f64`) on the clip plane in world coordinates.
+    pub origin: [f64; 3],
+    /// Outward plane normal `[nx, ny, nz]` (`f64`).
+    pub normal: [f64; 3],
+    /// Which side of the plane to keep (`Back` keeps `dot(p - origin, normal) <= 0`).
+    pub keep: ShaderClipKeep,
+}
+
+impl ShaderClipPlane {
+    /// Creates a [`ShaderClipPlane`] keeping [`ShaderClipKeep::Back`] (`dot(p - origin, normal) <= 0`).
+    #[must_use]
+    pub const fn new(origin: [f64; 3], normal: [f64; 3]) -> Self {
+        Self {
+            origin,
+            normal,
+            keep: ShaderClipKeep::Back,
+        }
+    }
+
+    /// Creates a [`ShaderClipPlane`] with an explicit [`ShaderClipKeep`] side.
+    #[must_use]
+    pub const fn with_keep(origin: [f64; 3], normal: [f64; 3], keep: ShaderClipKeep) -> Self {
+        Self {
+            origin,
+            normal,
+            keep,
+        }
+    }
+
+    /// Converts this world-space (`f64`) plane into a dataset-center-relative `[nx, ny, nz, d]` (`f32`)
+    /// uniform where kept fragments satisfy `dot(v_rel, n_keep) + d >= 0`.
+    #[must_use]
+    pub fn to_gpu_plane(self, dataset_center: [f64; 3]) -> [f32; 4] {
+        let len = (self.normal[0] * self.normal[0]
+            + self.normal[1] * self.normal[1]
+            + self.normal[2] * self.normal[2])
+            .sqrt();
+        if !len.is_finite() || len <= 1e-15 {
+            return [0.0, 0.0, 0.0, 1.0];
+        }
+        let sign = match self.keep {
+            ShaderClipKeep::Back => -1.0,
+            ShaderClipKeep::Front => 1.0,
+        };
+        let nx = sign * self.normal[0] / len;
+        let ny = sign * self.normal[1] / len;
+        let nz = sign * self.normal[2] / len;
+        let d = (dataset_center[0] - self.origin[0]) * nx
+            + (dataset_center[1] - self.origin[1]) * ny
+            + (dataset_center[2] - self.origin[2]) * nz;
+        [nx as f32, ny as f32, nz as f32, d as f32]
+    }
+}
+
 /// Display style and colormap parameters for a [`SurfaceMesh`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct SurfaceStyle {
@@ -124,6 +194,8 @@ pub struct SurfaceStyle {
     pub draw_edges: bool,
     /// Wireframe edge color in sRGB `[r, g, b, a]` (`0.0..=1.0`).
     pub edge_color_srgb: [f32; 4],
+    /// Optional interactive shader clip plane (`None` disables shader clipping).
+    pub clip_plane: Option<ShaderClipPlane>,
 }
 
 impl Default for SurfaceStyle {
@@ -137,6 +209,7 @@ impl Default for SurfaceStyle {
             draw_surface: true,
             draw_edges: false,
             edge_color_srgb: [0.12, 0.14, 0.18, 1.0],
+            clip_plane: None,
         }
     }
 }
@@ -370,6 +443,7 @@ struct SurfaceUniforms {
     solid_color: [f32; 4],
     edge_color: [f32; 4],
     pick_info: [u32; 4],
+    clip_plane: [f32; 4],
 }
 
 /// Uploaded GPU buffers and bind group for a [`SurfaceMesh`].
@@ -377,8 +451,8 @@ struct SurfaceUniforms {
 /// Positions are stored in `f32` relative to [`Self::dataset_center`].
 /// Point scalars live in a dedicated `f32` vertex buffer (`@location(3)`), and cell scalars
 /// live in a storage buffer indexed by triangle `cell_index`. Changing colormap, range,
-/// log scale, or solid color updates only the uniform buffer without re-uploading geometry
-/// or scalar buffers.
+/// log scale, solid color, or shader clip plane updates only the uniform buffer without
+/// re-uploading geometry or scalar buffers.
 #[derive(Debug)]
 pub struct GpuSurface {
     dataset_center: [f64; 3],
@@ -394,6 +468,7 @@ pub struct GpuSurface {
     bind_group: wgpu::BindGroup,
     active_color_by: ColorBy,
     active_colormap: ColormapKind,
+    active_clip_plane: Option<ShaderClipPlane>,
     draw_surface: bool,
     draw_edges: bool,
     data_range: [f64; 2],
@@ -429,6 +504,12 @@ impl GpuSurface {
     #[must_use]
     pub const fn colormap(&self) -> ColormapKind {
         self.active_colormap
+    }
+
+    /// Returns the currently active [`ShaderClipPlane`], if any.
+    #[must_use]
+    pub const fn clip_plane(&self) -> Option<ShaderClipPlane> {
+        self.active_clip_plane
     }
 
     /// Returns the currently active scalar range `[min, max]` mapped across the colormap.
@@ -1039,12 +1120,16 @@ impl Renderer {
         let extracted = extract_scalars(surface, &style.color_by)?;
 
         let effective_range = style.range.unwrap_or(extracted.data_range);
+        let gpu_clip_plane = style
+            .clip_plane
+            .map_or([0.0, 0.0, 0.0, 1.0], |p| p.to_gpu_plane(dataset_center));
         let uniforms = build_surface_uniforms(
             effective_range,
             extracted.coloring_mode,
             style.use_log_scale,
             style.solid_color_srgb,
             style.edge_color_srgb,
+            gpu_clip_plane,
         );
 
         let geometry_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1106,6 +1191,7 @@ impl Renderer {
             bind_group,
             active_color_by: style.color_by.clone(),
             active_colormap: style.colormap,
+            active_clip_plane: style.clip_plane,
             draw_surface: style.draw_surface,
             draw_edges: style.draw_edges,
             data_range: extracted.data_range,
@@ -1148,12 +1234,16 @@ impl Renderer {
             ColorBy::Cell { .. } => 2,
         };
         let effective_range = style.range.unwrap_or(gpu_surface.data_range);
+        let gpu_clip_plane = style.clip_plane.map_or([0.0, 0.0, 0.0, 1.0], |p| {
+            p.to_gpu_plane(gpu_surface.dataset_center)
+        });
         let uniforms = build_surface_uniforms(
             effective_range,
             coloring_mode,
             style.use_log_scale,
             style.solid_color_srgb,
             style.edge_color_srgb,
+            gpu_clip_plane,
         );
         queue.write_buffer(
             &gpu_surface.uniform_buffer,
@@ -1161,10 +1251,30 @@ impl Renderer {
             bytemuck::bytes_of(&uniforms),
         );
         gpu_surface.active_colormap = style.colormap;
+        gpu_surface.active_clip_plane = style.clip_plane;
         gpu_surface.draw_surface = style.draw_surface;
         gpu_surface.draw_edges = style.draw_edges;
         gpu_surface.effective_range = effective_range;
         Ok(())
+    }
+
+    /// Updates only the 16-byte shader clip-plane uniform on `gpu_surface` (`M2.8`, `D-019`).
+    pub fn set_surface_clip_plane(
+        &self,
+        queue: &wgpu::Queue,
+        gpu_surface: &mut GpuSurface,
+        clip_plane: Option<ShaderClipPlane>,
+    ) {
+        let gpu_plane = clip_plane.map_or([0.0f32, 0.0, 0.0, 1.0], |p| {
+            p.to_gpu_plane(gpu_surface.dataset_center)
+        });
+        let offset = std::mem::offset_of!(SurfaceUniforms, clip_plane) as u64;
+        queue.write_buffer(
+            &gpu_surface.uniform_buffer,
+            offset,
+            bytemuck::bytes_of(&gpu_plane),
+        );
+        gpu_surface.active_clip_plane = clip_plane;
     }
 
     /// Records a render pass into `encoder`, drawing `surfaces` into `target` with no overlay annotations.
@@ -1566,6 +1676,7 @@ fn build_surface_uniforms(
     use_log_scale: bool,
     solid_color_srgb: [f32; 4],
     edge_color_srgb: [f32; 4],
+    clip_plane: [f32; 4],
 ) -> SurfaceUniforms {
     SurfaceUniforms {
         range_min: range[0] as f32,
@@ -1585,6 +1696,7 @@ fn build_surface_uniforms(
             edge_color_srgb[3],
         ],
         pick_info: [1, 0, 0, 0],
+        clip_plane,
     }
 }
 

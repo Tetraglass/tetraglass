@@ -43,6 +43,10 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    if (is_clipped_by_plane(in.world_pos, surface.clip_plane)) {
+        discard;
+    }
+
     var raw_scalar = in.scalar;
     if (surface.coloring_mode == 2u) {
         raw_scalar = cell_scalars[in.cell_index];
@@ -67,6 +71,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
 @fragment
 fn fs_pick(in: VertexOutput) -> @location(0) vec4<u32> {
+    if (is_clipped_by_plane(in.world_pos, surface.clip_plane)) {
+        discard;
+    }
+
     var raw_scalar = in.scalar;
     if (surface.coloring_mode == 2u) {
         raw_scalar = cell_scalars[in.cell_index];
@@ -85,6 +93,7 @@ struct EdgeVertexInput {
 
 struct EdgeVertexOutput {
     @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_pos: vec3<f32>,
 };
 
 @vertex
@@ -95,10 +104,14 @@ fn vs_edge(in: EdgeVertexInput) -> EdgeVertexOutput {
     // on top of coplanar surface triangles without z-fighting.
     clip.z = max(clip.z - 0.0005 * clip.w, 0.0);
     out.clip_position = clip;
+    out.world_pos = in.position;
     return out;
 }
 
 @fragment
-fn fs_edge(_in: EdgeVertexOutput) -> @location(0) vec4<f32> {
+fn fs_edge(in: EdgeVertexOutput) -> @location(0) vec4<f32> {
+    if (is_clipped_by_plane(in.world_pos, surface.clip_plane)) {
+        discard;
+    }
     return surface.edge_color;
 }

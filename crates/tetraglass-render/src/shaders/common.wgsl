@@ -15,7 +15,16 @@ struct SurfaceUniforms {
     solid_color: vec4<f32>,
     edge_color: vec4<f32>,
     pick_info: vec4<u32>,
+    clip_plane: vec4<f32>,
 };
+
+fn is_clipped_by_plane(world_pos: vec3<f32>, clip_plane: vec4<f32>) -> bool {
+    let n_sq = dot(clip_plane.xyz, clip_plane.xyz);
+    if (n_sq > 1e-12) {
+        return (dot(world_pos, clip_plane.xyz) + clip_plane.w) < -1e-6;
+    }
+    return false;
+}
 
 fn normalize_scalar_to_lut_u(
     value: f32,

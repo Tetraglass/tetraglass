@@ -2237,6 +2237,7 @@ dependencies = [
  "serde_json",
  "tetraglass-core",
  "tetraglass-egui",
+ "tetraglass-filters",
  "tetraglass-io",
  "tetraglass-render",
  "tetraglass-scene",

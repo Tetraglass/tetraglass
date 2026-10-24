@@ -633,6 +633,20 @@ impl SceneEvaluator {
         })
     }
 
+    /// Evaluates the linearized [`TetView`] for a named volume source or volume filter in `scene`.
+    ///
+    /// Linearized [`TetView`]s are cached by their upstream [`PipelineHash`] and subdivision level.
+    pub fn evaluate_tet_view(
+        &mut self,
+        scene: &Scene,
+        dataset_name: &str,
+    ) -> Result<(PipelineHash, Arc<TetView>), SceneError> {
+        let (node_hash, data) = self.evaluate_dataset(scene, dataset_name)?;
+        let subdivisions = resolve_source_subdivisions(scene, dataset_name);
+        let tet_view = self.resolve_volume_tet_view(node_hash, data, subdivisions, "clip")?;
+        Ok((node_hash, tet_view))
+    }
+
     /// Evaluates the displayable [`SurfaceMesh`] for a named source or filter in `scene`.
     ///
     /// Per `docs/scene-format.md`, showing a volume mesh source or volume filter directly

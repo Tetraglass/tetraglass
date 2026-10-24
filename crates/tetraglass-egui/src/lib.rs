@@ -19,7 +19,7 @@ use egui_wgpu::wgpu;
 use tetraglass_core::{BoundingBox, SurfaceMesh};
 use tetraglass_render::{
     Annotations, Camera, ColorBy, DEFAULT_COLOR_FORMAT, GpuSurface, OffscreenTarget, PickTarget,
-    RenderError, Renderer, ScalarComponent, SurfacePickResult, SurfaceStyle,
+    RenderError, Renderer, ScalarComponent, ShaderClipPlane, SurfacePickResult, SurfaceStyle,
     probe_surface_triangle,
 };
 
@@ -292,11 +292,24 @@ impl ViewportState {
         fit_camera: bool,
     ) -> Result<(), RenderError> {
         if let Ok(mut guard) = self.inner.lock() {
-            let gpu_surface = guard.renderer.upload_surface(device, &surface, &style)?;
+            let gpu_surface = if !fit_camera && let Some(existing) = guard.gpu_surface.as_ref() {
+                guard.renderer.upload_surface_with_center(
+                    device,
+                    &surface,
+                    existing.dataset_center(),
+                    &style,
+                )?
+            } else {
+                guard.renderer.upload_surface(device, &surface, &style)?
+            };
             let bounds = surface.bounds();
-            guard.default_bounds = bounds;
-            if fit_camera && let Some(b) = bounds {
-                guard.camera = Camera::fit_bounds(b, 30.0, 20.0);
+            if fit_camera {
+                guard.default_bounds = bounds;
+                if let Some(b) = bounds {
+                    guard.camera = Camera::fit_bounds(b, 30.0, 20.0);
+                }
+            } else if guard.default_bounds.is_none() {
+                guard.default_bounds = bounds;
             }
             guard.style = style;
             guard.cpu_surface = Some(surface);
@@ -439,6 +452,44 @@ impl ViewportState {
         if let Ok(mut guard) = self.inner.lock() {
             guard.annotations = annotations;
         }
+    }
+
+    /// Updates only the 16-byte GPU shader clip-plane uniform on the uploaded surface(s) (`M2.8`, `D-019`).
+    ///
+    /// Pass `Some(plane)` while interactively dragging a clip plane for instant 60 FPS feedback,
+    /// and `None` once the exact clipped [`SurfaceMesh`] has been swapped in.
+    pub fn set_clip_plane(&mut self, queue: &wgpu::Queue, clip_plane: Option<ShaderClipPlane>) {
+        if let Ok(mut guard) = self.inner.lock() {
+            let guard = &mut *guard;
+            if let Some(ref mut gpu) = guard.gpu_surface {
+                guard
+                    .renderer
+                    .set_surface_clip_plane(queue, gpu, clip_plane);
+            }
+            for (_, gpu, _) in &mut guard.extra_surfaces {
+                guard
+                    .renderer
+                    .set_surface_clip_plane(queue, gpu, clip_plane);
+            }
+        }
+    }
+
+    /// Updates the GPU shader clip-plane uniform using an [`egui_wgpu::RenderState`].
+    pub fn set_clip_plane_with_render_state(
+        &mut self,
+        render_state: &egui_wgpu::RenderState,
+        clip_plane: Option<ShaderClipPlane>,
+    ) {
+        self.set_clip_plane(&render_state.queue, clip_plane);
+    }
+
+    /// Returns the active [`ShaderClipPlane`] on the primary uploaded surface, if any.
+    #[must_use]
+    pub fn clip_plane(&self) -> Option<ShaderClipPlane> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.gpu_surface.as_ref().and_then(GpuSurface::clip_plane))
     }
 
     /// Returns the registered `egui` [`TextureId`] for the resolved offscreen target.
@@ -828,9 +879,10 @@ fn handle_camera_input(
     changed
 }
 
-/// Re-exported colormap, style, and pick types for convenience when configuring [`ViewportState`].
+/// Re-exported colormap, style, clip-plane, and pick types for convenience when configuring [`ViewportState`].
 pub use tetraglass_render::{
     Camera as ViewportCamera, ColorBy as ViewportColorBy, ColormapKind as ViewportColormap,
     PickProbeValue as ViewportPickProbeValue, ScalarComponent as ViewportScalarComponent,
+    ShaderClipKeep as ViewportClipKeep, ShaderClipPlane as ViewportClipPlane,
     SurfacePickResult as ViewportPickResult, SurfaceStyle as ViewportSurfaceStyle,
 };

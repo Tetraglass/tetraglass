@@ -6,7 +6,8 @@ use tetraglass_filters::{SliceParams, extract_external_surface, linearize, slice
 use tetraglass_io::read_vtu_from_path;
 use tetraglass_render::{
     Camera, ColorBy, DEFAULT_COLOR_FORMAT, FieldAssociation, HeadlessContext,
-    HeadlessRenderOptions, PickTarget, Renderer, SurfaceStyle, probe_surface_triangle,
+    HeadlessRenderOptions, OffscreenTarget, PickTarget, Renderer, ShaderClipKeep, ShaderClipPlane,
+    SurfaceStyle, probe_surface_triangle,
 };
 
 fn workspace_root() -> PathBuf {
@@ -174,4 +175,153 @@ fn multi_representation_pick_identifies_representation_and_skips_wireframe() {
     assert_eq!(probed.representation_index, 1);
     // The slice plane is z = 1.0, so the probed world z coordinate must be 1.0.
     assert!((probed.world_position[2] - 1.0).abs() < 1e-10);
+}
+
+#[test]
+fn shader_clip_plane_clips_color_and_pick_passes_and_restores_when_cleared() {
+    let root = workspace_root();
+    let hex = read_vtu_from_path(root.join("testdata/vtk/hex_linear.vtu")).expect("load hex");
+    let hull = extract_external_surface(&hex).expect("extract hull");
+
+    let headless = HeadlessContext::new().expect("headless wgpu context");
+    let renderer = Renderer::new(headless.device(), headless.queue(), DEFAULT_COLOR_FORMAT, 4)
+        .expect("create renderer");
+    let color_target =
+        OffscreenTarget::new(headless.device(), 400, 300, DEFAULT_COLOR_FORMAT, 4).expect("target");
+    let pick_target = PickTarget::new(headless.device(), 400, 300).expect("pick target");
+
+    let bounds = hull.bounds().expect("hull bounds");
+    let center = bounds.center();
+    let camera = Camera::fit_bounds(bounds, 35.0, 24.0);
+
+    let style = SurfaceStyle {
+        color_by: ColorBy::point("linear"),
+        draw_surface: true,
+        draw_edges: true,
+        ..SurfaceStyle::default()
+    };
+    let mut gpu_hull = renderer
+        .upload_surface(headless.device(), &hull, &style)
+        .expect("upload hull");
+    assert_eq!(gpu_hull.clip_plane(), None);
+
+    let count_mesh_pixels = |gpu: &tetraglass_render::GpuSurface| -> usize {
+        let mut encoder =
+            headless
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("clip_test_enc"),
+                });
+        renderer
+            .render(
+                &mut encoder,
+                headless.queue(),
+                &color_target,
+                &camera,
+                [1.0, 1.0, 1.0, 1.0],
+                &[gpu],
+            )
+            .expect("render");
+        headless.queue().submit(std::iter::once(encoder.finish()));
+        let img = headless.readback_target(&color_target).expect("readback");
+        let mut count = 0usize;
+        for y in 0..300 {
+            for x in 0..400 {
+                let [r, g, b, _] = img.pixel(x, y);
+                if r < 250 || g < 250 || b < 250 {
+                    count += 1;
+                }
+            }
+        }
+        count
+    };
+
+    let full_pixels = count_mesh_pixels(&gpu_hull);
+    assert!(full_pixels > 15_000, "unexpected full_pixels={full_pixels}");
+
+    // 1. Set shader clip plane keeping `Back` (`x <= 1.0` on a `[0, 2]^3` cube).
+    let back_plane =
+        ShaderClipPlane::with_keep([1.0, 1.0, 1.0], [1.0, 0.0, 0.0], ShaderClipKeep::Back);
+    renderer.set_surface_clip_plane(headless.queue(), &mut gpu_hull, Some(back_plane));
+    assert_eq!(gpu_hull.clip_plane(), Some(back_plane));
+    let back_pixels = count_mesh_pixels(&gpu_hull);
+    assert!(
+        back_pixels > 4_000 && back_pixels < full_pixels - 2_000,
+        "expected back-clipped pixel count between 4000 and {}, got {back_pixels}",
+        full_pixels - 2_000
+    );
+
+    // Every picked pixel under `back_plane` must satisfy `world_position[0] <= 1.0 + 1e-3`.
+    for (px, py) in [(140, 150), (200, 150), (260, 150)] {
+        if let Some(raw) = renderer
+            .pick_pixel(
+                headless.device(),
+                headless.queue(),
+                &pick_target,
+                &camera,
+                &[&gpu_hull],
+                px,
+                py,
+            )
+            .expect("pick")
+        {
+            let probed = probe_surface_triangle(
+                &hull,
+                raw.representation_index,
+                [px, py],
+                [400, 300],
+                &camera,
+                center,
+                raw,
+                &style.color_by,
+            )
+            .expect("probe");
+            assert!(
+                probed.world_position[0] <= 1.005,
+                "expected x <= 1.005 under Back clip plane, got {}",
+                probed.world_position[0]
+            );
+        }
+    }
+
+    // 2. Flip to `Front` (`x >= 1.0`): every picked pixel must satisfy `world_position[0] >= 1.0 - 1e-3`.
+    let front_plane =
+        ShaderClipPlane::with_keep([1.0, 1.0, 1.0], [1.0, 0.0, 0.0], ShaderClipKeep::Front);
+    renderer.set_surface_clip_plane(headless.queue(), &mut gpu_hull, Some(front_plane));
+    for (px, py) in [(140, 150), (200, 150), (260, 150)] {
+        if let Some(raw) = renderer
+            .pick_pixel(
+                headless.device(),
+                headless.queue(),
+                &pick_target,
+                &camera,
+                &[&gpu_hull],
+                px,
+                py,
+            )
+            .expect("pick")
+        {
+            let probed = probe_surface_triangle(
+                &hull,
+                raw.representation_index,
+                [px, py],
+                [400, 300],
+                &camera,
+                center,
+                raw,
+                &style.color_by,
+            )
+            .expect("probe");
+            assert!(
+                probed.world_position[0] >= 0.995,
+                "expected x >= 0.995 under Front clip plane, got {}",
+                probed.world_position[0]
+            );
+        }
+    }
+
+    // 3. Clear the shader clip plane (`None`): pixel count returns to `full_pixels`.
+    renderer.set_surface_clip_plane(headless.queue(), &mut gpu_hull, None);
+    assert_eq!(gpu_hull.clip_plane(), None);
+    assert_eq!(count_mesh_pixels(&gpu_hull), full_pixels);
 }

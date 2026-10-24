@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use egui_wgpu::wgpu;
 use tetraglass_egui::{ViewportColorBy, ViewportColormap, ViewportScalarComponent, ViewportState};
 use tetraglass_render::{HeadlessContext, OffscreenTarget};
-use tetraglass_scene::ColormapName;
+use tetraglass_scene::{ClipKeep, ClipMode, ColormapName};
 use tetraglass_viewer::{HotReloadOutcome, ViewerDocument, ViewerSession};
 
 fn workspace_root() -> PathBuf {
@@ -487,6 +487,133 @@ fn viewer_session_renders_full_gui_and_viewport_offscreen() {
 
     session.clear_pick();
     assert!(session.last_pick().is_none());
+
+    session.destroy(&mut egui_renderer);
+}
+
+#[test]
+fn interactive_clip_uses_shader_plane_while_dragging_and_swaps_in_worker_result() {
+    let root = workspace_root();
+    let hex_path = root.join("testdata/vtk/hex_linear.vtu");
+
+    let doc = ViewerDocument::load_path(&hex_path).expect("load hex_linear.vtu");
+    let unclipped_tris = doc
+        .active_surface()
+        .expect("active surface")
+        .num_triangles();
+
+    let headless = HeadlessContext::new().expect("headless wgpu context");
+    let mut egui_renderer = egui_wgpu::Renderer::new(
+        headless.device(),
+        wgpu::TextureFormat::Rgba8Unorm,
+        egui_wgpu::RendererOptions::default(),
+    );
+    let mut viewport =
+        ViewportState::new(headless.device(), headless.queue(), &mut egui_renderer, 4)
+            .expect("create ViewportState");
+    viewport
+        .ensure_target_size(headless.device(), &mut egui_renderer, 400, 300)
+        .expect("resize viewport");
+
+    let mut session =
+        ViewerSession::new(doc, viewport, headless.device()).expect("create ViewerSession");
+    let mut cam = session.viewport().camera();
+    cam.orbit(35.0, 20.0);
+    session.viewport_mut().set_camera(cam);
+    assert!(!session.clip_state().enabled);
+    assert_eq!(session.viewport().clip_plane(), None);
+
+    // 1. Begin dragging a clip plane at x = 0.5, normal = +X, keeping Back (x <= 0.5).
+    session
+        .begin_or_update_clip_drag(
+            headless.device(),
+            headless.queue(),
+            [0.5, 1.0, 1.0],
+            [1.0, 0.0, 0.0],
+            ClipKeep::Back,
+        )
+        .expect("begin drag at x = 0.5");
+    assert!(session.clip_state().enabled);
+    assert!(session.clip_state().is_dragging);
+    assert!(!session.clip_state().worker_busy);
+    assert!(session.viewport().clip_plane().is_some());
+    assert!(session.active_clipped_surface().is_none());
+
+    // 2. Continue dragging to x = 1.0 (center of the [0, 2]^3 cube): shader clip plane updates immediately.
+    session
+        .begin_or_update_clip_drag(
+            headless.device(),
+            headless.queue(),
+            [1.0, 1.0, 1.0],
+            [1.0, 0.0, 0.0],
+            ClipKeep::Back,
+        )
+        .expect("update drag to x = 1.0");
+    assert_eq!(
+        session.viewport().clip_plane().unwrap().origin,
+        [1.0, 1.0, 1.0]
+    );
+
+    // 3. Release the drag: spawns the background worker thread while keeping the shader clip plane active.
+    session.end_clip_drag();
+    assert!(!session.clip_state().is_dragging);
+    assert!(session.viewport().clip_plane().is_some());
+
+    // 4. Wait for the worker thread to finish and swap in the exact clipped surface.
+    let swapped = session
+        .wait_for_clip_worker(headless.device(), headless.queue())
+        .expect("wait_for_clip_worker");
+    assert!(swapped, "expected exact clip worker result to swap in");
+    assert!(!session.clip_state().worker_busy);
+    // Shader clip plane is cleared once the exact clipped surface is swapped in!
+    assert_eq!(session.viewport().clip_plane(), None);
+
+    let exact_surface = session
+        .active_clipped_surface()
+        .expect("active exact clipped surface");
+    assert!(
+        exact_surface.num_triangles() > unclipped_tris / 2,
+        "exact clipped surface ({}) should include interior cap triangles",
+        exact_surface.num_triangles()
+    );
+
+    // 5. Picking the center of the viewport now hits the interior cut plane at x = 1.0!
+    let pick = session
+        .pick_at_pixel(headless.device(), headless.queue(), 200, 150)
+        .expect("pick center")
+        .expect("center pixel hits clipped cube cap");
+    assert!(
+        (pick.world_position[0] - 1.0).abs() < 1e-10,
+        "expected center pick on interior clip cap x = 1.0, got {:?}",
+        pick.world_position
+    );
+
+    // 6. Test Crinkle mode via background worker as well.
+    session.set_clip_mode(ClipMode::Crinkle);
+    session
+        .begin_or_update_clip_drag(
+            headless.device(),
+            headless.queue(),
+            [1.0, 1.0, 1.0],
+            [1.0, 0.0, 0.0],
+            ClipKeep::Back,
+        )
+        .expect("drag crinkle");
+    session.end_clip_drag();
+    assert!(
+        session
+            .wait_for_clip_worker(headless.device(), headless.queue())
+            .expect("wait crinkle")
+    );
+    assert_eq!(session.viewport().clip_plane(), None);
+
+    // 7. Disable interactive clipping: restores the unclipped surface.
+    session
+        .disable_interactive_clip(headless.device(), headless.queue())
+        .expect("disable interactive clip");
+    assert!(!session.clip_state().enabled);
+    assert!(session.active_clipped_surface().is_none());
+    assert_eq!(session.viewport().clip_plane(), None);
 
     session.destroy(&mut egui_renderer);
 }

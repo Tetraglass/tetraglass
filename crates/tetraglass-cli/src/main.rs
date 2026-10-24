@@ -930,6 +930,7 @@ fn build_surface_style(rep: &EvaluatedRepresentation) -> SurfaceStyle {
             draw_surface,
             draw_edges,
             edge_color_srgb,
+            clip_plane: None,
         },
         Some(c) => SurfaceStyle {
             color_by: build_color_by(c),
@@ -940,6 +941,7 @@ fn build_surface_style(rep: &EvaluatedRepresentation) -> SurfaceStyle {
             draw_surface,
             draw_edges,
             edge_color_srgb,
+            clip_plane: None,
         },
     }
 }

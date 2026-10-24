@@ -40,6 +40,6 @@ pub use pick::{
 };
 pub use pipeline::{
     ColorBy, DEFAULT_COLOR_FORMAT, DEPTH_FORMAT, GpuSurface, OffscreenTarget, Renderer,
-    ScalarComponent, SurfaceStyle,
+    ScalarComponent, ShaderClipKeep, ShaderClipPlane, SurfaceStyle,
 };
 pub use text::{EmbeddedFont, FontRasterizer, RasterizedText, TextMetrics};

@@ -4,8 +4,9 @@ use std::path::PathBuf;
 
 use egui_wgpu::wgpu;
 use tetraglass_egui::{
-    ViewportColorBy, ViewportColormap, ViewportScalarComponent, ViewportState,
-    ViewportSurfaceStyle, ViewportWidget, available_field_options,
+    ViewportClipKeep, ViewportClipPlane, ViewportColorBy, ViewportColormap,
+    ViewportScalarComponent, ViewportState, ViewportSurfaceStyle, ViewportWidget,
+    available_field_options,
 };
 use tetraglass_filters::extract_external_surface;
 use tetraglass_io::read_vtu_from_path;
@@ -236,6 +237,15 @@ fn viewport_widget_resizes_and_runs_prepare_callback_in_egui_wgpu() {
     assert_eq!(viewport.last_pick(), Some(pick));
     viewport.clear_pick();
     assert!(viewport.last_pick().is_none());
+
+    // Set and clear a shader clip plane via `ViewportState::set_clip_plane`.
+    assert_eq!(viewport.clip_plane(), None);
+    let clip_plane =
+        ViewportClipPlane::with_keep([0.5, 0.5, 0.5], [1.0, 0.0, 0.0], ViewportClipKeep::Back);
+    viewport.set_clip_plane(headless.queue(), Some(clip_plane));
+    assert_eq!(viewport.clip_plane(), Some(clip_plane));
+    viewport.set_clip_plane(headless.queue(), None);
+    assert_eq!(viewport.clip_plane(), None);
 
     // Switch style to vector magnitude and verify range updates.
     let vec_style = ViewportSurfaceStyle {
