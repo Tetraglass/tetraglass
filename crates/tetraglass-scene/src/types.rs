@@ -172,10 +172,9 @@ impl From<MeshFormat> for SourceFormat {
 
 /// Visualization filter definition (`filters.<name>`).
 ///
-/// Internally tagged by `"type"`. Milestone M1 implements the `"surface"` filter;
-/// `"slice"`, `"contour"`, `"clip"`, and `"threshold"` arrive in M2, and
-/// `"streamlines"`, `"glyphs"`, and `"resample"` arrive in M4.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// Internally tagged by `"type"`. Milestone M1 implements `"surface"`, M2 adds `"slice"`,
+/// `"contour"`, `"clip"`, and `"threshold"`, and M4 adds `"streamlines"`, `"glyphs"`, and `"resample"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Filter {
     /// Extracts the external boundary surface of the input dataset.
@@ -183,6 +182,20 @@ pub enum Filter {
     Surface {
         /// Name of the input source or filter.
         input: String,
+    },
+
+    /// Cuts the input volume dataset with a plane (`origin` defaults to the center of input bounds).
+    #[serde(rename_all = "snake_case")]
+    Slice {
+        /// Name of the input source or filter.
+        input: String,
+
+        /// Optional point `[x, y, z]` on the slice plane. Defaults to the center of the input dataset bounds when omitted.
+        #[serde(default = "default_none_vec3")]
+        origin: Option<[f64; 3]>,
+
+        /// Outward plane normal `[nx, ny, nz]` (must be non-zero; normalized automatically).
+        normal: [f64; 3],
     },
 }
 
@@ -195,11 +208,33 @@ impl Filter {
         }
     }
 
+    /// Creates a plane-slice [`Filter::Slice`] reading from `input` through the input bounds center
+    /// (`origin: None`) with outward plane `normal`.
+    #[must_use]
+    pub fn slice(input: impl Into<String>, normal: [f64; 3]) -> Self {
+        Self::Slice {
+            input: input.into(),
+            origin: None,
+            normal,
+        }
+    }
+
+    /// Creates a plane-slice [`Filter::Slice`] reading from `input` at an explicit `origin`
+    /// with outward plane `normal`.
+    #[must_use]
+    pub fn slice_at(input: impl Into<String>, origin: [f64; 3], normal: [f64; 3]) -> Self {
+        Self::Slice {
+            input: input.into(),
+            origin: Some(origin),
+            normal,
+        }
+    }
+
     /// Returns the name of the upstream source or filter that feeds this filter.
     #[must_use]
     pub fn input(&self) -> &str {
         match self {
-            Self::Surface { input } => input,
+            Self::Surface { input } | Self::Slice { input, .. } => input,
         }
     }
 }

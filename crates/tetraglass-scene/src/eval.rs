@@ -12,9 +12,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use tetraglass_core::{
-    ArrayBuffer, Attributes, BoundingBox, SurfaceMesh, TimeSeries, UnstructuredGrid, ValueRange,
+    ArrayBuffer, Attributes, BoundingBox, SurfaceMesh, TetView, TimeSeries, UnstructuredGrid,
+    ValueRange,
 };
-use tetraglass_filters::{DEFAULT_SUBDIVISIONS, extract_external_surface_with_subdivisions};
+use tetraglass_filters::{
+    DEFAULT_SUBDIVISIONS, LinearizeParams, SliceParams, extract_external_surface_with_subdivisions,
+    linearize, slice,
+};
 use tetraglass_io::IoError;
 
 use crate::{
@@ -179,6 +183,39 @@ fn hash_surface_extraction(upstream: PipelineHash) -> PipelineHash {
     PipelineHash(h.finish())
 }
 
+fn hash_tet_view(upstream: PipelineHash, subdivisions: u8) -> PipelineHash {
+    let mut h = FnvHasher::new();
+    h.write_str("tet_view");
+    h.write_u64(upstream.0);
+    h.write_u8(subdivisions);
+    PipelineHash(h.finish())
+}
+
+fn hash_slice_filter(
+    upstream: PipelineHash,
+    origin: Option<[f64; 3]>,
+    normal: [f64; 3],
+) -> PipelineHash {
+    let mut h = FnvHasher::new();
+    h.write_str("filter:slice");
+    h.write_u64(upstream.0);
+    match origin {
+        Some([ox, oy, oz]) => {
+            h.write_u8(1);
+            h.write_f64(ox);
+            h.write_f64(oy);
+            h.write_f64(oz);
+        }
+        None => {
+            h.write_u8(0);
+        }
+    }
+    h.write_f64(normal[0]);
+    h.write_f64(normal[1]);
+    h.write_f64(normal[2]);
+    PipelineHash(h.finish())
+}
+
 /// Output of evaluating a source or filter node in the scene pipeline.
 #[derive(Debug, Clone)]
 pub enum EvaluatedDataset {
@@ -278,6 +315,7 @@ struct LoadedSource {
 pub struct SceneEvaluator {
     sources: BTreeMap<String, LoadedSource>,
     series_sources: BTreeMap<String, TimeSeries<IoError>>,
+    tet_view_cache: HashMap<PipelineHash, Arc<TetView>>,
     surface_cache: HashMap<PipelineHash, Arc<SurfaceMesh>>,
     filter_executions: usize,
     cache_hits: usize,
@@ -367,6 +405,7 @@ impl SceneEvaluator {
 
     /// Clears all cached filter outputs without removing loaded sources.
     pub fn clear_cache(&mut self) {
+        self.tet_view_cache.clear();
         self.surface_cache.clear();
     }
 
@@ -423,6 +462,27 @@ impl SceneEvaluator {
                         self.get_or_extract_surface(surface_hash, upstream_data, subdivisions)?;
                     return Ok((surface_hash, EvaluatedDataset::Surface(surface)));
                 }
+                Filter::Slice {
+                    input,
+                    origin,
+                    normal,
+                } => {
+                    let (upstream_hash, upstream_data) = self.evaluate_dataset(scene, input)?;
+                    let slice_hash = hash_slice_filter(upstream_hash, *origin, *normal);
+                    let subdivisions = resolve_source_subdivisions(scene, input);
+                    let params = match origin {
+                        Some(orig) => SliceParams::with_origin(*orig, *normal),
+                        None => SliceParams::new(*normal),
+                    };
+                    let surface = self.get_or_slice_surface(
+                        slice_hash,
+                        upstream_hash,
+                        upstream_data,
+                        subdivisions,
+                        &params,
+                    )?;
+                    return Ok((slice_hash, EvaluatedDataset::Surface(surface)));
+                }
             }
         }
 
@@ -474,6 +534,55 @@ impl SceneEvaluator {
         };
         self.surface_cache
             .insert(surface_hash, Arc::clone(&surface));
+        Ok(surface)
+    }
+
+    fn get_or_linearize_tet_view(
+        &mut self,
+        upstream_hash: PipelineHash,
+        grid: &UnstructuredGrid,
+        subdivisions: u8,
+    ) -> Result<Arc<TetView>, SceneError> {
+        let tet_hash = hash_tet_view(upstream_hash, subdivisions);
+        if let Some(cached) = self.tet_view_cache.get(&tet_hash) {
+            return Ok(Arc::clone(cached));
+        }
+        let view = Arc::new(linearize(grid, &LinearizeParams::new(subdivisions))?);
+        self.tet_view_cache.insert(tet_hash, Arc::clone(&view));
+        Ok(view)
+    }
+
+    fn get_or_slice_surface(
+        &mut self,
+        slice_hash: PipelineHash,
+        upstream_hash: PipelineHash,
+        upstream_data: EvaluatedDataset,
+        subdivisions: u8,
+        params: &SliceParams,
+    ) -> Result<Arc<SurfaceMesh>, SceneError> {
+        if let Some(cached) = self.surface_cache.get(&slice_hash) {
+            self.cache_hits += 1;
+            return Ok(Arc::clone(cached));
+        }
+
+        let tet_view = match upstream_data {
+            EvaluatedDataset::Grid(grid) => {
+                self.get_or_linearize_tet_view(upstream_hash, &grid, subdivisions)?
+            }
+            EvaluatedDataset::Surface(_) => {
+                return Err(SceneError::Validation(ValidationReport {
+                    issues: vec![ValidationIssue::new(
+                        "filters",
+                        "slice filter requires a volume dataset input, not a surface",
+                        None,
+                    )],
+                }));
+            }
+        };
+
+        self.filter_executions += 1;
+        let surface = Arc::new(slice(&tet_view, params)?);
+        self.surface_cache.insert(slice_hash, Arc::clone(&surface));
         Ok(surface)
     }
 

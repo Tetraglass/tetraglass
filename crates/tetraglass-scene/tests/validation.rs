@@ -348,3 +348,55 @@ fn damerau_levenshtein_handles_transpositions_and_edits() {
     assert_eq!(damerau_levenshtein("rpessure", "pressure"), 1);
     assert_eq!(damerau_levenshtein("flw", "flow"), 1);
 }
+
+#[test]
+fn validates_slice_filter_normal_origin_and_volume_input() {
+    let scene = Scene::from_json_str(
+        r#"{
+            "version": 1,
+            "sources": {
+                "flow": { "file": "results.vtu" }
+            },
+            "filters": {
+                "hull": { "type": "surface", "input": "flow" },
+                "cut": { "type": "slice", "input": "flow", "normal": [0.0, 0.0, 0.0] },
+                "cut_on_surface": { "type": "slice", "input": "hull", "normal": [0.0, 0.0, 1.0] }
+            },
+            "view": {
+                "show": [
+                    { "input": "cut" },
+                    { "input": "cut_on_surface" }
+                ]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let report = validate_scene_structure(&scene).expect_err("must report slice validation errors");
+    let by_path: BTreeMap<&str, &ValidationIssue> = report
+        .issues()
+        .iter()
+        .map(|i| (i.path.as_str(), i))
+        .collect();
+
+    assert_eq!(
+        by_path["filters.cut.normal"].message,
+        "must not be [0, 0, 0]"
+    );
+    assert!(
+        by_path["filters.cut.normal"]
+            .to_string()
+            .starts_with("filters.cut.normal: must not be [0, 0, 0]")
+    );
+    assert!(
+        by_path["filters.cut_on_surface.input"]
+            .message
+            .contains("requires a volume dataset input")
+    );
+    assert_eq!(
+        by_path["filters.cut_on_surface.input"]
+            .suggestion
+            .as_deref(),
+        Some("use volume source \"flow\" as input instead")
+    );
+}

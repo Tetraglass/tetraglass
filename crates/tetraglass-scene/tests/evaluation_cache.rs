@@ -361,3 +361,59 @@ fn time_series_scene_evaluation_loads_steps_lazily_and_supports_auto_all_steps_r
         col_all.effective_range
     );
 }
+
+#[test]
+fn slice_filter_evaluates_on_tet_view_and_caches_results() {
+    let hex = read_vtu_from_path(testdata_vtu("hex_linear.vtu")).expect("load hex_linear.vtu");
+    let mut evaluator = SceneEvaluator::new();
+    evaluator.insert_source("hex", hex);
+
+    let mut scene = Scene::from_json_str(
+        r#"{
+            "version": 1,
+            "sources": {
+                "hex": { "file": "testdata/vtk/hex_linear.vtu" }
+            },
+            "filters": {
+                "cut_z": { "type": "slice", "input": "hex", "origin": [1.0, 1.0, 0.75], "normal": [0.0, 0.0, 1.0] },
+                "cut_center": { "type": "slice", "input": "hex", "normal": [1.0, 0.0, 0.0] }
+            },
+            "view": {
+                "show": [
+                    { "input": "cut_z", "color_by": "linear", "colorbar": true },
+                    { "input": "cut_center", "color_by": "velocity:magnitude" }
+                ]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let eval1 = evaluator
+        .evaluate_scene(&scene)
+        .expect("evaluate slice scene");
+    assert_eq!(eval1.representations.len(), 2);
+    assert_eq!(evaluator.filter_executions(), 2);
+    assert_eq!(evaluator.cache_hits(), 0);
+
+    // 2x2x2 hex block on [0, 2]^3 has cross-section area 4.0 on both planes.
+    assert!((eval1.representations[0].surface.total_area() - 4.0).abs() < 1e-12);
+    assert!((eval1.representations[1].surface.total_area() - 4.0).abs() < 1e-12);
+
+    // At z = 0.75 on [0, 2]^2, `linear = x + 2*y + 3*z` spans [3*0.75, 2 + 4 + 3*0.75] = [2.25, 8.25].
+    let col0 = eval1.representations[0].coloring.as_ref().unwrap();
+    assert!((col0.effective_range[0] - 2.25).abs() < 1e-12);
+    assert!((col0.effective_range[1] - 8.25).abs() < 1e-12);
+
+    // Changing colormap/camera hits the surface cache for both slices without re-running filters.
+    scene.view.show[0].colormap = ColormapName::Turbo;
+    scene.view.camera.azimuth = 45.0;
+    let eval2 = evaluator
+        .evaluate_scene(&scene)
+        .expect("re-evaluate slice scene");
+    assert_eq!(evaluator.filter_executions(), 2);
+    assert_eq!(evaluator.cache_hits(), 2);
+    assert!(Arc::ptr_eq(
+        &eval1.representations[0].surface,
+        &eval2.representations[0].surface
+    ));
+}

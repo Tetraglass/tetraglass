@@ -225,3 +225,11 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Added `crates/tetraglass-filters/src/slice.rs` (`SliceParams`, `slice`, `slice_with_chunk_size`, `slice_grid`) and `FilterError::{InvalidPlaneNormal, InvalidPlaneOrigin}`.
 - Added unit and integration tests (`crates/tetraglass-filters/tests/slice.rs`) covering all 14 active marching-tetrahedra cases, analytic cross-section areas across all 6 cell families in `testdata/vtk/*.vtu`, degenerate planes passing directly through mesh vertices and shared faces (`z = 1.0` on `hex_linear.vtu` and `x - y = 0` on `tet_linear.vtu`), out-of-bounds empty cuts, invalid plane parameters, linear scalar/vector field reproduction, cell attribute provenance, and bit-for-bit determinism across chunk sizes and thread counts.
 - Follow-ups: M2.3b Slice scene integration and gallery scene (`Filter::Slice` in `tetraglass-scene`, semantic validation, JSON Schema snapshot, `docs/scene-format.md`, and `gallery/slice.json` with baseline).
+
+## 2026-10-24 — M2.3b Slice scene integration and gallery scene
+
+- Done: added `Filter::Slice { input, origin, normal }` (`Filter::slice`, `Filter::slice_at`) to `tetraglass-scene`; added semantic validation for `filters.<name>.normal` (`must not be [0, 0, 0]` and finite coordinates), `filters.<name>.origin` (finite coordinates), and volume dataset input enforcement; cached linearized `TetView`s by `(upstream_hash, subdivisions)` and slice `SurfaceMesh` outputs by `(upstream_hash, origin, normal)` in `SceneEvaluator`; updated `crates/tetraglass-cli/tests/snapshots/scene-v1.schema.json` and `docs/scene-format.md`; authored `gallery/slice.json` and `tests/baselines/slice.png`.
+- Tests: unit and integration tests in `crates/tetraglass-scene/src/lib.rs`, `crates/tetraglass-scene/tests/validation.rs`, `crates/tetraglass-scene/tests/evaluation_cache.rs`, and `crates/tetraglass-cli/tests/cli.rs` (`schema_command_matches_committed_snapshot` and `gallery_scenes_and_author_scene_skill_example_validate_and_match_baselines`).
+- Decisions: none (implemented per D-004, D-005, and D-006).
+- Dependencies added: none.
+- Follow-ups: M2.4 Contour (multiple isovalues, all arrays interpolated).

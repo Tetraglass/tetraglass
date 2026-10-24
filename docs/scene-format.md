@@ -40,6 +40,11 @@ Names are lowercase `snake_case`, unique across sources and filters. Unknown key
 
 Every filter has `type` and `input`. Arrays on the input are carried to the output and interpolated where geometry is cut.
 
+```json
+"hull": { "type": "surface", "input": "flow" },
+"cut": { "type": "slice", "input": "flow", "origin": [1.0, 0.5, 0.5], "normal": [1.0, 0.0, 0.0] }
+```
+
 | `type` | Milestone | Fields |
 | --- | --- | --- |
 | `surface` | M1 | none: the external surface (also implied when a volume mesh is shown directly) |

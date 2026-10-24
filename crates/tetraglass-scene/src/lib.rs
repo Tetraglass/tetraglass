@@ -377,7 +377,7 @@ mod tests {
             .is_err()
         );
 
-        // 3. Unknown key in surface filter
+        // 3. Unknown key in surface or slice filter
         assert!(
             Scene::from_json_str(
                 r#"{
@@ -389,8 +389,44 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            Scene::from_json_str(
+                r#"{
+                "version": 1,
+                "sources": { "s": { "file": "a.vtu" } },
+                "filters": { "cut": { "type": "slice", "input": "s", "normal": [0, 0, 1], "extra": 1 } },
+                "view": { "show": [{ "input": "cut" }] }
+            }"#
+            )
+            .is_err()
+        );
 
-        // 4. Unknown filter type in M1
+        // 4. Slice filter round-trips with default and explicit origin
+        let slice_scene = Scene::from_json_str(
+            r#"{
+                "version": 1,
+                "sources": { "s": { "file": "a.vtu" } },
+                "filters": {
+                    "cut_center": { "type": "slice", "input": "s", "normal": [0.0, 0.0, 1.0] },
+                    "cut_offset": { "type": "slice", "input": "s", "origin": [0.5, 0.5, 0.25], "normal": [1.0, 0.0, 0.0] }
+                },
+                "view": { "show": [{ "input": "cut_center" }, { "input": "cut_offset" }] }
+            }"#,
+        )
+        .expect("parse slice filter scene");
+        assert_eq!(
+            slice_scene.filters["cut_center"],
+            Filter::slice("s", [0.0, 0.0, 1.0])
+        );
+        assert_eq!(
+            slice_scene.filters["cut_offset"],
+            Filter::slice_at("s", [0.5, 0.5, 0.25], [1.0, 0.0, 0.0])
+        );
+        let slice_roundtrip =
+            Scene::from_json_str(&slice_scene.to_json_string_pretty().unwrap()).unwrap();
+        assert_eq!(slice_roundtrip, slice_scene);
+
+        // 5. Unknown filter type
         assert!(
             Scene::from_json_str(
                 r#"{

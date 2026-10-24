@@ -305,7 +305,7 @@
       "additionalProperties": false
     },
     "Filter": {
-      "description": "Visualization filter definition (`filters.<name>`).\n\nInternally tagged by `\"type\"`. Milestone M1 implements the `\"surface\"` filter;\n`\"slice\"`, `\"contour\"`, `\"clip\"`, and `\"threshold\"` arrive in M2, and\n`\"streamlines\"`, `\"glyphs\"`, and `\"resample\"` arrive in M4.",
+      "description": "Visualization filter definition (`filters.<name>`).\n\nInternally tagged by `\"type\"`. Milestone M1 implements `\"surface\"`, M2 adds `\"slice\"`,\n`\"contour\"`, `\"clip\"`, and `\"threshold\"`, and M4 adds `\"streamlines\"`, `\"glyphs\"`, and `\"resample\"`.",
       "oneOf": [
         {
           "description": "Extracts the external boundary surface of the input dataset.",
@@ -324,6 +324,50 @@
           "required": [
             "type",
             "input"
+          ]
+        },
+        {
+          "description": "Cuts the input volume dataset with a plane (`origin` defaults to the center of input bounds).",
+          "type": "object",
+          "properties": {
+            "input": {
+              "description": "Name of the input source or filter.",
+              "type": "string"
+            },
+            "normal": {
+              "description": "Outward plane normal `[nx, ny, nz]` (must be non-zero; normalized automatically).",
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "origin": {
+              "description": "Optional point `[x, y, z]` on the slice plane. Defaults to the center of the input dataset bounds when omitted.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "default": null,
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "type": {
+              "type": "string",
+              "const": "slice"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "input",
+            "normal"
           ]
         }
       ]

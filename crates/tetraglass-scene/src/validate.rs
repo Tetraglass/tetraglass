@@ -358,6 +358,51 @@ fn validate_impl(
                 format!("unknown dataset \"{input}\""),
                 suggest_dataset_or_list(input, &defined_datasets, Some(name)),
             ));
+        } else if matches!(filter, Filter::Slice { .. })
+            && matches!(
+                scene.filters.get(input),
+                Some(Filter::Surface { .. } | Filter::Slice { .. })
+            )
+        {
+            let suggestion = resolve_root_source(name, &scene.sources, &scene.filters)
+                .map(|src| format!("use volume source \"{src}\" as input instead"));
+            issues.push(ValidationIssue::new(
+                &input_path,
+                format!(
+                    "slice filter \"{name}\" requires a volume dataset input, but \"{input}\" produces a surface"
+                ),
+                suggestion,
+            ));
+        }
+
+        if let Filter::Slice { origin, normal, .. } = filter {
+            if let Some(orig) = origin
+                && !orig.iter().all(|v| v.is_finite())
+            {
+                issues.push(ValidationIssue::new(
+                    format!("filters.{name}.origin"),
+                    "slice plane origin coordinates must be finite numbers",
+                    None,
+                ));
+            }
+
+            if !normal.iter().all(|v| v.is_finite()) {
+                issues.push(ValidationIssue::new(
+                    format!("filters.{name}.normal"),
+                    "slice plane normal coordinates must be finite numbers",
+                    None,
+                ));
+            } else if normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2] <= 1e-24
+            {
+                issues.push(ValidationIssue::new(
+                    format!("filters.{name}.normal"),
+                    "must not be [0, 0, 0]",
+                    Some(
+                        "use a non-zero plane normal such as [1, 0, 0], [0, 1, 0], or [0, 0, 1]"
+                            .to_string(),
+                    ),
+                ));
+            }
         }
     }
 
