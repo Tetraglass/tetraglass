@@ -2,7 +2,7 @@
 
 Milestones run in order. `/next-task` picks the first unticked task of the first unfinished milestone. Each task should fit one or two evening sessions; split bigger ones into lettered sub-tasks (M2.3a, M2.3b) before starting. Dates are estimates at roughly 8 to 10 hours a week.
 
-Status: **M0 complete (2026-10-23); M1 next.**
+Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 next.**
 
 ---
 
@@ -21,7 +21,7 @@ Status: **M0 complete (2026-10-23); M1 next.**
 - [x] **M0.9 CI rendering.** CI runs the render integration test on lavapipe and stores the first baseline image. *Done when:* CI is green with the render test enabled.
 - [x] **M0.10 Gate.** `/milestone-gate` (`docs/milestones/m0-gate.md`, completed 2026-10-23).
 
-## M1 Agent loop (Jan–Mar 2027)
+## M1 Agent loop (Jan–Mar 2027 — Completed 2026-10-24)
 
 **Gate:** a fresh agent session, given only the CLI and `docs/scene-format.md`, goes from a test file to a correct PNG with no compile step.
 
@@ -35,7 +35,7 @@ Status: **M0 complete (2026-10-23); M1 next.**
 - [x] **M1.8 Viewer v0.** eframe desktop app: open a scene, hot reload on file change, time slider, field and colormap pickers.
 - [x] **M1.9 Performance target.** Define the interactive target for M2 (mesh size, frame time, filter latency) and a synthetic benchmark mesh generated in code; record it as a decision.
 - [x] **M1.10 Gallery.** At least five gallery scenes with baselines; `author-scene` skill examples checked against the real CLI.
-- [ ] **M1.11 Gate.** `/milestone-gate`, including the fresh-agent test.
+- [x] **M1.11 Gate.** `/milestone-gate`, including the fresh-agent test (`docs/milestones/m1-gate.md`, completed 2026-10-24).
 
 ## M2 Core filters (Apr–Jul 2027)
 

@@ -179,3 +179,15 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none.
 - Dependencies added: none.
 - Follow-ups: M1.11 Gate (`/milestone-gate`, including the fresh-agent test).
+
+## 2026-10-24: M1.11 Gate (Milestone M1 Complete)
+- Done: ran `/milestone-gate` for Milestone M1 (`docs/milestones/m1-gate.md`, `docs/milestones/m1-fresh-agent-render.png`, `docs/milestones/m1-viewer-v0.png`):
+  - **Fresh-agent zero-compile test:** launched a fresh subagent session (`f0f0dd8e-2043-4581-bfb0-78c9373b3090`) restricted to only the pre-built `target/debug/tetraglass` CLI and `docs/scene-format.md`. It inspected `testdata/gmsh/tet2_v41.msh` via `tetraglass inspect --json`, authored `target/m1-gate/fresh-agent-scene.json` (`surface` filter, `velocity:magnitude`, `viridis`, right colorbar, axes triad, title, perspective camera), passed `tetraglass validate` on its first attempt, and rendered `docs/milestones/m1-fresh-agent-render.png` (`800 × 600`, `4×` MSAA) with zero compile steps.
+  - **Milestone M1 Retrospective:**
+    - *Planned vs. actual time:* Planned for Jan–Mar 2027 (~11 evening/weekend sessions); completed in 2 days (2026-10-23 to 2026-10-24) across 11 small, self-contained tasks (`M1.1`–`M1.11`).
+    - *What was cut or moved:* Nothing was cut; curved-surface tessellation of higher-order cells remains scheduled for `M2.2` as originally planned (noticed during `M1.10` when `tet2_v41.msh` corner-only external surface had uniform `radius` on `[0, 1]^3` corners).
+    - *What to change in M2's plan:* `M2.1 Linearize` covers linear cell tet decomposition with face-consistent diagonals, Lagrange higher-order subdivision with basis evaluation, and polyhedron centroid decomposition; if `M2.1` exceeds ~500 lines, split it into `M2.1a` (linear + polyhedra tet decomposition + source-cell map) and `M2.1b` (Lagrange higher-order subdivision + property tests) at the start of M2.
+- Tests: verified all 5 gallery scenes + `author-scene` skill snippet (`cargo test -p tetraglass-cli --test cli`), `tetraglass-viewer` offscreen test (`cargo test -p tetraglass-viewer --test viewer_document`), and full `cargo xtask verify`.
+- Decisions: none.
+- Dependencies added: none.
+- Follow-ups: M2.1 Linearize (first task of Milestone M2 — await user's go-ahead to start M2).
