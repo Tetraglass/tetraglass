@@ -174,6 +174,13 @@ pub enum CoreError {
         /// Total number of steps in the series.
         num_steps: usize,
     },
+
+    /// A [`crate::SyntheticGridSpec`] had one or more zero cell subdivisions (`nx == 0`, `ny == 0`, or `nz == 0`).
+    #[error("synthetic grid divisions {divisions:?} must all be >= 1")]
+    InvalidSyntheticDivisions {
+        /// Requested `[nx, ny, nz]` subdivisions.
+        divisions: [u32; 3],
+    },
 }
 
 /// Converts a `u64` index to `u32`, returning [`CoreError::IndexOverflow`] if it exceeds `u32::MAX`.

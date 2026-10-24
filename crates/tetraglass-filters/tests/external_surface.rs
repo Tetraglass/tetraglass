@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tetraglass_core::{ArrayBuffer, UnstructuredGrid};
+use tetraglass_core::{ArrayBuffer, SyntheticCellLayout, SyntheticGridSpec, UnstructuredGrid};
 use tetraglass_filters::extract_external_surface;
 use tetraglass_io::{read_vtu, read_vtu_from_path, write_vtu_to_bytes};
 
@@ -148,4 +148,26 @@ fn empty_grid_produces_empty_surface() {
     assert_eq!(surf.num_faces(), 0);
     assert_eq!(surf.num_triangles(), 0);
     assert_eq!(surf.total_area(), 0.0);
+}
+
+#[test]
+fn synthetic_tet_and_hex_grids_have_exact_boundary_faces_and_zero_internal_faces() {
+    let tet_spec = SyntheticGridSpec::new(10, 8, 6, SyntheticCellLayout::Tetrahedra6);
+    let tet_grid = tet_spec.generate().expect("generate 10x8x6 tets");
+    let tet_surf = extract_external_surface(&tet_grid).expect("extract tet surface");
+
+    assert_eq!(tet_surf.num_faces(), tet_spec.expected_boundary_faces());
+    assert_eq!(tet_surf.num_triangles(), tet_spec.expected_boundary_faces());
+    assert!((tet_surf.total_area() - 6.0).abs() < 1e-11);
+
+    let hex_spec = SyntheticGridSpec::new(10, 8, 6, SyntheticCellLayout::Hexahedra);
+    let hex_grid = hex_spec.generate().expect("generate 10x8x6 hexes");
+    let hex_surf = extract_external_surface(&hex_grid).expect("extract hex surface");
+
+    assert_eq!(hex_surf.num_faces(), hex_spec.expected_boundary_faces());
+    assert_eq!(
+        hex_surf.num_triangles(),
+        hex_spec.expected_boundary_faces() * 2
+    );
+    assert!((hex_surf.total_area() - 6.0).abs() < 1e-11);
 }

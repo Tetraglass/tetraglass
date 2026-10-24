@@ -159,3 +159,10 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-003, D-004, and `.agents/rules/rendering.md`).
 - Dependencies added: none (reused workspace `eframe`, `egui`, `egui-wgpu`, `serde_json`, `thiserror`, `log`, and wrote `SceneFileWatcher` in-house).
 - Follow-ups: M1.9 Performance target (define the interactive target for M2: mesh size, frame time, filter latency, and a synthetic benchmark mesh generated in code; record it as a decision).
+
+## 2026-10-24: M1.9 Performance target
+- Done: defined the Milestone M2 interactive performance target (`PerformanceTarget`, `M2_PERFORMANCE_TARGET`: `50 × 50 × 40 = 100,000` hexes / `600,000` Kuhn tetrahedra, `106,641` points; viewport frame time `<= 16.6 ms` at `1200 × 800` `4x` MSAA; interactive plane `slice`/single-isovalue `contour` `<= 50 ms`; full-volume `linearize` / `extract_external_surface` / `clip` / `threshold` `<= 150 ms` in `--release`) and implemented the deterministic in-code synthetic benchmark mesh generator in `tetraglass-core` (`SyntheticCellLayout`, `SyntheticGridSpec`, `generate_synthetic_grid`, `m2_benchmark_tet_spec`, `m2_benchmark_hex_spec`) plus the `surface_bench` benchmark target in `tetraglass-filters`.
+- Tests: unit test `synthetic_grid_specs_match_m2_performance_target_and_generate_valid_meshes` in `tetraglass-core`; integration test `synthetic_tet_and_hex_grids_have_exact_boundary_faces_and_zero_internal_faces` in `crates/tetraglass-filters/tests/external_surface.rs`; and benchmark harness `crates/tetraglass-filters/benches/surface_bench.rs` (`100k` hexes: `6.9 ms` gen / `32.9 ms` surface; `600k` tets: `7.6 ms` gen / `122.2 ms` surface).
+- Decisions: D-019 (Milestone M2 interactive performance target and `50 × 50 × 40` synthetic benchmark mesh).
+- Dependencies added: none.
+- Follow-ups: M1.10 Gallery (at least five gallery scenes with baselines; `author-scene` skill examples checked against the real CLI).

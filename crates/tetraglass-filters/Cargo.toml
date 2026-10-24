@@ -17,3 +17,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tetraglass-io.workspace = true
+
+[[bench]]
+name = "surface_bench"
+harness = false

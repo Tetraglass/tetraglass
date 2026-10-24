@@ -11,6 +11,7 @@ mod error;
 mod grid;
 mod series;
 mod surface;
+mod synthetic;
 
 pub use array::{ArrayBuffer, Attributes, ComponentCount, DataArray, ScalarType, ValueRange};
 pub use cell::{CellType, PolyhedronFaceIter, PolyhedronFaces};
@@ -18,6 +19,10 @@ pub use error::{CoreError, try_u32_from_i64, try_u32_from_u64, try_u32_from_usiz
 pub use grid::{BoundingBox, UnstructuredGrid};
 pub use series::{DEFAULT_STEP_CACHE_CAPACITY, StepLoader, TimeSeries};
 pub use surface::SurfaceMesh;
+pub use synthetic::{
+    M2_PERFORMANCE_TARGET, PerformanceTarget, SyntheticCellLayout, SyntheticGridSpec,
+    generate_synthetic_grid, m2_benchmark_hex_spec, m2_benchmark_tet_spec,
+};
 
 #[cfg(test)]
 mod tests {
@@ -435,6 +440,63 @@ mod tests {
             Err(CoreError::TimeStepOutOfBounds {
                 step_index: 99,
                 num_steps: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn synthetic_grid_specs_match_m2_performance_target_and_generate_valid_meshes() {
+        let tet_spec = m2_benchmark_tet_spec();
+        let hex_spec = m2_benchmark_hex_spec();
+        assert_eq!(tet_spec.divisions, M2_PERFORMANCE_TARGET.divisions);
+        assert_eq!(tet_spec.num_points(), M2_PERFORMANCE_TARGET.num_points);
+        assert_eq!(tet_spec.num_cells(), M2_PERFORMANCE_TARGET.num_tet_cells);
+        assert_eq!(hex_spec.num_points(), M2_PERFORMANCE_TARGET.num_points);
+        assert_eq!(hex_spec.num_cells(), M2_PERFORMANCE_TARGET.num_hex_cells);
+
+        // Reject zero divisions
+        let zero_spec = SyntheticGridSpec::new(0, 4, 4, SyntheticCellLayout::Hexahedra);
+        assert_eq!(
+            zero_spec.generate(),
+            Err(CoreError::InvalidSyntheticDivisions {
+                divisions: [0, 4, 4]
+            })
+        );
+
+        // Generate a small 5x4x3 tetrahedral and hexahedral mesh and verify bounds & analytic fields
+        let small_tet_spec = SyntheticGridSpec::new(5, 4, 3, SyntheticCellLayout::Tetrahedra6);
+        let tet_grid = small_tet_spec.generate().expect("generate 5x4x3 tets");
+        assert_eq!(tet_grid.num_points(), 6 * 5 * 4);
+        assert_eq!(tet_grid.num_cells(), 5 * 4 * 3 * 6);
+        assert_eq!(
+            tet_grid.bounds(),
+            Some(BoundingBox {
+                min: [0.0, 0.0, 0.0],
+                max: [1.0, 1.0, 1.0],
+            })
+        );
+        assert_eq!(
+            tet_grid
+                .point_data()
+                .get("linear")
+                .unwrap()
+                .component_range(0),
+            Some(ValueRange { min: 0.0, max: 6.0 })
+        );
+
+        let small_hex_spec = SyntheticGridSpec::new(5, 4, 3, SyntheticCellLayout::Hexahedra);
+        let hex_grid = small_hex_spec.generate().expect("generate 5x4x3 hexes");
+        assert_eq!(hex_grid.num_points(), 6 * 5 * 4);
+        assert_eq!(hex_grid.num_cells(), 5 * 4 * 3);
+        assert_eq!(
+            hex_grid
+                .cell_data()
+                .get("cell_id")
+                .unwrap()
+                .component_range(0),
+            Some(ValueRange {
+                min: 0.0,
+                max: 59.0
             })
         );
     }
