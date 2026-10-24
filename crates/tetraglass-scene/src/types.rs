@@ -197,6 +197,19 @@ pub enum Filter {
         /// Outward plane normal `[nx, ny, nz]` (must be non-zero; normalized automatically).
         normal: [f64; 3],
     },
+
+    /// Extracts one or more isosurfaces from a continuous point attribute array (`"contour"`).
+    #[serde(rename_all = "snake_case")]
+    Contour {
+        /// Name of the input source or filter.
+        input: String,
+
+        /// Point array reference (`"<array>"` or `"<array>:<component>"`) to contour.
+        field: String,
+
+        /// Non-empty list of finite isovalues to extract.
+        values: Vec<f64>,
+    },
 }
 
 impl Filter {
@@ -230,11 +243,23 @@ impl Filter {
         }
     }
 
+    /// Creates a multi-isovalue [`Filter::Contour`] reading from `input` on `field` at `values`.
+    #[must_use]
+    pub fn contour(input: impl Into<String>, field: impl Into<String>, values: Vec<f64>) -> Self {
+        Self::Contour {
+            input: input.into(),
+            field: field.into(),
+            values,
+        }
+    }
+
     /// Returns the name of the upstream source or filter that feeds this filter.
     #[must_use]
     pub fn input(&self) -> &str {
         match self {
-            Self::Surface { input } | Self::Slice { input, .. } => input,
+            Self::Surface { input } | Self::Slice { input, .. } | Self::Contour { input, .. } => {
+                input
+            }
         }
     }
 }

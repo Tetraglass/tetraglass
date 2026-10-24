@@ -401,19 +401,20 @@ mod tests {
             .is_err()
         );
 
-        // 4. Slice filter round-trips with default and explicit origin
+        // 4. Slice and contour filters round-trip
         let slice_scene = Scene::from_json_str(
             r#"{
                 "version": 1,
                 "sources": { "s": { "file": "a.vtu" } },
                 "filters": {
                     "cut_center": { "type": "slice", "input": "s", "normal": [0.0, 0.0, 1.0] },
-                    "cut_offset": { "type": "slice", "input": "s", "origin": [0.5, 0.5, 0.25], "normal": [1.0, 0.0, 0.0] }
+                    "cut_offset": { "type": "slice", "input": "s", "origin": [0.5, 0.5, 0.25], "normal": [1.0, 0.0, 0.0] },
+                    "iso": { "type": "contour", "input": "s", "field": "velocity:magnitude", "values": [0.5, 1.0, 1.5] }
                 },
-                "view": { "show": [{ "input": "cut_center" }, { "input": "cut_offset" }] }
+                "view": { "show": [{ "input": "cut_center" }, { "input": "cut_offset" }, { "input": "iso" }] }
             }"#,
         )
-        .expect("parse slice filter scene");
+        .expect("parse slice and contour filter scene");
         assert_eq!(
             slice_scene.filters["cut_center"],
             Filter::slice("s", [0.0, 0.0, 1.0])
@@ -421,6 +422,10 @@ mod tests {
         assert_eq!(
             slice_scene.filters["cut_offset"],
             Filter::slice_at("s", [0.5, 0.5, 0.25], [1.0, 0.0, 0.0])
+        );
+        assert_eq!(
+            slice_scene.filters["iso"],
+            Filter::contour("s", "velocity:magnitude", vec![0.5, 1.0, 1.5])
         );
         let slice_roundtrip =
             Scene::from_json_str(&slice_scene.to_json_string_pretty().unwrap()).unwrap();

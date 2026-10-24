@@ -417,3 +417,59 @@ fn slice_filter_evaluates_on_tet_view_and_caches_results() {
         &eval2.representations[0].surface
     ));
 }
+
+#[test]
+fn contour_filter_evaluates_multiple_isovalues_and_caches_results() {
+    let hex = read_vtu_from_path(testdata_vtu("hex_linear.vtu")).expect("load hex_linear.vtu");
+    let mut evaluator = SceneEvaluator::new();
+    evaluator.insert_source("hex", hex);
+
+    let mut scene = Scene::from_json_str(
+        r#"{
+            "version": 1,
+            "sources": {
+                "hex": { "file": "testdata/vtk/hex_linear.vtu" }
+            },
+            "filters": {
+                "iso": {
+                    "type": "contour",
+                    "input": "hex",
+                    "field": "linear",
+                    "values": [3.0, 6.0, 9.0]
+                }
+            },
+            "view": {
+                "show": [
+                    { "input": "iso", "color_by": "linear", "colorbar": true }
+                ]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let eval1 = evaluator
+        .evaluate_scene(&scene)
+        .expect("evaluate contour scene");
+    assert_eq!(eval1.representations.len(), 1);
+    assert_eq!(evaluator.filter_executions(), 1);
+    assert_eq!(evaluator.cache_hits(), 0);
+
+    let iso_surf = &eval1.representations[0].surface;
+    assert!(iso_surf.num_triangles() > 20);
+    assert!(iso_surf.total_area() > 6.0);
+
+    // The contoured `linear` field has exact values in {3.0, 6.0, 9.0}, so auto range is [3.0, 9.0].
+    let col = eval1.representations[0].coloring.as_ref().unwrap();
+    assert!((col.effective_range[0] - 3.0).abs() < 1e-11);
+    assert!((col.effective_range[1] - 9.0).abs() < 1e-11);
+
+    // Changing view-only properties hits the surface cache without re-running contour.
+    scene.view.show[0].color_by = Some("velocity:magnitude".to_string());
+    scene.view.camera.elevation = 35.0;
+    let eval2 = evaluator
+        .evaluate_scene(&scene)
+        .expect("re-evaluate contour scene");
+    assert_eq!(evaluator.filter_executions(), 1);
+    assert_eq!(evaluator.cache_hits(), 1);
+    assert!(Arc::ptr_eq(iso_surf, &eval2.representations[0].surface));
+}

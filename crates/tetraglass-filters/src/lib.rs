@@ -6,11 +6,15 @@
 //! See `docs/design-plan.md` in the repository for how this crate fits the architecture.
 
 mod basis;
+mod contour;
 mod linearize;
 mod marching_tets;
 mod slice;
 mod surface;
 
+pub use contour::{
+    ContourComponent, ContourParams, contour, contour_grid, contour_with_chunk_size,
+};
 pub use linearize::{DEFAULT_SUBDIVISIONS, LinearizeParams, linearize, linearize_default};
 pub use marching_tets::{
     DEFAULT_TET_CHUNK_SIZE, EdgeKey, extract_isosurface, extract_isosurfaces_with_chunk_size,

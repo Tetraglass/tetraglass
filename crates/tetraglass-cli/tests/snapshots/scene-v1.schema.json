@@ -369,6 +369,39 @@
             "input",
             "normal"
           ]
+        },
+        {
+          "description": "Extracts one or more isosurfaces from a continuous point attribute array (`\"contour\"`).",
+          "type": "object",
+          "properties": {
+            "field": {
+              "description": "Point array reference (`\"<array>\"` or `\"<array>:<component>\"`) to contour.",
+              "type": "string"
+            },
+            "input": {
+              "description": "Name of the input source or filter.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "contour"
+            },
+            "values": {
+              "description": "Non-empty list of finite isovalues to extract.",
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "input",
+            "field",
+            "values"
+          ]
         }
       ]
     },

@@ -358,50 +358,73 @@ fn validate_impl(
                 format!("unknown dataset \"{input}\""),
                 suggest_dataset_or_list(input, &defined_datasets, Some(name)),
             ));
-        } else if matches!(filter, Filter::Slice { .. })
+        } else if matches!(filter, Filter::Slice { .. } | Filter::Contour { .. })
             && matches!(
                 scene.filters.get(input),
-                Some(Filter::Surface { .. } | Filter::Slice { .. })
+                Some(Filter::Surface { .. } | Filter::Slice { .. } | Filter::Contour { .. })
             )
         {
+            let kind = match filter {
+                Filter::Contour { .. } => "contour",
+                _ => "slice",
+            };
             let suggestion = resolve_root_source(name, &scene.sources, &scene.filters)
                 .map(|src| format!("use volume source \"{src}\" as input instead"));
             issues.push(ValidationIssue::new(
                 &input_path,
                 format!(
-                    "slice filter \"{name}\" requires a volume dataset input, but \"{input}\" produces a surface"
+                    "{kind} filter \"{name}\" requires a volume dataset input, but \"{input}\" produces a surface"
                 ),
                 suggestion,
             ));
         }
 
-        if let Filter::Slice { origin, normal, .. } = filter {
-            if let Some(orig) = origin
-                && !orig.iter().all(|v| v.is_finite())
-            {
-                issues.push(ValidationIssue::new(
-                    format!("filters.{name}.origin"),
-                    "slice plane origin coordinates must be finite numbers",
-                    None,
-                ));
-            }
+        match filter {
+            Filter::Surface { .. } => {}
+            Filter::Slice { origin, normal, .. } => {
+                if let Some(orig) = origin
+                    && !orig.iter().all(|v| v.is_finite())
+                {
+                    issues.push(ValidationIssue::new(
+                        format!("filters.{name}.origin"),
+                        "slice plane origin coordinates must be finite numbers",
+                        None,
+                    ));
+                }
 
-            if !normal.iter().all(|v| v.is_finite()) {
-                issues.push(ValidationIssue::new(
-                    format!("filters.{name}.normal"),
-                    "slice plane normal coordinates must be finite numbers",
-                    None,
-                ));
-            } else if normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2] <= 1e-24
-            {
-                issues.push(ValidationIssue::new(
-                    format!("filters.{name}.normal"),
-                    "must not be [0, 0, 0]",
-                    Some(
-                        "use a non-zero plane normal such as [1, 0, 0], [0, 1, 0], or [0, 0, 1]"
-                            .to_string(),
-                    ),
-                ));
+                if !normal.iter().all(|v| v.is_finite()) {
+                    issues.push(ValidationIssue::new(
+                        format!("filters.{name}.normal"),
+                        "slice plane normal coordinates must be finite numbers",
+                        None,
+                    ));
+                } else if normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]
+                    <= 1e-24
+                {
+                    issues.push(ValidationIssue::new(
+                        format!("filters.{name}.normal"),
+                        "must not be [0, 0, 0]",
+                        Some(
+                            "use a non-zero plane normal such as [1, 0, 0], [0, 1, 0], or [0, 0, 1]"
+                                .to_string(),
+                        ),
+                    ));
+                }
+            }
+            Filter::Contour { values, .. } => {
+                if values.is_empty() {
+                    issues.push(ValidationIssue::new(
+                        format!("filters.{name}.values"),
+                        "contour values list must not be empty",
+                        Some("provide at least one finite isovalue such as [1.0]".to_string()),
+                    ));
+                } else if !values.iter().all(|v| v.is_finite()) {
+                    issues.push(ValidationIssue::new(
+                        format!("filters.{name}.values"),
+                        "contour isovalues must be finite numbers",
+                        None,
+                    ));
+                }
             }
         }
     }
@@ -428,6 +451,16 @@ fn validate_impl(
             }
             map
         });
+
+    // Validate filter field references (such as `contour.field`) against resolved dataset metadata.
+    for (name, filter) in &scene.filters {
+        if let Filter::Contour { input, field, .. } = filter {
+            let dataset_meta = resolved_datasets
+                .as_ref()
+                .and_then(|map| map.get(input.as_str()).copied());
+            validate_contour_field(name, field, input, dataset_meta, &mut issues);
+        }
+    }
 
     // 4. View representations
     if scene.view.show.is_empty() {
@@ -746,6 +779,97 @@ fn validate_impl(
         Ok(())
     } else {
         Err(ValidationReport { issues })
+    }
+}
+
+fn validate_contour_field(
+    filter_name: &str,
+    raw: &str,
+    input_name: &str,
+    dataset_meta: Option<&DatasetMetadata>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let field_path = format!("filters.{filter_name}.field");
+
+    let parsed = match ParsedArrayRef::parse(raw) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            let suggestion = suggest_component_for_malformed_ref(raw);
+            issues.push(ValidationIssue::new(
+                &field_path,
+                format!("invalid array reference \"{raw}\""),
+                suggestion,
+            ));
+            return;
+        }
+    };
+
+    if parsed.association == Some(ArrayAssociation::Cell) {
+        issues.push(ValidationIssue::new(
+            &field_path,
+            "contour filter requires a point array, not a cell array",
+            Some(format!(
+                "use \"point:{}\" or a continuous point array",
+                parsed.name
+            )),
+        ));
+        return;
+    }
+
+    let Some(meta) = dataset_meta else {
+        return;
+    };
+
+    let point_candidates: Vec<&str> = meta.point_arrays.keys().map(String::as_str).collect();
+    let Some(array_meta) = meta.point_arrays.get(&parsed.name) else {
+        if meta.cell_arrays.contains_key(&parsed.name) {
+            issues.push(ValidationIssue::new(
+                &field_path,
+                format!(
+                    "no point array \"{}\" on \"{input_name}\" (exists only as a cell array; contour requires a point array)",
+                    parsed.name
+                ),
+                suggest_array_name(&parsed.name, &point_candidates),
+            ));
+        } else {
+            issues.push(ValidationIssue::new(
+                &field_path,
+                format!("no point array \"{}\" on \"{input_name}\"", parsed.name),
+                suggest_array_name(&parsed.name, &point_candidates),
+            ));
+        }
+        return;
+    };
+
+    if parsed.resolve_component(array_meta.components).is_none() {
+        let comp_str = parsed.component.map_or_else(String::new, |c| c.to_string());
+        let suggestion = match array_meta.components {
+            ComponentCount::Scalar => Some(format!(
+                "\"{}\" is a scalar array (1 component); use \"{}\" without \":{comp_str}\"",
+                parsed.name, parsed.name
+            )),
+            ComponentCount::Vector3 => Some(
+                "valid components for a 3-component vector are \"x\", \"y\", \"z\", \"magnitude\", or 0..2"
+                    .to_string(),
+            ),
+            ComponentCount::SymmetricTensor6 => Some(
+                "valid components for a 6-component symmetric tensor are \"xx\"..\"zz\", \"magnitude\", or 0..5"
+                    .to_string(),
+            ),
+            ComponentCount::Tensor9 => Some(
+                "valid components for a 9-component tensor are \"xx\"..\"zz\", \"magnitude\", or 0..8"
+                    .to_string(),
+            ),
+        };
+        issues.push(ValidationIssue::new(
+            &field_path,
+            format!(
+                "component \"{comp_str}\" is not valid for {}-component array \"{}\" on \"{input_name}\"",
+                array_meta.components.as_usize(),
+                parsed.name
+            ),
+            suggestion,
+        ));
     }
 }
 

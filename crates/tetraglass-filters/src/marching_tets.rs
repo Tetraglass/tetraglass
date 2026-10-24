@@ -301,9 +301,13 @@ fn process_tet_chunk(
         }
     };
 
-    for (iso_idx_usize, &iso) in isovalues.iter().enumerate() {
-        let iso_idx = iso_idx_usize as u32;
-        for (local_tet_idx, &[v0, v1, v2, v3]) in tets.iter().enumerate() {
+    for (local_tet_idx, &[v0, v1, v2, v3]) in tets.iter().enumerate() {
+        let tet_verts = [v0, v1, v2, v3];
+        let src_cell = tet_source_cells[local_tet_idx];
+        let global_tet_idx = tet_offset + local_tet_idx as u32;
+
+        for (iso_idx_usize, &iso) in isovalues.iter().enumerate() {
+            let iso_idx = iso_idx_usize as u32;
             let s0 = snap_scalar(scalars[v0 as usize], iso);
             let s1 = snap_scalar(scalars[v1 as usize], iso);
             let s2 = snap_scalar(scalars[v2 as usize], iso);
@@ -314,10 +318,6 @@ fn process_tet_chunk(
             let b2 = u8::from(s2 >= iso);
             let b3 = u8::from(s3 >= iso);
             let mask = (b0 | (b1 << 1) | (b2 << 2) | (b3 << 3)) as usize;
-
-            let tet_verts = [v0, v1, v2, v3];
-            let src_cell = tet_source_cells[local_tet_idx];
-            let global_tet_idx = tet_offset + local_tet_idx as u32;
 
             match MARCHING_TET_TABLE[mask] {
                 TetCutCase::Empty => {}

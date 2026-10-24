@@ -400,3 +400,60 @@ fn validates_slice_filter_normal_origin_and_volume_input() {
         Some("use volume source \"flow\" as input instead")
     );
 }
+
+#[test]
+fn validates_contour_filter_field_values_and_volume_input() {
+    let mut sources = BTreeMap::new();
+    sources.insert("flow".to_string(), flow_grid_with_pressure_and_velocity());
+
+    let scene = Scene::from_json_str(
+        r#"{
+            "version": 1,
+            "sources": {
+                "flow": { "file": "results.vtu" }
+            },
+            "filters": {
+                "hull": { "type": "surface", "input": "flow" },
+                "empty_iso": { "type": "contour", "input": "flow", "field": "pressure", "values": [] },
+                "typo_iso": { "type": "contour", "input": "flow", "field": "presure", "values": [101400.0] },
+                "cell_iso": { "type": "contour", "input": "flow", "field": "cell_id", "values": [0.0] },
+                "bad_comp_iso": { "type": "contour", "input": "flow", "field": "pressure:x", "values": [101400.0] },
+                "surf_iso": { "type": "contour", "input": "hull", "field": "pressure", "values": [101400.0] }
+            },
+            "view": {
+                "show": [
+                    { "input": "empty_iso" }
+                ]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let report = validate_scene(&scene, &sources).expect_err("must report contour errors");
+    let by_path: BTreeMap<&str, &ValidationIssue> = report
+        .issues()
+        .iter()
+        .map(|i| (i.path.as_str(), i))
+        .collect();
+
+    assert!(by_path.contains_key("filters.empty_iso.values"));
+    assert_eq!(
+        by_path["filters.typo_iso.field"].suggestion.as_deref(),
+        Some("did you mean \"pressure\"?")
+    );
+    assert!(
+        by_path["filters.cell_iso.field"]
+            .message
+            .contains("exists only as a cell array; contour requires a point array")
+    );
+    assert!(
+        by_path["filters.bad_comp_iso.field"]
+            .message
+            .contains("component \"x\" is not valid")
+    );
+    assert!(
+        by_path["filters.surf_iso.input"]
+            .message
+            .contains("requires a volume dataset input")
+    );
+}

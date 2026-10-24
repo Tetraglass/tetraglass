@@ -46,7 +46,7 @@ Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 next.**
 - [x] **M2.2 Curved surfaces.** External surface of higher-order cells with tessellated faces; wireframe from original element edges.
 - [x] **M2.3a Marching tetrahedra kernel and slice filter.** Shared marching-tetrahedra isosurface kernel (`D-006`) and plane `slice` filter on `TetView` (`D-005`) in `tetraglass-filters`; analytic area, all-cell-family, degenerate vertex-plane, linear-field interpolation, and chunk-determinism tests (`/add-filter`).
 - [x] **M2.3b Slice scene integration and gallery scene.** `Filter::Slice` in `tetraglass-scene`, semantic validation (`origin` default, non-zero `normal`), JSON Schema snapshot, `docs/scene-format.md`, and slice gallery scene with baseline (`/author-scene`, `/render-check`).
-- [ ] **M2.4 Contour.** Multiple isovalues, all arrays interpolated.
+- [x] **M2.4 Contour.** Multiple isovalues, all arrays interpolated.
 - [ ] **M2.5 Clip.** Exact and crinkle modes.
 - [ ] **M2.6 Threshold.**
 - [ ] **M2.7 Picking.** GPU ID buffer; value probe in the widget and viewer.

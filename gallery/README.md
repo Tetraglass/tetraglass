@@ -10,3 +10,4 @@ Reproducible scene files rendered in CI and compared against `tests/baselines/`.
 | `gmsh-quadratic-tetra.json` | Gmsh MSH 4.1 10-node quadratic tetrahedron mesh (`tet2_v41.msh`) colored by point scalar `linear` with Cividis and right colorbar. |
 | `series-transient-last.json` | ParaView `.pvd` 3-step transient series (`series.pvd`) evaluated at `"time": "last"` (`t = 1.0`) with `"range": "auto_all_steps"` (`[0.0, 7.0]`). |
 | `slice.json` | Diagonal `slice` plane (`normal: [1.0, -0.8, 0.9]`) through `hex_linear.vtu` colored by `linear` with `surface_with_edges` inside a `silver` outer element wireframe. |
+| `contour.json` | Multi-isovalue `contour` (`values: [2.5, 5.0, 7.5, 10.0]`) of `linear` on `hex_linear.vtu` colored with Turbo inside a `silver` outer element wireframe. |

@@ -479,6 +479,7 @@ fn gallery_scenes_and_author_scene_skill_example_validate_and_match_baselines() 
         "gmsh-quadratic-tetra",
         "series-transient-last",
         "slice",
+        "contour",
     ];
 
     for name in gallery_names {

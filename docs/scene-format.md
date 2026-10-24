@@ -42,7 +42,8 @@ Every filter has `type` and `input`. Arrays on the input are carried to the outp
 
 ```json
 "hull": { "type": "surface", "input": "flow" },
-"cut": { "type": "slice", "input": "flow", "origin": [1.0, 0.5, 0.5], "normal": [1.0, 0.0, 0.0] }
+"cut": { "type": "slice", "input": "flow", "origin": [1.0, 0.5, 0.5], "normal": [1.0, 0.0, 0.0] },
+"iso": { "type": "contour", "input": "flow", "field": "velocity:magnitude", "values": [0.5, 1.0, 1.5] }
 ```
 
 | `type` | Milestone | Fields |

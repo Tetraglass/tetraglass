@@ -16,8 +16,8 @@ use tetraglass_core::{
     ValueRange,
 };
 use tetraglass_filters::{
-    DEFAULT_SUBDIVISIONS, LinearizeParams, SliceParams, extract_external_surface_with_subdivisions,
-    linearize, slice,
+    ContourComponent, ContourParams, DEFAULT_SUBDIVISIONS, LinearizeParams, SliceParams, contour,
+    extract_external_surface_with_subdivisions, linearize, slice,
 };
 use tetraglass_io::IoError;
 
@@ -213,6 +213,18 @@ fn hash_slice_filter(
     h.write_f64(normal[0]);
     h.write_f64(normal[1]);
     h.write_f64(normal[2]);
+    PipelineHash(h.finish())
+}
+
+fn hash_contour_filter(upstream: PipelineHash, field: &str, values: &[f64]) -> PipelineHash {
+    let mut h = FnvHasher::new();
+    h.write_str("filter:contour");
+    h.write_u64(upstream.0);
+    h.write_str(field);
+    h.write_usize(values.len());
+    for &v in values {
+        h.write_f64(v);
+    }
     PipelineHash(h.finish())
 }
 
@@ -483,6 +495,24 @@ impl SceneEvaluator {
                     )?;
                     return Ok((slice_hash, EvaluatedDataset::Surface(surface)));
                 }
+                Filter::Contour {
+                    input,
+                    field,
+                    values,
+                } => {
+                    let (upstream_hash, upstream_data) = self.evaluate_dataset(scene, input)?;
+                    let contour_hash = hash_contour_filter(upstream_hash, field, values);
+                    let subdivisions = resolve_source_subdivisions(scene, input);
+                    let surface = self.get_or_contour_surface(
+                        contour_hash,
+                        upstream_hash,
+                        upstream_data,
+                        subdivisions,
+                        field,
+                        values,
+                    )?;
+                    return Ok((contour_hash, EvaluatedDataset::Surface(surface)));
+                }
             }
         }
 
@@ -583,6 +613,74 @@ impl SceneEvaluator {
         self.filter_executions += 1;
         let surface = Arc::new(slice(&tet_view, params)?);
         self.surface_cache.insert(slice_hash, Arc::clone(&surface));
+        Ok(surface)
+    }
+
+    fn get_or_contour_surface(
+        &mut self,
+        contour_hash: PipelineHash,
+        upstream_hash: PipelineHash,
+        upstream_data: EvaluatedDataset,
+        subdivisions: u8,
+        raw_field: &str,
+        values: &[f64],
+    ) -> Result<Arc<SurfaceMesh>, SceneError> {
+        if let Some(cached) = self.surface_cache.get(&contour_hash) {
+            self.cache_hits += 1;
+            return Ok(Arc::clone(cached));
+        }
+
+        let tet_view = match upstream_data {
+            EvaluatedDataset::Grid(grid) => {
+                self.get_or_linearize_tet_view(upstream_hash, &grid, subdivisions)?
+            }
+            EvaluatedDataset::Surface(_) => {
+                return Err(SceneError::Validation(ValidationReport {
+                    issues: vec![ValidationIssue::new(
+                        "filters",
+                        "contour filter requires a volume dataset input, not a surface",
+                        None,
+                    )],
+                }));
+            }
+        };
+
+        let parsed = ParsedArrayRef::parse(raw_field)?;
+        if parsed.association == Some(ArrayAssociation::Cell) {
+            return Err(SceneError::InvalidArrayRef {
+                reference: raw_field.to_string(),
+                reason: "contour filter requires a point array, not a cell array".to_string(),
+            });
+        }
+
+        let arr =
+            tet_view
+                .point_data()
+                .get(&parsed.name)
+                .ok_or_else(|| SceneError::InvalidArrayRef {
+                    reference: raw_field.to_string(),
+                    reason: format!("missing point array `{}`", parsed.name),
+                })?;
+        let resolved_comp = parsed.resolve_component(arr.components()).ok_or_else(|| {
+            SceneError::InvalidArrayRef {
+                reference: raw_field.to_string(),
+                reason: format!(
+                    "incompatible component selector for {}-component array `{}`",
+                    arr.components().as_usize(),
+                    parsed.name
+                ),
+            }
+        })?;
+        let contour_comp = match resolved_comp {
+            ResolvedComponent::Component(idx) => ContourComponent::Component(idx),
+            ResolvedComponent::Magnitude => ContourComponent::Magnitude,
+        };
+        let params = ContourParams::with_component(parsed.name, contour_comp, values.to_vec());
+
+        self.filter_executions += 1;
+        let surface = Arc::new(contour(&tet_view, &params)?);
+        self.surface_cache
+            .insert(contour_hash, Arc::clone(&surface));
         Ok(surface)
     }
 

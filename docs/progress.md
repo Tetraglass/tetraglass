@@ -233,3 +233,11 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-004, D-005, and D-006).
 - Dependencies added: none.
 - Follow-ups: M2.4 Contour (multiple isovalues, all arrays interpolated).
+
+## 2026-10-24 — M2.4 Contour
+
+- Done: implemented multi-isovalue `contour` filter (`ContourComponent`, `ContourParams`, `contour`, `contour_with_chunk_size`, `contour_grid`) in `tetraglass-filters` using the shared marching-tetrahedra kernel (`D-006`) on `TetView` (`D-005`) with all point and cell arrays interpolated; added `Filter::Contour { input, field, values }` (`Filter::contour`) to `tetraglass-scene` with semantic validation (`field` syntax, point-array existence with edit-distance suggestions, component compatibility, non-empty finite `values`, and volume `input`) and cached evaluation in `SceneEvaluator`; updated `crates/tetraglass-cli/tests/snapshots/scene-v1.schema.json` and `docs/scene-format.md`; authored `gallery/contour.json` and `tests/baselines/contour.png`.
+- Tests: `crates/tetraglass-filters/tests/contour.rs` (analytic agreement with equivalent `slice` plane, multi-isovalue extraction across all 6 cell families in `testdata/vtk/*.vtu`, vector component and magnitude contouring, linear scalar/vector field reproduction, cell attribute provenance, out-of-range empty contours, error cases, and chunk-size determinism), plus scene validation, evaluation cache, schema snapshot, and gallery baseline tests.
+- Decisions: none (implemented per D-004, D-005, and D-006).
+- Dependencies added: none.
+- Follow-ups: M2.5 Clip (exact and crinkle modes).

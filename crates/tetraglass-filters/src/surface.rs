@@ -39,6 +39,37 @@ pub enum FilterError {
         /// Provided plane origin `[ox, oy, oz]`.
         origin: [f64; 3],
     },
+
+    /// Requested point attribute array was not found on the dataset.
+    #[error("point array `{name}` was not found on the dataset")]
+    MissingPointArray {
+        /// Name of the missing point array.
+        name: String,
+    },
+
+    /// Requested component index is out of bounds for the point array.
+    #[error(
+        "component index {component} is out of bounds for {num_components}-component array `{array}`"
+    )]
+    InvalidComponentIndex {
+        /// Name of the point array.
+        array: String,
+        /// Requested zero-based component index.
+        component: usize,
+        /// Number of components in the array.
+        num_components: usize,
+    },
+
+    /// Contour filter requires at least one isovalue.
+    #[error("contour values list must not be empty")]
+    EmptyContourValues,
+
+    /// Contour isovalue is non-finite (`NaN` or `±∞`).
+    #[error("contour isovalue must be finite, got {value}")]
+    InvalidContourValue {
+        /// Non-finite isovalue.
+        value: f64,
+    },
 }
 
 /// Canonical order-independent face key used to match shared faces between adjacent cells.
