@@ -298,3 +298,14 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none.
 - Dependencies added: none.
 - Follow-ups: M2.11 Gate and release 0.1 (`/milestone-gate`).
+
+## 2026-10-24 — M2.11 Gate and release 0.1
+
+- Done: completed the Milestone M2 gate (`docs/milestones/m2-gate.md`, `m2-slice.png`, `m2-contour.png`, `m2-clip.png`, `m2-threshold.png`) and release `0.1.0` checklist: bumped workspace and internal dependency versions to `0.1.0`, set `publish = true`, `readme = "../../README.md"`, and `documentation = "https://docs.rs/<crate>"` across all publishable crates, wrote `CHANGELOG.md` for `0.1.0`, verified `cargo package --no-verify --offline` across all 8 workspace crates (`tetraglass-core` through `tetraglass-cli`), and verified `cargo doc --workspace --no-deps` and `cargo xtask verify`.
+- Retrospective (Milestone M2 — Core filters):
+  - **Planned vs. actual:** Planned for Apr–Jul 2027 (12 sub-tasks `M2.1a` through `M2.11`); completed on 2026-10-24 in a sequence of focused, self-contained tasks.
+  - **What was cut or moved:** Nothing cut. Every planned M2 feature (`TetView` linearization for linear, higher-order Lagrange/serendipity, and polyhedral cells; curved surfaces with original element wireframes; marching-tetrahedra `slice`, `contour`, and `clip` in `exact`/`crinkle` modes; `threshold`; GPU ID-buffer picking and value probe; interactive shader clip-plane dragging with background exact-clip worker swap; `D-019` performance pass; mdBook documentation and 9-scene gallery) shipped and met all `D-019` targets with 5x–15x headroom.
+  - **Lessons & adjustments for M3 (Web and export):** Keeping all `wgpu` calls isolated in `tetraglass-render` and keeping `core`, `io`, `filters`, and `scene` `wasm32-unknown-unknown`-clean on every commit paid off—the entire filter and scene pipeline is already browser-ready for `M3.1 Web viewer`.
+- Decisions: none.
+- Dependencies added: none.
+- Follow-ups: Await human confirmation before running `cargo publish` and tagging `v0.1.0`; next milestone starts with M3.1 Web viewer.

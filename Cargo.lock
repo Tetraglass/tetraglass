@@ -2140,7 +2140,7 @@ dependencies = [
 
 [[package]]
 name = "tetraglass-cli"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2156,14 +2156,14 @@ dependencies = [
 
 [[package]]
 name = "tetraglass-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "tetraglass-egui"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
@@ -2177,7 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "tetraglass-filters"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "tetraglass-core",
  "tetraglass-io",
@@ -2186,7 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "tetraglass-io"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "base64",
  "flate2",
@@ -2197,7 +2197,7 @@ dependencies = [
 
 [[package]]
 name = "tetraglass-render"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bytemuck",
  "epaint_default_fonts",
@@ -2215,7 +2215,7 @@ dependencies = [
 
 [[package]]
 name = "tetraglass-scene"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "schemars",
  "serde",
@@ -2228,7 +2228,7 @@ dependencies = [
 
 [[package]]
 name = "tetraglass-viewer"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
@@ -3020,7 +3020,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "zerocopy"
