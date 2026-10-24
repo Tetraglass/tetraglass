@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "sources": {
+    "mesh": {
+      "file": "../testdata/vtk/mixed_linear.vtu"
+    }
+  },
+  "filters": {
+    "hull": {
+      "type": "surface",
+      "input": "mesh"
+    }
+  },
+  "view": {
+    "show": [
+      {
+        "input": "hull",
+        "style": "surface",
+        "color_by": "cell:cell_id",
+        "colormap": "cividis",
+        "range": [0.0, 3.0],
+        "colorbar": {
+          "title": "cell_id",
+          "position": "right"
+        }
+      }
+    ],
+    "camera": {
+      "fit": "all",
+      "azimuth": 35.0,
+      "elevation": 25.0,
+      "zoom": 1.0,
+      "projection": "perspective"
+    },
+    "lights": "default",
+    "background": "white",
+    "axes": true,
+    "title": "Mixed Linear Mesh (cell_id)"
+  },
+  "output": {
+    "image": "surface-cell-id.png",
+    "size": [800, 600],
+    "time": "first",
+    "msaa": 4,
+    "engine": "raster"
+  }
+}

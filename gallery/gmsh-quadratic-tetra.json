@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "sources": {
+    "gmsh_tet2": {
+      "file": "../testdata/gmsh/tet2_v41.msh"
+    }
+  },
+  "view": {
+    "show": [
+      {
+        "input": "gmsh_tet2",
+        "style": "surface",
+        "color_by": "linear",
+        "colormap": "cividis",
+        "range": [0.0, 6.0],
+        "colorbar": {
+          "title": "linear",
+          "position": "right"
+        }
+      }
+    ],
+    "camera": {
+      "fit": "all",
+      "azimuth": 40.0,
+      "elevation": 22.0,
+      "zoom": 1.0,
+      "projection": "perspective"
+    },
+    "lights": "default",
+    "background": "white",
+    "axes": true,
+    "title": "Gmsh MSH 4.1 Quadratic Tetrahedra (linear)"
+  },
+  "output": {
+    "image": "gmsh-quadratic-tetra.png",
+    "size": [800, 600],
+    "time": "first",
+    "msaa": 4,
+    "engine": "raster"
+  }
+}

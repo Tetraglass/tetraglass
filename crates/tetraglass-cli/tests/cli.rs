@@ -462,3 +462,145 @@ fn view_command_supports_help_and_validates_scene_before_opening_window() {
     let stderr = String::from_utf8_lossy(&missing_out.stderr);
     assert!(stderr.contains("tetraglass:"));
 }
+
+#[test]
+fn gallery_scenes_and_author_scene_skill_example_validate_and_match_baselines() {
+    let root = workspace_root();
+    let gallery_dir = root.join("gallery");
+    let out_dir = root.join("target/render-tests");
+    let diff_dir = root.join("target/render-diffs");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    std::fs::create_dir_all(&diff_dir).unwrap();
+
+    let gallery_names = [
+        "surface-mixed-linear",
+        "surface-cell-id",
+        "surface-velocity-magnitude",
+        "gmsh-quadratic-tetra",
+        "series-transient-last",
+    ];
+
+    for name in gallery_names {
+        let scene_path = gallery_dir.join(format!("{name}.json"));
+        assert!(
+            scene_path.is_file(),
+            "missing gallery scene at {}",
+            scene_path.display()
+        );
+
+        let val_out = tetraglass_bin()
+            .arg("validate")
+            .arg(&scene_path)
+            .output()
+            .expect("validate gallery scene");
+        assert!(
+            val_out.status.success(),
+            "gallery scene `{name}.json` failed validation: {}",
+            String::from_utf8_lossy(&val_out.stderr)
+        );
+
+        let rendered_path = out_dir.join(format!("{name}.png"));
+        let _ = std::fs::remove_file(&rendered_path);
+        let render_out = tetraglass_bin()
+            .arg("render")
+            .arg(&scene_path)
+            .arg("-o")
+            .arg(&rendered_path)
+            .output()
+            .expect("render gallery scene");
+        assert!(
+            render_out.status.success(),
+            "gallery scene `{name}.json` failed to render: {}",
+            String::from_utf8_lossy(&render_out.stderr)
+        );
+
+        let rendered = RenderedImage::load_png(&rendered_path).expect("load rendered gallery PNG");
+        let baseline_path = root.join("tests/baselines").join(format!("{name}.png"));
+        assert!(
+            baseline_path.is_file(),
+            "missing gallery baseline at {}",
+            baseline_path.display()
+        );
+        let baseline = RenderedImage::load_png(&baseline_path).expect("load gallery baseline PNG");
+        let cmp = rendered
+            .compare_with_baseline(&baseline)
+            .expect("compare gallery render with baseline");
+        if !cmp.passed {
+            let diff_path = diff_dir.join(format!("{name}.png"));
+            let _ = cmp.diff_image.save_png(&diff_path);
+            panic!(
+                "gallery scene `{name}` differed from baseline in {} / {} pixels ({:.3}%, max channel diff {}), diff written to {}",
+                cmp.differing_pixels,
+                cmp.total_pixels,
+                cmp.diff_fraction * 100.0,
+                cmp.max_channel_diff,
+                diff_path.display()
+            );
+        }
+    }
+
+    // Also extract the JSON example from `.agents/skills/author-scene/SKILL.md` and verify it
+    // against `tetraglass validate` and `tetraglass render`.
+    let skill_path = root.join(".agents/skills/author-scene/SKILL.md");
+    let skill_md = std::fs::read_to_string(&skill_path).expect("read author-scene/SKILL.md");
+    let json_start = skill_md
+        .find("```json\n")
+        .expect("find ```json block in author-scene/SKILL.md")
+        + "```json\n".len();
+    let json_end = skill_md[json_start..]
+        .find("\n```")
+        .expect("find closing ``` in author-scene/SKILL.md")
+        + json_start;
+    let skill_scene_json = &skill_md[json_start..json_end];
+
+    // Write the extracted scene JSON at the workspace root (or resolve relative to root).
+    let skill_scene_path = root.join("target/author_scene_skill_example_check.json");
+    // Since `target/` is 1 directory below `root`, adjust `"testdata/..."` to `"../testdata/..."` or run from root by writing a temp file in `root/target/render-tests` with absolute or root-relative path:
+    let parsed_skill: serde_json::Value =
+        serde_json::from_str(skill_scene_json).expect("parse author-scene JSON block");
+    let rel_file = parsed_skill["sources"]["mesh"]["file"]
+        .as_str()
+        .expect("sources.mesh.file in author-scene example");
+    assert!(
+        root.join(rel_file).is_file(),
+        "author-scene example references `{rel_file}`, which does not exist under workspace root"
+    );
+
+    let mut adjusted_skill = parsed_skill.clone();
+    adjusted_skill["sources"]["mesh"]["file"] =
+        serde_json::json!(root.join(rel_file).display().to_string());
+    std::fs::write(
+        &skill_scene_path,
+        serde_json::to_string_pretty(&adjusted_skill).unwrap(),
+    )
+    .unwrap();
+
+    let skill_val = tetraglass_bin()
+        .arg("validate")
+        .arg(&skill_scene_path)
+        .output()
+        .expect("validate author-scene example");
+    assert!(
+        skill_val.status.success(),
+        "author-scene SKILL.md example failed validation: {}",
+        String::from_utf8_lossy(&skill_val.stderr)
+    );
+
+    let skill_png = out_dir.join("author_scene_skill_example.png");
+    let skill_render = tetraglass_bin()
+        .arg("render")
+        .arg(&skill_scene_path)
+        .arg("-o")
+        .arg(&skill_png)
+        .output()
+        .expect("render author-scene example");
+    let _ = std::fs::remove_file(&skill_scene_path);
+    assert!(
+        skill_render.status.success(),
+        "author-scene SKILL.md example failed to render: {}",
+        String::from_utf8_lossy(&skill_render.stderr)
+    );
+    let skill_img = RenderedImage::load_png(&skill_png).expect("load author-scene rendered PNG");
+    assert_eq!(skill_img.width(), 800);
+    assert_eq!(skill_img.height(), 600);
+}

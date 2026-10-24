@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "sources": {
+    "mesh": {
+      "file": "../testdata/vtk/mixed_linear.vtu"
+    }
+  },
+  "view": {
+    "show": [
+      {
+        "input": "mesh",
+        "style": "surface",
+        "color_by": "linear",
+        "colormap": "viridis",
+        "range": [0.0, 7.5],
+        "colorbar": {
+          "title": "linear",
+          "position": "right"
+        }
+      }
+    ],
+    "camera": {
+      "fit": "all",
+      "azimuth": 30.0,
+      "elevation": 20.0,
+      "zoom": 1.0,
+      "projection": "perspective"
+    },
+    "lights": "default",
+    "background": "white",
+    "axes": true,
+    "title": "Mixed Linear Mesh (linear)"
+  },
+  "output": {
+    "image": "surface-mixed-linear.png",
+    "size": [800, 600],
+    "time": "first",
+    "msaa": 4,
+    "engine": "raster"
+  }
+}

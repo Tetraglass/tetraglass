@@ -166,3 +166,16 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: D-019 (Milestone M2 interactive performance target and `50 × 50 × 40` synthetic benchmark mesh).
 - Dependencies added: none.
 - Follow-ups: M1.10 Gallery (at least five gallery scenes with baselines; `author-scene` skill examples checked against the real CLI).
+
+## 2026-10-24: M1.10 Gallery
+- Done: authored five M1 gallery scenes in `gallery/` with `gallery/README.md` and rendered/inspected (`read_file`) their 800×600 4× MSAA baselines in `tests/baselines/`:
+  1. `gallery/surface-mixed-linear.json` (`tests/baselines/surface-mixed-linear.png`): `mixed_linear.vtu` external surface colored by point scalar `linear` (`[0.0, 7.5]`, `viridis`, right colorbar, axes triad, title).
+  2. `gallery/surface-cell-id.json` (`tests/baselines/surface-cell-id.png`): `mixed_linear.vtu` explicit `surface` filter colored by flat cell scalar `cell:cell_id` (`[0.0, 3.0]`, `cividis`, right colorbar, axes triad, title).
+  3. `gallery/surface-velocity-magnitude.json` (`tests/baselines/surface-velocity-magnitude.png`): `hex_linear.vtu` colored by `velocity:magnitude` (`[0.0, 3.0]`, `center: 1.5`, `cool_warm`, bottom horizontal colorbar, axes triad, title).
+  4. `gallery/gmsh-quadratic-tetra.json` (`tests/baselines/gmsh-quadratic-tetra.png`): Gmsh 4.1 quadratic tetrahedra (`tet2_v41.msh`) colored by point scalar `linear` (`[0.0, 6.0]`, `cividis`, right colorbar, axes triad, title).
+  5. `gallery/series-transient-last.json` (`tests/baselines/series-transient-last.png`): ParaView `.pvd` time series (`series.pvd`) at `"time": "last"` (`t = 1.0`, step `2`) colored by `transient` with `"range": "auto_all_steps"` (`[0.0, 7.0]`, `viridis`, right colorbar, axes triad, title).
+  - Updated the minimal scene example in `.agents/skills/author-scene/SKILL.md` so it validates and renders cleanly against `testdata/vtk/mixed_linear.vtu` via the real `tetraglass` CLI.
+- Tests: added `gallery_scenes_and_author_scene_skill_example_validate_and_match_baselines` in `crates/tetraglass-cli/tests/cli.rs`, which runs `tetraglass validate` and `tetraglass render` on all five `gallery/*.json` scenes, compares the rendered PNGs against `tests/baselines/*.png` within the `mean_abs_diff <= 0.01` / `pct_over_4 <= 0.5%` visual regression threshold, and extracts, validates, and renders the JSON scene snippet from `.agents/skills/author-scene/SKILL.md`.
+- Decisions: none.
+- Dependencies added: none.
+- Follow-ups: M1.11 Gate (`/milestone-gate`, including the fresh-agent test).

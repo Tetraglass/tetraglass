@@ -34,7 +34,7 @@ Status: **M0 complete (2026-10-23); M1 next.**
 - [x] **M1.7 Time series.** `.pvd` collections and multi-step Gmsh files as lazy time series; `"time"` in the scene output.
 - [x] **M1.8 Viewer v0.** eframe desktop app: open a scene, hot reload on file change, time slider, field and colormap pickers.
 - [x] **M1.9 Performance target.** Define the interactive target for M2 (mesh size, frame time, filter latency) and a synthetic benchmark mesh generated in code; record it as a decision.
-- [ ] **M1.10 Gallery.** At least five gallery scenes with baselines; `author-scene` skill examples checked against the real CLI.
+- [x] **M1.10 Gallery.** At least five gallery scenes with baselines; `author-scene` skill examples checked against the real CLI.
 - [ ] **M1.11 Gate.** `/milestone-gate`, including the fresh-agent test.
 
 ## M2 Core filters (Apr–Jul 2027)

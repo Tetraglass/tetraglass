@@ -5,7 +5,7 @@ description: How to write, validate, render and iterate on JSON scene files for 
 
 # Author a scene
 
-The scene format is specified in `docs/scene-format.md`. The CLI arrives in milestone M1; before that, scenes can only be written, not rendered.
+The scene format is specified in `docs/scene-format.md`. Use the `tetraglass` CLI (`cargo run -p tetraglass-cli -- <command>`) to inspect data, validate scenes, and render PNGs.
 
 ## Loop
 
@@ -15,12 +15,12 @@ The scene format is specified in `docs/scene-format.md`. The CLI arrives in mile
 ```json
 {
   "version": 1,
-  "sources": { "mesh": { "file": "data/result.vtu" } },
+  "sources": { "mesh": { "file": "testdata/vtk/mixed_linear.vtu" } },
   "view": {
-    "show": [{ "input": "mesh", "color_by": "temperature", "colorbar": true }],
+    "show": [{ "input": "mesh", "color_by": "linear", "colorbar": true }],
     "camera": { "fit": "all", "azimuth": 30, "elevation": 20 }
   },
-  "output": { "image": "out.png", "size": [1200, 800] }
+  "output": { "image": "out.png", "size": [800, 600] }
 }
 ```
 

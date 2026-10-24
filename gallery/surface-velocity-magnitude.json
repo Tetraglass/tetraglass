@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "sources": {
+    "hex_block": {
+      "file": "../testdata/vtk/hex_linear.vtu"
+    }
+  },
+  "view": {
+    "show": [
+      {
+        "input": "hex_block",
+        "style": "surface",
+        "color_by": "velocity:magnitude",
+        "colormap": "cool_warm",
+        "range": [0.0, 3.0],
+        "center": 1.5,
+        "colorbar": {
+          "title": "velocity |v|",
+          "position": "bottom"
+        }
+      }
+    ],
+    "camera": {
+      "fit": "all",
+      "azimuth": -35.0,
+      "elevation": 25.0,
+      "zoom": 1.0,
+      "projection": "perspective"
+    },
+    "lights": "default",
+    "background": "white",
+    "axes": true,
+    "title": "Hexahedral Block (velocity:magnitude)"
+  },
+  "output": {
+    "image": "surface-velocity-magnitude.png",
+    "size": [800, 600],
+    "time": "first",
+    "msaa": 4,
+    "engine": "raster"
+  }
+}
