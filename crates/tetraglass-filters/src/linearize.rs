@@ -1,20 +1,26 @@
-//! Linearization of [`UnstructuredGrid`] cells into a conformal [`TetView`] (`M2.1a`, `D-005`).
+//! Linearization of [`UnstructuredGrid`] cells into a conformal [`TetView`] (`M2.1a`, `M2.1b`, `D-005`).
 //!
 //! - **Linear 3D cells (`Tetra`, `Hexahedron`, `Wedge`, `Pyramid`):** decomposed into `1`, `6`, `3`,
 //!   or `2` tetrahedra with zero added vertices using the Dompierre et al. minimum-global-vertex
 //!   diagonal rule so every shared quadrilateral face between adjacent cells is split along the
 //!   exact same diagonal.
+//! - **Higher-order 3D cells (`Quadratic*`, `Lagrange*`):** subdivided in reference space into
+//!   `subdivisions` (`S >= 1`) intervals per edge; 3D positions and point attributes are evaluated
+//!   from the cell's Lagrange or serendipity basis functions, existing cell nodes are reused when
+//!   a sample point coincides with a node, and shared boundary sample points are deduplicated so
+//!   shared faces remain watertight across adjacent cells.
 //! - **Polyhedra (`Polyhedron`):** decomposed by inserting a cell centroid point (with equal-weight
 //!   averaged point attributes, preserving linear fields exactly), fan-triangulating each polygon
 //!   face from its minimum global vertex index, and joining each face triangle to the centroid.
-//! - **Higher-order 3D cells (`Quadratic*`, `Lagrange*`):** use corner-node decomposition in `M2.1a`
-//!   as a stopgap until reference-space basis subdivision in `M2.1b`.
+
+use std::collections::HashMap;
 
 use tetraglass_core::{
     ArrayBuffer, Attributes, CellType, CoreError, DataArray, TetView, UnstructuredGrid,
     signed_tet_volume, try_u32_from_usize,
 };
 
+use crate::basis::evaluate_cell_basis;
 use crate::surface::{FilterError, map_cell_array};
 
 /// Default reference-space subdivision level for higher-order cells (`2` sub-intervals per edge).
@@ -76,12 +82,25 @@ pub fn linearize_default(grid: &UnstructuredGrid) -> Result<TetView, FilterError
     linearize(grid, &LinearizeParams::default())
 }
 
+/// Interpolation record for a synthesized vertex (either a polyhedron centroid or a
+/// higher-order basis sample point).
+#[derive(Debug, Clone, Copy)]
+struct SynthPointInterp {
+    /// Start index in `grid.connectivity()`.
+    conn_start: usize,
+    /// End index in `grid.connectivity()`.
+    conn_end: usize,
+    /// Start index in `interp_weights` (`None` means equal weights `1 / (conn_end - conn_start)`).
+    weight_start: Option<usize>,
+}
+
 /// Decomposes all 3D cells of `grid` into a conformal [`TetView`] with a source-cell map (`D-005`).
 ///
-/// - When no new vertices are synthesized (e.g. meshes of linear 3D cells), `points` and
+/// - When no new vertices are synthesized (e.g. meshes of linear 3D cells, or higher-order cells
+///   whose subdivision lattice points all coincide with existing mesh nodes), `points` and
 ///   `point_data` are shared directly with `grid` via `Arc` without copying.
-/// - When polyhedral cells add centroid vertices, point attributes are interpolated at each
-///   centroid by averaging the cell's vertex values (which reproduces any linear field
+/// - When higher-order or polyhedral cells synthesize new vertices, positions and point attributes
+///   are evaluated via the element's basis weights (reproducing any linear field
 ///   $f(\mathbf{x}) = \mathbf{a} \cdot \mathbf{x} + b$ to machine precision).
 /// - All cell attributes in `grid.cell_data()` are mapped to output tetrahedra through
 ///   [`TetView::tet_source_cells`].
@@ -98,11 +117,21 @@ pub fn linearize(
     let base_points = grid.points();
     let base_num_points = base_points.len();
     let num_cells = grid.num_cells();
+    let subdiv = params.subdivisions;
 
-    let mut extra_points: Vec<[f64; 3]> = Vec::new();
-    // Each entry in `centroid_sources` stores the slice range in `grid.connectivity()`
-    // whose vertices are averaged equally to interpolate point attributes at that centroid.
-    let mut centroid_conn_ranges: Vec<(usize, usize)> = Vec::new();
+    let inv_quant_step = grid
+        .bounds()
+        .map(|b| 1e10 / b.diagonal().max(1e-12))
+        .unwrap_or(1e10);
+    let mut subdiv_ctx = SubdivContext {
+        base_points,
+        inv_quant_step,
+        weights_buf: Vec::new(),
+        extra_points: Vec::new(),
+        synth_interps: Vec::new(),
+        interp_weights: Vec::new(),
+        synth_point_map: HashMap::new(),
+    };
 
     let mut tets: Vec<[u32; 4]> = Vec::with_capacity(num_cells * 2);
     let mut tet_source_cells: Vec<u32> = Vec::with_capacity(num_cells * 2);
@@ -116,7 +145,11 @@ pub fn linearize(
         }
     };
 
-    let mut emit_tet = |raw: [u32; 4], source_cell: u32, extra: &[[f64; 3]]| {
+    let emit_tet = |raw: [u32; 4],
+                    source_cell: u32,
+                    extra: &[[f64; 3]],
+                    tets_out: &mut Vec<[u32; 4]>,
+                    src_out: &mut Vec<u32>| {
         let p0 = point_at(raw[0], extra);
         let p1 = point_at(raw[1], extra);
         let p2 = point_at(raw[2], extra);
@@ -126,16 +159,20 @@ pub fn linearize(
         } else {
             raw
         };
-        tets.push(oriented);
-        tet_source_cells.push(source_cell);
+        tets_out.push(oriented);
+        src_out.push(source_cell);
     };
 
     for cell_idx in 0..num_cells {
         let source_cell = try_u32_from_usize(cell_idx)?;
         let cell_type = grid.cell_types()[cell_idx];
-        let conn = grid
-            .cell_connectivity(cell_idx)
-            .expect("validated grid cell_connectivity");
+        let conn_end = grid.offsets()[cell_idx] as usize;
+        let conn_start = if cell_idx == 0 {
+            0
+        } else {
+            grid.offsets()[cell_idx - 1] as usize
+        };
+        let conn = &grid.connectivity()[conn_start..conn_end];
 
         match cell_type {
             // 0D, 1D, and 2D cells have zero 3D volume and produce no tetrahedra.
@@ -150,47 +187,373 @@ pub fn linearize(
             | CellType::QuadraticQuad
             | CellType::LagrangeQuadrilateral { .. } => {}
 
-            // 3D Tetrahedron (and higher-order stopgap until M2.1b).
-            CellType::Tetra | CellType::QuadraticTetra | CellType::LagrangeTetrahedron { .. } => {
+            // Linear 3D Tetrahedron: 1 tet.
+            CellType::Tetra => {
                 emit_tet(
                     [conn[0], conn[1], conn[2], conn[3]],
                     source_cell,
-                    &extra_points,
+                    &subdiv_ctx.extra_points,
+                    &mut tets,
+                    &mut tet_source_cells,
                 );
             }
 
-            // 3D Pyramid (and higher-order stopgap until M2.1b): 2 tets split along the
-            // base quad diagonal incident to the minimum global vertex index.
-            CellType::Pyramid | CellType::QuadraticPyramid => {
+            // Linear 3D Pyramid: 2 tets split along the minimum-vertex base diagonal.
+            CellType::Pyramid => {
                 let [v0, v1, v2, v3, v4] = [conn[0], conn[1], conn[2], conn[3], conn[4]];
-                if v0.min(v2) < v1.min(v3) {
-                    emit_tet([v0, v1, v2, v4], source_cell, &extra_points);
-                    emit_tet([v0, v2, v3, v4], source_cell, &extra_points);
-                } else {
-                    emit_tet([v1, v2, v3, v4], source_cell, &extra_points);
-                    emit_tet([v1, v3, v0, v4], source_cell, &extra_points);
+                for tet in decompose_pyramid_face_consistent([v0, v1, v2, v3, v4]) {
+                    emit_tet(
+                        tet,
+                        source_cell,
+                        &subdiv_ctx.extra_points,
+                        &mut tets,
+                        &mut tet_source_cells,
+                    );
                 }
             }
 
-            // 3D Wedge / triangular prism (and higher-order stopgap until M2.1b):
-            // 3 tets using Dompierre et al. face-consistent subdivision.
-            CellType::Wedge | CellType::QuadraticWedge | CellType::LagrangeWedge { .. } => {
+            // Linear 3D Wedge: 3 tets using Dompierre et al. face-consistent subdivision.
+            CellType::Wedge => {
                 let v = [conn[0], conn[1], conn[2], conn[3], conn[4], conn[5]];
                 for tet in decompose_wedge_face_consistent(v) {
-                    emit_tet(tet, source_cell, &extra_points);
+                    emit_tet(
+                        tet,
+                        source_cell,
+                        &subdiv_ctx.extra_points,
+                        &mut tets,
+                        &mut tet_source_cells,
+                    );
                 }
             }
 
-            // 3D Hexahedron (and higher-order stopgap until M2.1b):
-            // 6 tets using Dompierre et al. face-consistent subdivision.
-            CellType::Hexahedron
-            | CellType::QuadraticHexahedron
-            | CellType::LagrangeHexahedron { .. } => {
+            // Linear 3D Hexahedron: 6 tets using Dompierre et al. face-consistent subdivision.
+            CellType::Hexahedron => {
                 let v = [
                     conn[0], conn[1], conn[2], conn[3], conn[4], conn[5], conn[6], conn[7],
                 ];
                 for tet in decompose_hex_face_consistent(v) {
-                    emit_tet(tet, source_cell, &extra_points);
+                    emit_tet(
+                        tet,
+                        source_cell,
+                        &subdiv_ctx.extra_points,
+                        &mut tets,
+                        &mut tet_source_cells,
+                    );
+                }
+            }
+
+            // Higher-order 3D Tetrahedron (`QuadraticTetra`, `LagrangeTetrahedron`).
+            CellType::QuadraticTetra | CellType::LagrangeTetrahedron { .. } => {
+                if subdiv == 1 {
+                    emit_tet(
+                        [conn[0], conn[1], conn[2], conn[3]],
+                        source_cell,
+                        &subdiv_ctx.extra_points,
+                        &mut tets,
+                        &mut tet_source_cells,
+                    );
+                } else {
+                    let s = usize::from(subdiv);
+                    let sf = f64::from(subdiv);
+                    let stride = s + 1;
+                    let mut grid_vid = vec![0u32; stride * stride * stride];
+                    let idx3 = |i: usize, j: usize, k: usize| (k * stride + j) * stride + i;
+
+                    for k in 0..=s {
+                        for j in 0..=(s - k) {
+                            for i in 0..=(s - k - j) {
+                                let rst = [i as f64 / sf, j as f64 / sf, k as f64 / sf];
+                                let vid = subdiv_ctx.resolve_sample_vertex(
+                                    cell_type, rst, conn, conn_start, conn_end,
+                                )?;
+                                grid_vid[idx3(i, j, k)] = vid;
+                            }
+                        }
+                    }
+
+                    // Freudenthal / Bey decomposition of the level-S tetrahedral lattice into S^3 tets.
+                    for k in 0..s {
+                        for j in 0..(s - k) {
+                            for i in 0..(s - k - j) {
+                                let sum = i + j + k;
+                                // 1. Upright sub-tet (always present for i + j + k < S)
+                                let p000 = grid_vid[idx3(i, j, k)];
+                                let p100 = grid_vid[idx3(i + 1, j, k)];
+                                let p010 = grid_vid[idx3(i, j + 1, k)];
+                                let p001 = grid_vid[idx3(i, j, k + 1)];
+                                emit_tet(
+                                    [p000, p100, p010, p001],
+                                    source_cell,
+                                    &subdiv_ctx.extra_points,
+                                    &mut tets,
+                                    &mut tet_source_cells,
+                                );
+
+                                // 2. Octahedron -> 4 sub-tets along interior diagonal (p001, p110)
+                                if sum + 2 <= s {
+                                    let p011 = grid_vid[idx3(i, j + 1, k + 1)];
+                                    let p101 = grid_vid[idx3(i + 1, j, k + 1)];
+                                    let p110 = grid_vid[idx3(i + 1, j + 1, k)];
+                                    for oct_tet in [
+                                        [p001, p110, p100, p010],
+                                        [p001, p110, p010, p011],
+                                        [p001, p110, p011, p101],
+                                        [p001, p110, p101, p100],
+                                    ] {
+                                        emit_tet(
+                                            oct_tet,
+                                            source_cell,
+                                            &subdiv_ctx.extra_points,
+                                            &mut tets,
+                                            &mut tet_source_cells,
+                                        );
+                                    }
+                                }
+
+                                // 3. Inverted sub-tet
+                                if sum + 3 <= s {
+                                    let p011 = grid_vid[idx3(i, j + 1, k + 1)];
+                                    let p101 = grid_vid[idx3(i + 1, j, k + 1)];
+                                    let p110 = grid_vid[idx3(i + 1, j + 1, k)];
+                                    let p111 = grid_vid[idx3(i + 1, j + 1, k + 1)];
+                                    emit_tet(
+                                        [p110, p101, p011, p111],
+                                        source_cell,
+                                        &subdiv_ctx.extra_points,
+                                        &mut tets,
+                                        &mut tet_source_cells,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Higher-order 3D Hexahedron (`QuadraticHexahedron`, `LagrangeHexahedron`).
+            CellType::QuadraticHexahedron | CellType::LagrangeHexahedron { .. } => {
+                if subdiv == 1 {
+                    let v = [
+                        conn[0], conn[1], conn[2], conn[3], conn[4], conn[5], conn[6], conn[7],
+                    ];
+                    for tet in decompose_hex_face_consistent(v) {
+                        emit_tet(
+                            tet,
+                            source_cell,
+                            &subdiv_ctx.extra_points,
+                            &mut tets,
+                            &mut tet_source_cells,
+                        );
+                    }
+                } else {
+                    let s = usize::from(subdiv);
+                    let sf = f64::from(subdiv);
+                    let stride = s + 1;
+                    let mut grid_vid = vec![0u32; stride * stride * stride];
+                    let idx3 = |i: usize, j: usize, k: usize| (k * stride + j) * stride + i;
+
+                    for k in 0..=s {
+                        for j in 0..=s {
+                            for i in 0..=s {
+                                let rst = [i as f64 / sf, j as f64 / sf, k as f64 / sf];
+                                let vid = subdiv_ctx.resolve_sample_vertex(
+                                    cell_type, rst, conn, conn_start, conn_end,
+                                )?;
+                                grid_vid[idx3(i, j, k)] = vid;
+                            }
+                        }
+                    }
+
+                    for k in 0..s {
+                        for j in 0..s {
+                            for i in 0..s {
+                                let sub_hex = [
+                                    grid_vid[idx3(i, j, k)],
+                                    grid_vid[idx3(i + 1, j, k)],
+                                    grid_vid[idx3(i + 1, j + 1, k)],
+                                    grid_vid[idx3(i, j + 1, k)],
+                                    grid_vid[idx3(i, j, k + 1)],
+                                    grid_vid[idx3(i + 1, j, k + 1)],
+                                    grid_vid[idx3(i + 1, j + 1, k + 1)],
+                                    grid_vid[idx3(i, j + 1, k + 1)],
+                                ];
+                                for tet in decompose_hex_face_consistent(sub_hex) {
+                                    emit_tet(
+                                        tet,
+                                        source_cell,
+                                        &subdiv_ctx.extra_points,
+                                        &mut tets,
+                                        &mut tet_source_cells,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Higher-order 3D Wedge (`QuadraticWedge`, `LagrangeWedge`).
+            CellType::QuadraticWedge | CellType::LagrangeWedge { .. } => {
+                if subdiv == 1 {
+                    let v = [conn[0], conn[1], conn[2], conn[3], conn[4], conn[5]];
+                    for tet in decompose_wedge_face_consistent(v) {
+                        emit_tet(
+                            tet,
+                            source_cell,
+                            &subdiv_ctx.extra_points,
+                            &mut tets,
+                            &mut tet_source_cells,
+                        );
+                    }
+                } else {
+                    let s = usize::from(subdiv);
+                    let sf = f64::from(subdiv);
+                    let stride = s + 1;
+                    let mut grid_vid = vec![0u32; stride * stride * stride];
+                    let idx3 = |i: usize, j: usize, k: usize| (k * stride + j) * stride + i;
+
+                    for k in 0..=s {
+                        for j in 0..=s {
+                            for i in 0..=(s - j) {
+                                let rst = [i as f64 / sf, j as f64 / sf, k as f64 / sf];
+                                let vid = subdiv_ctx.resolve_sample_vertex(
+                                    cell_type, rst, conn, conn_start, conn_end,
+                                )?;
+                                grid_vid[idx3(i, j, k)] = vid;
+                            }
+                        }
+                    }
+
+                    for k in 0..s {
+                        for j in 0..s {
+                            for i in 0..(s - j) {
+                                // Upright sub-wedge
+                                let upright = [
+                                    grid_vid[idx3(i, j, k)],
+                                    grid_vid[idx3(i + 1, j, k)],
+                                    grid_vid[idx3(i, j + 1, k)],
+                                    grid_vid[idx3(i, j, k + 1)],
+                                    grid_vid[idx3(i + 1, j, k + 1)],
+                                    grid_vid[idx3(i, j + 1, k + 1)],
+                                ];
+                                for tet in decompose_wedge_face_consistent(upright) {
+                                    emit_tet(
+                                        tet,
+                                        source_cell,
+                                        &subdiv_ctx.extra_points,
+                                        &mut tets,
+                                        &mut tet_source_cells,
+                                    );
+                                }
+
+                                // Inverted sub-wedge (when i + j + 2 <= S)
+                                if i + j + 2 <= s {
+                                    let inverted = [
+                                        grid_vid[idx3(i + 1, j, k)],
+                                        grid_vid[idx3(i + 1, j + 1, k)],
+                                        grid_vid[idx3(i, j + 1, k)],
+                                        grid_vid[idx3(i + 1, j, k + 1)],
+                                        grid_vid[idx3(i + 1, j + 1, k + 1)],
+                                        grid_vid[idx3(i, j + 1, k + 1)],
+                                    ];
+                                    for tet in decompose_wedge_face_consistent(inverted) {
+                                        emit_tet(
+                                            tet,
+                                            source_cell,
+                                            &subdiv_ctx.extra_points,
+                                            &mut tets,
+                                            &mut tet_source_cells,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Higher-order 3D Pyramid (`QuadraticPyramid`).
+            CellType::QuadraticPyramid => {
+                if subdiv == 1 {
+                    let v = [conn[0], conn[1], conn[2], conn[3], conn[4]];
+                    for tet in decompose_pyramid_face_consistent(v) {
+                        emit_tet(
+                            tet,
+                            source_cell,
+                            &subdiv_ctx.extra_points,
+                            &mut tets,
+                            &mut tet_source_cells,
+                        );
+                    }
+                } else {
+                    let s = usize::from(subdiv);
+                    let sf = f64::from(subdiv);
+                    let stride = s + 1;
+                    let mut grid_vid = vec![0u32; stride * stride * stride];
+                    let idx3 = |i: usize, j: usize, k: usize| (k * stride + j) * stride + i;
+
+                    for k in 0..s {
+                        for j in 0..=s {
+                            for i in 0..=s {
+                                let rst = [i as f64 / sf, j as f64 / sf, k as f64 / sf];
+                                let vid = subdiv_ctx.resolve_sample_vertex(
+                                    cell_type, rst, conn, conn_start, conn_end,
+                                )?;
+                                grid_vid[idx3(i, j, k)] = vid;
+                            }
+                        }
+                    }
+
+                    // Frustum layers k = 0..(S - 1) -> S^2 sub-hexahedra per layer
+                    for k in 0..(s - 1) {
+                        for j in 0..s {
+                            for i in 0..s {
+                                let sub_hex = [
+                                    grid_vid[idx3(i, j, k)],
+                                    grid_vid[idx3(i + 1, j, k)],
+                                    grid_vid[idx3(i + 1, j + 1, k)],
+                                    grid_vid[idx3(i, j + 1, k)],
+                                    grid_vid[idx3(i, j, k + 1)],
+                                    grid_vid[idx3(i + 1, j, k + 1)],
+                                    grid_vid[idx3(i + 1, j + 1, k + 1)],
+                                    grid_vid[idx3(i, j + 1, k + 1)],
+                                ];
+                                for tet in decompose_hex_face_consistent(sub_hex) {
+                                    emit_tet(
+                                        tet,
+                                        source_cell,
+                                        &subdiv_ctx.extra_points,
+                                        &mut tets,
+                                        &mut tet_source_cells,
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    // Top cap layer k = S - 1 joined to apex conn[4] -> S^2 sub-pyramids
+                    let apex = conn[4];
+                    let k_top = s - 1;
+                    for j in 0..s {
+                        for i in 0..s {
+                            let sub_pyr = [
+                                grid_vid[idx3(i, j, k_top)],
+                                grid_vid[idx3(i + 1, j, k_top)],
+                                grid_vid[idx3(i + 1, j + 1, k_top)],
+                                grid_vid[idx3(i, j + 1, k_top)],
+                                apex,
+                            ];
+                            for tet in decompose_pyramid_face_consistent(sub_pyr) {
+                                emit_tet(
+                                    tet,
+                                    source_cell,
+                                    &subdiv_ctx.extra_points,
+                                    &mut tets,
+                                    &mut tet_source_cells,
+                                );
+                            }
+                        }
+                    }
                 }
             }
 
@@ -207,16 +570,14 @@ pub fn linearize(
                     cz += p[2];
                 }
                 let centroid_pos = [cx * inv_n, cy * inv_n, cz * inv_n];
-                let centroid_idx = try_u32_from_usize(base_num_points + extra_points.len())?;
-                extra_points.push(centroid_pos);
-
-                let end = grid.offsets()[cell_idx] as usize;
-                let start = if cell_idx == 0 {
-                    0
-                } else {
-                    grid.offsets()[cell_idx - 1] as usize
-                };
-                centroid_conn_ranges.push((start, end));
+                let centroid_idx =
+                    try_u32_from_usize(base_num_points + subdiv_ctx.extra_points.len())?;
+                subdiv_ctx.extra_points.push(centroid_pos);
+                subdiv_ctx.synth_interps.push(SynthPointInterp {
+                    conn_start,
+                    conn_end,
+                    weight_start: None,
+                });
 
                 if let Some(face_iter) = grid.polyhedron_cell_faces(cell_idx) {
                     for face_verts in face_iter {
@@ -234,7 +595,13 @@ pub fn linearize(
                         for offset in 1..(n - 1) {
                             let v_a = face_verts[(min_pos + offset) % n];
                             let v_b = face_verts[(min_pos + offset + 1) % n];
-                            emit_tet([v_min, v_a, v_b, centroid_idx], source_cell, &extra_points);
+                            emit_tet(
+                                [v_min, v_a, v_b, centroid_idx],
+                                source_cell,
+                                &subdiv_ctx.extra_points,
+                                &mut tets,
+                                &mut tet_source_cells,
+                            );
                         }
                     }
                 }
@@ -242,19 +609,23 @@ pub fn linearize(
         }
     }
 
-    let (points_arc, point_data) = if extra_points.is_empty() {
+    let (points_arc, point_data) = if subdiv_ctx.extra_points.is_empty() {
         (grid.points_arc(), grid.point_data().clone())
     } else {
-        let total_points = base_num_points + extra_points.len();
+        let total_points = base_num_points + subdiv_ctx.extra_points.len();
         let mut all_points = Vec::with_capacity(total_points);
         all_points.extend_from_slice(base_points);
-        all_points.extend_from_slice(&extra_points);
+        all_points.extend_from_slice(&subdiv_ctx.extra_points);
 
         let mut pd = Attributes::new(total_points);
         let full_conn = grid.connectivity();
         for (name, arr) in grid.point_data().iter() {
-            let extended =
-                extend_point_array_with_centroids(arr, full_conn, &centroid_conn_ranges)?;
+            let extended = extend_point_array_with_synth_points(
+                arr,
+                full_conn,
+                &subdiv_ctx.synth_interps,
+                &subdiv_ctx.interp_weights,
+            )?;
             pd.insert(name, extended)?;
         }
         (all_points.into(), pd)
@@ -268,6 +639,87 @@ pub fn linearize(
 
     let view = TetView::new(points_arc, tets, tet_source_cells, point_data, cell_data)?;
     Ok(view)
+}
+
+struct SubdivContext<'a> {
+    base_points: &'a [[f64; 3]],
+    inv_quant_step: f64,
+    weights_buf: Vec<f64>,
+    extra_points: Vec<[f64; 3]>,
+    synth_interps: Vec<SynthPointInterp>,
+    interp_weights: Vec<f64>,
+    synth_point_map: HashMap<[i64; 3], u32>,
+}
+
+impl SubdivContext<'_> {
+    fn resolve_sample_vertex(
+        &mut self,
+        cell_type: CellType,
+        rst: [f64; 3],
+        conn: &[u32],
+        conn_start: usize,
+        conn_end: usize,
+    ) -> Result<u32, CoreError> {
+        self.weights_buf.resize(conn.len(), 0.0);
+        evaluate_cell_basis(cell_type, rst, &mut self.weights_buf);
+
+        // Fast path: if this sample point coincides with one of the cell's own nodes
+        // (weight >= 1 - 1e-11), reuse that existing global vertex index directly.
+        for (slot, &w) in self.weights_buf.iter().enumerate() {
+            if (w - 1.0).abs() < 1e-11 {
+                let mut others_zero = true;
+                for (other_slot, &ow) in self.weights_buf.iter().enumerate() {
+                    if other_slot != slot && ow.abs() > 1e-11 {
+                        others_zero = false;
+                        break;
+                    }
+                }
+                if others_zero {
+                    return Ok(conn[slot]);
+                }
+            }
+        }
+
+        let mut pos = [0.0_f64; 3];
+        for (&pt_idx, &w) in conn.iter().zip(self.weights_buf.iter()) {
+            let p = self.base_points[pt_idx as usize];
+            pos[0] += w * p[0];
+            pos[1] += w * p[1];
+            pos[2] += w * p[2];
+        }
+
+        let key = [
+            (pos[0] * self.inv_quant_step).round() as i64,
+            (pos[1] * self.inv_quant_step).round() as i64,
+            (pos[2] * self.inv_quant_step).round() as i64,
+        ];
+        if let Some(&existing_vid) = self.synth_point_map.get(&key) {
+            return Ok(existing_vid);
+        }
+
+        let new_vid = try_u32_from_usize(self.base_points.len() + self.extra_points.len())?;
+        self.extra_points.push(pos);
+        let w_start = self.interp_weights.len();
+        self.interp_weights.extend_from_slice(&self.weights_buf);
+        self.synth_interps.push(SynthPointInterp {
+            conn_start,
+            conn_end,
+            weight_start: Some(w_start),
+        });
+        self.synth_point_map.insert(key, new_vid);
+        Ok(new_vid)
+    }
+}
+
+/// Decomposes a 5-node pyramid `[v0, v1, v2, v3, v4]` into 2 tetrahedra split along
+/// the base quad diagonal incident to the minimum global vertex ID of `{v0, v1, v2, v3}`.
+fn decompose_pyramid_face_consistent(v: [u32; 5]) -> [[u32; 4]; 2] {
+    let [v0, v1, v2, v3, v4] = v;
+    if v0.min(v2) < v1.min(v3) {
+        [[v0, v1, v2, v4], [v0, v2, v3, v4]]
+    } else {
+        [[v1, v2, v3, v4], [v1, v3, v0, v4]]
+    }
 }
 
 /// Decomposes a 6-node linear wedge `v = [v0, v1, v2, v3, v4, v5]` into 3 tetrahedra
@@ -343,28 +795,43 @@ fn decompose_hex_face_consistent(v: [u32; 8]) -> [[u32; 4]; 6] {
     [t0, t1, t2, t3, t4, t5]
 }
 
-fn extend_point_array_with_centroids(
+fn extend_point_array_with_synth_points(
     source: &DataArray,
     full_conn: &[u32],
-    centroid_conn_ranges: &[(usize, usize)],
+    synth_interps: &[SynthPointInterp],
+    interp_weights: &[f64],
 ) -> Result<DataArray, CoreError> {
     let comp = source.components();
     let ncomp = comp.as_usize();
-    let extra_tuples = centroid_conn_ranges.len();
+    let extra_tuples = synth_interps.len();
+
+    let eval_component = |interp: &SynthPointInterp, c: usize, get_val: &dyn Fn(usize) -> f64| {
+        let verts = &full_conn[interp.conn_start..interp.conn_end];
+        if let Some(w_start) = interp.weight_start {
+            let weights = &interp_weights[w_start..w_start + verts.len()];
+            let mut sum = 0.0_f64;
+            for (&pt, &w) in verts.iter().zip(weights.iter()) {
+                sum += w * get_val((pt as usize) * ncomp + c);
+            }
+            sum
+        } else {
+            let inv_n = 1.0 / (verts.len() as f64);
+            let mut sum = 0.0_f64;
+            for &pt in verts {
+                sum += get_val((pt as usize) * ncomp + c);
+            }
+            sum * inv_n
+        }
+    };
 
     match source.buffer() {
         ArrayBuffer::F32(buf) => {
             let mut out = Vec::with_capacity(buf.len() + extra_tuples * ncomp);
             out.extend_from_slice(buf);
-            for &(start, end) in centroid_conn_ranges {
-                let verts = &full_conn[start..end];
-                let inv_n = 1.0 / (verts.len() as f64);
+            for interp in synth_interps {
                 for c in 0..ncomp {
-                    let mut sum = 0.0_f64;
-                    for &pt in verts {
-                        sum += f64::from(buf[(pt as usize) * ncomp + c]);
-                    }
-                    out.push((sum * inv_n) as f32);
+                    let v = eval_component(interp, c, &|idx| f64::from(buf[idx]));
+                    out.push(v as f32);
                 }
             }
             DataArray::from_f32(comp, out)
@@ -372,15 +839,10 @@ fn extend_point_array_with_centroids(
         ArrayBuffer::F64(buf) => {
             let mut out = Vec::with_capacity(buf.len() + extra_tuples * ncomp);
             out.extend_from_slice(buf);
-            for &(start, end) in centroid_conn_ranges {
-                let verts = &full_conn[start..end];
-                let inv_n = 1.0 / (verts.len() as f64);
+            for interp in synth_interps {
                 for c in 0..ncomp {
-                    let mut sum = 0.0_f64;
-                    for &pt in verts {
-                        sum += buf[(pt as usize) * ncomp + c];
-                    }
-                    out.push(sum * inv_n);
+                    let v = eval_component(interp, c, &|idx| buf[idx]);
+                    out.push(v);
                 }
             }
             DataArray::from_f64(comp, out)
@@ -388,15 +850,10 @@ fn extend_point_array_with_centroids(
         ArrayBuffer::I32(buf) => {
             let mut out = Vec::with_capacity(buf.len() + extra_tuples * ncomp);
             out.extend_from_slice(buf);
-            for &(start, end) in centroid_conn_ranges {
-                let verts = &full_conn[start..end];
-                let inv_n = 1.0 / (verts.len() as f64);
+            for interp in synth_interps {
                 for c in 0..ncomp {
-                    let mut sum = 0.0_f64;
-                    for &pt in verts {
-                        sum += f64::from(buf[(pt as usize) * ncomp + c]);
-                    }
-                    out.push((sum * inv_n).round() as i32);
+                    let v = eval_component(interp, c, &|idx| f64::from(buf[idx]));
+                    out.push(v.round() as i32);
                 }
             }
             DataArray::from_i32(comp, out)
@@ -404,15 +861,10 @@ fn extend_point_array_with_centroids(
         ArrayBuffer::I64(buf) => {
             let mut out = Vec::with_capacity(buf.len() + extra_tuples * ncomp);
             out.extend_from_slice(buf);
-            for &(start, end) in centroid_conn_ranges {
-                let verts = &full_conn[start..end];
-                let inv_n = 1.0 / (verts.len() as f64);
+            for interp in synth_interps {
                 for c in 0..ncomp {
-                    let mut sum = 0.0_f64;
-                    for &pt in verts {
-                        sum += buf[(pt as usize) * ncomp + c] as f64;
-                    }
-                    out.push((sum * inv_n).round() as i64);
+                    let v = eval_component(interp, c, &|idx| buf[idx] as f64);
+                    out.push(v.round() as i64);
                 }
             }
             DataArray::from_i64(comp, out)
@@ -420,15 +872,10 @@ fn extend_point_array_with_centroids(
         ArrayBuffer::U8(buf) => {
             let mut out = Vec::with_capacity(buf.len() + extra_tuples * ncomp);
             out.extend_from_slice(buf);
-            for &(start, end) in centroid_conn_ranges {
-                let verts = &full_conn[start..end];
-                let inv_n = 1.0 / (verts.len() as f64);
+            for interp in synth_interps {
                 for c in 0..ncomp {
-                    let mut sum = 0.0_f64;
-                    for &pt in verts {
-                        sum += f64::from(buf[(pt as usize) * ncomp + c]);
-                    }
-                    out.push((sum * inv_n).round().clamp(0.0, 255.0) as u8);
+                    let v = eval_component(interp, c, &|idx| f64::from(buf[idx]));
+                    out.push(v.round().clamp(0.0, 255.0) as u8);
                 }
             }
             DataArray::from_u8(comp, out)

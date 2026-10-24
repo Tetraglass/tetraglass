@@ -198,3 +198,10 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-005 and D-019).
 - Dependencies added: none.
 - Follow-ups: M2.1b Linearize higher-order cells and property tests (reference-space subdivision at configurable level with Lagrange and serendipity basis evaluation for positions and point fields, plus property tests).
+
+## 2026-10-24: M2.1b Linearize higher-order cells and property tests
+- Done: implemented reference-space subdivision at a configurable level (`LinearizeParams { subdivisions }`) with VTK-ordered Lagrange (`LagrangeTetrahedron`, `LagrangeHexahedron`, `LagrangeWedge`) and quadratic serendipity (`QuadraticTetra`, `QuadraticHexahedron`, `QuadraticWedge`, `QuadraticPyramid`) basis evaluation (`crates/tetraglass-filters/src/basis.rs`) for 3D positions and point attributes in `linearize`, reusing existing cell nodes when sample points coincide with mesh nodes and deduplicating shared boundary sample points across adjacent higher-order cells so subdivided faces remain watertight.
+- Tests: unit test `all_higher_order_bases_satisfy_kronecker_delta_partition_of_unity_and_linear_reproduction` in `crates/tetraglass-filters/src/basis.rs`, integration tests in `crates/tetraglass-filters/tests/linearize.rs` on `tet_quadratic.vtu`, `tet2_v41.msh`, `hex_lagrange_p3.vtu`, and curved quadratic tetrahedra, and 240 randomized property-test trials (`property_tests_preserve_volume_linear_fields_and_source_cells_across_all_cell_families`) across all 12 3D cell families verifying volume preservation under affine transforms, positive tet orientation, exact linear scalar/vector field interpolation, and source-cell mapping.
+- Decisions: none (implemented per D-005 and D-009).
+- Dependencies added: none.
+- Follow-ups: M2.2 Curved surfaces (external surface of higher-order cells with tessellated faces; wireframe from original element edges).
