@@ -21,8 +21,8 @@ use crate::png::{decode_rgba8_png, encode_rgba8_png};
 /// Per-channel tolerance for image regression tests (`.agents/rules/testing.md`: `<= 2` of `255`).
 pub const DEFAULT_CHANNEL_TOLERANCE: u8 = 2;
 
-/// Maximum fraction of differing pixels before an image regression test fails (`0.5%`).
-pub const DEFAULT_MAX_DIFF_FRACTION: f64 = 0.005;
+/// Maximum fraction of differing pixels before an image regression test fails (`0.75%`, `D-015`).
+pub const DEFAULT_MAX_DIFF_FRACTION: f64 = 0.0075;
 
 /// Options for one-shot headless surface rendering.
 #[derive(Debug, Clone)]
@@ -152,7 +152,7 @@ impl RenderedImage {
     }
 
     /// Compares `self` against `baseline` using the default `.agents/rules/testing.md` policy
-    /// (`channel_tolerance = 2`, `max_diff_fraction = 0.005`).
+    /// (`channel_tolerance = 2`, `max_diff_fraction = 0.0075`).
     pub fn compare_with_baseline(&self, baseline: &Self) -> Result<ImageComparison, RenderError> {
         self.compare(
             baseline,

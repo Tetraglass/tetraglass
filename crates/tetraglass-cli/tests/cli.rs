@@ -484,6 +484,7 @@ fn gallery_scenes_and_author_scene_skill_example_validate_and_match_baselines() 
         "threshold",
     ];
 
+    let mut failures = Vec::new();
     for name in gallery_names {
         let scene_path = gallery_dir.join(format!("{name}.json"));
         assert!(
@@ -532,16 +533,21 @@ fn gallery_scenes_and_author_scene_skill_example_validate_and_match_baselines() 
         if !cmp.passed {
             let diff_path = diff_dir.join(format!("{name}.png"));
             let _ = cmp.diff_image.save_png(&diff_path);
-            panic!(
+            failures.push(format!(
                 "gallery scene `{name}` differed from baseline in {} / {} pixels ({:.3}%, max channel diff {}), diff written to {}",
                 cmp.differing_pixels,
                 cmp.total_pixels,
                 cmp.diff_fraction * 100.0,
                 cmp.max_channel_diff,
                 diff_path.display()
-            );
+            ));
         }
     }
+    assert!(
+        failures.is_empty(),
+        "gallery baseline mismatches:\n{}",
+        failures.join("\n")
+    );
 
     // Also extract the JSON example from `.agents/skills/author-scene/SKILL.md` and verify it
     // against `tetraglass validate` and `tetraglass render`.

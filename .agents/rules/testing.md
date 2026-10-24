@@ -18,7 +18,7 @@ description: "Testing strategy for this workspace. Apply when writing or changin
 
 **Image regression.**
 - Baselines live in `tests/baselines/` and are produced on Mesa lavapipe (software Vulkan), the same driver CI uses.
-- Initial comparison policy: a pixel differs if any channel differs by more than 2 (of 255); a test fails if more than 0.5% of pixels differ. Adjust only with a decision entry.
+- Comparison policy (`D-015`): a pixel differs if any channel differs by more than 2 (of 255); a test fails if more than 0.75% of pixels differ (`DEFAULT_MAX_DIFF_FRACTION = 0.0075`, accommodating cross-driver 1px `LineList` MSAA rasterization differences on wireframe/edge-overlay scenes). Adjust only with a decision entry.
 - Never replace a baseline to make a test pass without explaining why in `docs/progress.md` and the commit message.
 - Local runs on a real GPU may differ slightly; CI is authoritative.
 

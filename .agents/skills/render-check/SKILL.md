@@ -14,7 +14,7 @@ Fixed image size, fixed MSAA sample count and a fixed camera are part of every t
 
 ## 2. Compare
 
-Compare each image with `tests/baselines/<name>.png` using the policy in `.agents/rules/testing.md`: a pixel differs if any channel differs by more than 2 (of 255), and a test fails above 0.5% differing pixels. On failure, write a diff image to `target/render-diffs/<name>.png` that highlights differing pixels.
+Compare each image with `tests/baselines/<name>.png` using the policy in `.agents/rules/testing.md` (`D-015`): a pixel differs if any channel differs by more than 2 (of 255), and a test fails above 0.75% differing pixels. On failure, write a diff image to `target/render-diffs/<name>.png` that highlights differing pixels.
 
 ## 3. Look
 
