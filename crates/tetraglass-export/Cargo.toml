@@ -1,0 +1,26 @@
+[package]
+name = "tetraglass-export"
+description = "Scene exporters for Binary glTF 2.0 (.glb) and the renderer-neutral Blender bundle format."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/tetraglass-export"
+readme = "../../README.md"
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tetraglass-core.workspace = true
+tetraglass-scene.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tetraglass-filters.workspace = true
+tetraglass-io.workspace = true

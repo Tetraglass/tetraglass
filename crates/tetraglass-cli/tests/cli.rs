@@ -690,3 +690,55 @@ fn mdbook_guide_and_gallery_cover_all_filters_and_chapters_exist() {
         );
     }
 }
+
+#[test]
+fn export_command_writes_single_glb_and_time_series_manifest() {
+    let root = workspace_root();
+    let out_dir = root.join("target/cli-export-tests");
+    let _ = std::fs::remove_dir_all(&out_dir);
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    // 1. Export single-step scene `gallery/slice.json` to a single `.glb` file.
+    let single_glb = out_dir.join("slice.glb");
+    let slice_out = tetraglass_bin()
+        .arg("export")
+        .arg(root.join("gallery/slice.json"))
+        .arg("-o")
+        .arg(&single_glb)
+        .output()
+        .expect("run `tetraglass export` on slice.json");
+    assert!(
+        slice_out.status.success(),
+        "`tetraglass export` failed: {}",
+        String::from_utf8_lossy(&slice_out.stderr)
+    );
+    let summary: serde_json::Value =
+        serde_json::from_slice(&slice_out.stdout).expect("parse export summary");
+    assert_eq!(summary["format"], "gltf");
+    assert_eq!(summary["num_steps"], 1);
+    assert!(single_glb.is_file());
+    let glb_bytes = std::fs::read(&single_glb).expect("read slice.glb");
+    assert_eq!(&glb_bytes[0..4], b"glTF");
+
+    // 2. Export multi-step time series `gallery/series-transient-last.json` with `--all-steps`.
+    let series_dir = out_dir.join("series_glb");
+    let series_out = tetraglass_bin()
+        .arg("export")
+        .arg(root.join("gallery/series-transient-last.json"))
+        .arg("-o")
+        .arg(&series_dir)
+        .arg("--all-steps")
+        .output()
+        .expect("run `tetraglass export --all-steps`");
+    assert!(
+        series_out.status.success(),
+        "`tetraglass export --all-steps` failed: {}",
+        String::from_utf8_lossy(&series_out.stderr)
+    );
+    let series_summary: serde_json::Value =
+        serde_json::from_slice(&series_out.stdout).expect("parse series export summary");
+    assert_eq!(series_summary["num_steps"], 3);
+    assert_eq!(series_summary["files"].as_array().unwrap().len(), 3);
+    let manifest_path = series_summary["manifest"].as_str().expect("manifest path");
+    assert!(std::path::Path::new(manifest_path).is_file());
+}

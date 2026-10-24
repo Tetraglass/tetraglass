@@ -22,6 +22,7 @@ serde.workspace = true
 serde_json.workspace = true
 tetraglass-core.workspace = true
 tetraglass-egui.workspace = true
+tetraglass-export.workspace = true
 tetraglass-filters.workspace = true
 tetraglass-io.workspace = true
 tetraglass-render.workspace = true

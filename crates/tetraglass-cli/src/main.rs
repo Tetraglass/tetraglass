@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use tetraglass_core::{
     Attributes, BoundingBox, CellType, ScalarType, TimeSeries, UnstructuredGrid,
 };
+use tetraglass_egui as _;
+use tetraglass_export::write_scene_glb_output;
 use tetraglass_io::{
     IoError, MeshFormat, detect_format_from_bytes, detect_format_from_extension, read_msh_series,
     read_pvd_series_with_loader, read_vtu_series,
@@ -82,6 +84,7 @@ fn run_cli(args: &[String]) -> Result<String, CliFailure> {
         "validate" => cmd_validate(rest),
         "render" => cmd_render(rest),
         "view" => cmd_view(rest),
+        "export" => cmd_export(rest),
         other => Err(CliFailure::Message(format!(
             "unknown command `{other}`; run `tetraglass --help` for usage"
         ))),
@@ -96,6 +99,7 @@ fn help_text() -> String {
          tetraglass render <scene.json> [-o <out.png>] [--engine <raster|cycles>]\n  \
          tetraglass validate <scene.json> [--json]\n  \
          tetraglass view <scene.json|mesh> [--frames <n>]\n  \
+         tetraglass export <scene.json> -o <out.glb|dir> [--format <gltf|bundle>] [--all-steps]\n  \
          tetraglass schema",
         env!("CARGO_PKG_VERSION")
     )
@@ -1034,4 +1038,133 @@ fn load_series_from_path(
             path.display()
         ))),
     }
+}
+
+// --- `export` command (`M3.4`) ---
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ExportSummary {
+    format: String,
+    files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manifest: Option<String>,
+    num_steps: usize,
+    total_triangles: usize,
+}
+
+fn cmd_export(args: &[String]) -> Result<String, CliFailure> {
+    let mut scene_arg: Option<&str> = None;
+    let mut output_arg: Option<&str> = None;
+    let mut format_arg: Option<&str> = None;
+    let mut all_steps = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--help" | "-h" => {
+                return Ok(
+                    "Usage: tetraglass export <scene.json> -o <out.glb|dir> [--format <gltf|bundle>] [--all-steps]"
+                        .to_string(),
+                );
+            }
+            "-o" | "--output" => {
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    return Err(CliFailure::Message(
+                        "missing output path after `-o` / `--output`".to_string(),
+                    ));
+                };
+                output_arg = Some(val.as_str());
+            }
+            "--format" | "-f" => {
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    return Err(CliFailure::Message(
+                        "missing format after `--format` (expected `gltf`, `glb`, or `bundle`)"
+                            .to_string(),
+                    ));
+                };
+                format_arg = Some(val.as_str());
+            }
+            "--all-steps" => {
+                all_steps = true;
+            }
+            other if other.starts_with('-') => {
+                return Err(CliFailure::Message(format!(
+                    "unknown option `{other}` for `export`"
+                )));
+            }
+            path => {
+                if scene_arg.is_some() {
+                    return Err(CliFailure::Message(
+                        "`export` accepts a single <scene.json> argument".to_string(),
+                    ));
+                }
+                scene_arg = Some(path);
+            }
+        }
+        i += 1;
+    }
+
+    let Some(scene_path_str) = scene_arg else {
+        return Err(CliFailure::Message(
+            "missing <scene.json> argument; usage: `tetraglass export <scene.json> -o <out.glb|dir>`"
+                .to_string(),
+        ));
+    };
+    let Some(output_path_str) = output_arg else {
+        return Err(CliFailure::Message(
+            "missing `-o <out.glb|dir>` argument for `export`".to_string(),
+        ));
+    };
+
+    let format = format_arg.unwrap_or("gltf").to_ascii_lowercase();
+    if format == "bundle" {
+        return Err(CliFailure::Message(
+            "bundle export arrives in task M3.5 (use `--format gltf`)".to_string(),
+        ));
+    }
+    if format != "gltf" && format != "glb" {
+        return Err(CliFailure::Message(format!(
+            "unknown export format `{format}`; expected `gltf`, `glb`, or `bundle`"
+        )));
+    }
+
+    let scene_path = Path::new(scene_path_str);
+    let scene = Scene::from_path(scene_path).map_err(|e| {
+        CliFailure::Message(format!(
+            "cannot parse scene `{}`: {e}",
+            scene_path.display()
+        ))
+    })?;
+    let base_dir = scene_path.parent().unwrap_or_else(|| Path::new("."));
+
+    let mut evaluator = SceneEvaluator::new();
+    for (name, source) in &scene.sources {
+        let resolved_path = resolve_relative_path(base_dir, &source.file);
+        let explicit_format = source.format.map(MeshFormat::from);
+        let (_, series) = load_series_from_path(&resolved_path, explicit_format)?;
+        evaluator.insert_series_source(name.clone(), series);
+    }
+
+    let summary = write_scene_glb_output(
+        Path::new(output_path_str),
+        &scene,
+        &mut evaluator,
+        all_steps,
+    )
+    .map_err(|e| CliFailure::Message(e.to_string()))?;
+
+    let out = ExportSummary {
+        format: "gltf".to_string(),
+        files: summary
+            .glb_files
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect(),
+        manifest: summary.manifest_file.map(|p| p.display().to_string()),
+        num_steps: summary.num_steps,
+        total_triangles: summary.total_triangles,
+    };
+    serde_json::to_string_pretty(&out).map_err(|e| CliFailure::Message(e.to_string()))
 }

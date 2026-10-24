@@ -2146,6 +2146,7 @@ dependencies = [
  "serde_json",
  "tetraglass-core",
  "tetraglass-egui",
+ "tetraglass-export",
  "tetraglass-filters",
  "tetraglass-io",
  "tetraglass-render",
@@ -2173,6 +2174,20 @@ dependencies = [
  "tetraglass-filters",
  "tetraglass-io",
  "tetraglass-render",
+]
+
+[[package]]
+name = "tetraglass-export"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "serde",
+ "serde_json",
+ "tetraglass-core",
+ "tetraglass-filters",
+ "tetraglass-io",
+ "tetraglass-scene",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

@@ -336,3 +336,11 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Added headless WBOIT integration tests in `crates/tetraglass-render/tests/render_mixed_linear.rs` (verifying monotonic opacity response, multi-surface draw-order invariance, internal triangle-order invariance, and opaque-inside-transparent compositing at both 1x and 4x MSAA) and opacity round-trip tests in `crates/tetraglass-viewer/tests/viewer_document.rs`.
 - Decisions: None.
 - Follow-ups: M3.4 glTF export.
+
+## 2026-10-25 — M3.4 glTF export (`crates/tetraglass-export`, `crates/tetraglass-cli`)
+
+- Done: created `tetraglass-export` (`wasm32-unknown-unknown`-compatible, zero GPU or C dependencies) with Binary glTF 2.0 (`.glb`) scene and time-series exporters (`export_evaluated_scene_to_glb`, `export_time_series_to_glb_frames`, `write_evaluated_scene_glb`, `write_scene_glb_output`) and a `.glb` container parser (`parse_glb`). Exported primitives store `POSITION` (`f32` relative to `dataset_center` with node `translation` preserving world coordinates per `D-014`), `NORMAL`, baked linear-light RGBA vertex colors in `COLOR_0` (supporting all 5 colormaps, solid coloring, and `opacity` with `"OPAQUE"` / `"BLEND"` materials), `TEXCOORD_0` (`[normalized_scalar, 0.0]`), and `TEXCOORD_1` (`[normalized_scalar, raw_scalar]` so a Blender user can re-color via a ColorRamp node), plus one `.glb` per time step accompanied by a `GltfSeriesManifest` JSON file. Added `tetraglass export <scene.json> -o <out.glb|dir> [--format <gltf|bundle>] [--all-steps]` to `tetraglass-cli`.
+- Tests: unit tests in `crates/tetraglass-export/src/colormap.rs`, crate-level doctest in `crates/tetraglass-export/src/lib.rs`, integration tests in `crates/tetraglass-export/tests/gltf_export.rs` (verifying gallery scenes, transparent and cell-colored representations, multi-step `.pvd` time-series export, and corrupted `.glb` error handling), and `export_command_writes_single_glb_and_time_series_manifest` in `crates/tetraglass-cli/tests/cli.rs`.
+- Decisions: none.
+- Dependencies added: none.
+- Follow-ups: M3.5 Bundle format (`/blender-bridge`).
