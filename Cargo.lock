@@ -2230,11 +2230,14 @@ dependencies = [
 name = "tetraglass-viewer"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "eframe",
  "egui",
  "egui-wgpu",
+ "flate2",
  "js-sys",
  "log",
+ "serde",
  "serde_json",
  "tetraglass-core",
  "tetraglass-egui",

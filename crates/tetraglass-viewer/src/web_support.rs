@@ -1,19 +1,30 @@
-//! Platform-independent support types for the WebGPU browser viewer (`M3.1`).
+//! Platform-independent support types for the WebGPU browser viewer (`M3.1`, `M3.2`).
 //!
 //! All types and helpers in this module compile on both native and `wasm32-unknown-unknown`
 //! targets so that WebGPU status formatting, WebGPU-only `wgpu` configuration (`D-007`),
-//! drag-and-drop byte stores, URL resolution, and multi-file scene/series bundle fetching
-//! can be unit- and integration-tested on native CI as well as used in the browser.
+//! drag-and-drop byte stores, URL resolution, multi-file scene/series bundle fetching,
+//! and shareable links (`M3.2`) can be unit- and integration-tested on native CI as well
+//! as used in the browser.
 
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
+use flate2::Compression;
+use flate2::read::ZlibDecoder;
+use flate2::write::ZlibEncoder;
+use serde::{Deserialize, Serialize};
 use tetraglass_io::{
     IoError, MeshFormat, detect_format_from_bytes, detect_format_from_extension, parse_pvd_entries,
 };
-use tetraglass_scene::Scene;
+use tetraglass_scene::{ColormapName, Scene};
 
 use crate::ViewerError;
+
+/// Maximum decompressed payload size (`64 MiB`) allowed when decoding `?scene_b64=` or `?bundle_b64=`.
+pub const MAX_SHAREABLE_DECOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
 
 /// Browsers with default WebGPU support cited in diagnostic messages (`docs/design-plan.md`).
 pub const SUPPORTED_WEBGPU_BROWSERS: [&str; 4] = [
@@ -329,6 +340,19 @@ impl InMemoryFileStore {
         self.files_by_key.clear();
         self.basenames.clear();
     }
+
+    /// Returns an iterator over all stored `(normalized_key, bytes)` entries.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.files_by_key
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+    }
+
+    /// Exports all stored files as a [`BTreeMap`] of normalized keys to byte vectors.
+    #[must_use]
+    pub fn to_btree_map(&self) -> BTreeMap<String, Vec<u8>> {
+        self.files_by_key.clone()
+    }
 }
 
 fn normalize_lookup_key(raw: &str) -> String {
@@ -568,48 +592,638 @@ const fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-/// A primary file and any companion source/step files fetched from a URL (`M3.1`).
-#[derive(Debug, Clone)]
-pub struct FetchedUrlBundle {
-    /// The requested URL.
-    pub url: String,
-    /// Short display label derived from `url`.
-    pub label: String,
-    /// Raw bytes of the primary file at `url` (a `.json` scene, `.pvd`, `.vtu`, or `.msh`).
-    pub primary_bytes: Vec<u8>,
-    /// Companion source meshes and `.pvd` step files resolved relative to `url`.
-    pub companion_files: InMemoryFileStore,
+/// Percent-encodes a string for safe inclusion as a URL query parameter value (`M3.2`).
+#[must_use]
+pub fn percent_encode_query_component(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() + 8);
+    for &b in input.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
-/// Fetches a scene or mesh at `url` (plus any referenced source meshes and `.pvd` step files)
-/// using a caller-supplied synchronous `fetcher` closure.
-///
-/// This powers URL loading in tests and native environments; the `wasm32` browser loader
-/// mirrors the exact same traversal asynchronously over `fetch()`.
-pub fn fetch_url_bundle_with<F>(url: &str, mut fetcher: F) -> Result<FetchedUrlBundle, ViewerError>
+/// Compresses `bytes` with zlib and encodes the result using URL-safe Base64 without padding (`M3.2`).
+pub fn encode_compressed_base64url(bytes: &[u8]) -> Result<String, ViewerError> {
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+    encoder.write_all(bytes)?;
+    let compressed = encoder.finish()?;
+    Ok(URL_SAFE_NO_PAD.encode(compressed))
+}
+
+/// Decodes a URL-safe Base64 string and decompresses the zlib stream (up to [`MAX_SHAREABLE_DECOMPRESSED_BYTES`]) (`M3.2`).
+pub fn decode_compressed_base64url(encoded: &str) -> Result<Vec<u8>, ViewerError> {
+    let trimmed = encoded.trim();
+    let compressed = URL_SAFE_NO_PAD
+        .decode(trimmed)
+        .or_else(|_| URL_SAFE.decode(trimmed))
+        .map_err(|e| ViewerError::Validation(format!("invalid base64url payload: {e}")))?;
+
+    let decoder = ZlibDecoder::new(compressed.as_slice());
+    let mut limited = decoder.take((MAX_SHAREABLE_DECOMPRESSED_BYTES + 1) as u64);
+    let mut out = Vec::new();
+    limited.read_to_end(&mut out).map_err(|e| {
+        ViewerError::Validation(format!("failed to decompress shareable payload: {e}"))
+    })?;
+    if out.len() > MAX_SHAREABLE_DECOMPRESSED_BYTES {
+        return Err(ViewerError::Validation(format!(
+            "decompressed shareable payload exceeds limit of {MAX_SHAREABLE_DECOMPRESSED_BYTES} bytes"
+        )));
+    }
+    Ok(out)
+}
+
+/// Optional view-state overrides carried by a shareable link (`M3.2`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ShareableViewOverrides {
+    /// Camera azimuth angle in degrees (`?az=<deg>`).
+    pub azimuth_deg: Option<f64>,
+    /// Camera elevation angle in degrees (`?el=<deg>`).
+    pub elevation_deg: Option<f64>,
+    /// Camera roll angle in degrees (`?roll=<deg>`).
+    pub roll_deg: Option<f64>,
+    /// Camera zoom factor (`?zoom=<factor>`).
+    pub zoom: Option<f64>,
+    /// Zero-based time-step index (`?step=<idx>`).
+    pub step: Option<usize>,
+    /// Primary representation `color_by` array reference (`?color_by=point:linear` or `solid`).
+    pub color_by: Option<String>,
+    /// Primary representation colormap (`?colormap=viridis`).
+    pub colormap: Option<ColormapName>,
+    /// Logarithmic scalar mapping (`?log=true` / `?log_scale=true`).
+    pub log_scale: Option<bool>,
+    /// Colorbar visibility (`?colorbar=true`).
+    pub colorbar: Option<bool>,
+    /// Orientation axes triad visibility (`?axes=true`).
+    pub axes: Option<bool>,
+}
+
+impl ShareableViewOverrides {
+    /// Returns `true` if no overrides are set.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.azimuth_deg.is_none()
+            && self.elevation_deg.is_none()
+            && self.roll_deg.is_none()
+            && self.zoom.is_none()
+            && self.step.is_none()
+            && self.color_by.is_none()
+            && self.colormap.is_none()
+            && self.log_scale.is_none()
+            && self.colorbar.is_none()
+            && self.axes.is_none()
+    }
+
+    /// Appends non-empty overrides as `key=value` query parameters to `params`.
+    pub fn append_query_params(&self, params: &mut Vec<String>) {
+        if let Some(az) = self.azimuth_deg {
+            params.push(format!("az={az:.2}"));
+        }
+        if let Some(el) = self.elevation_deg {
+            params.push(format!("el={el:.2}"));
+        }
+        if let Some(roll) = self.roll_deg
+            && roll.abs() > 1e-4
+        {
+            params.push(format!("roll={roll:.2}"));
+        }
+        if let Some(zoom) = self.zoom {
+            params.push(format!("zoom={zoom:.3}"));
+        }
+        if let Some(step) = self.step {
+            params.push(format!("step={step}"));
+        }
+        if let Some(ref color_by) = self.color_by {
+            params.push(format!(
+                "color_by={}",
+                percent_encode_query_component(color_by)
+            ));
+        }
+        if let Some(cmap) = self.colormap {
+            params.push(format!("colormap={}", format_colormap_query(cmap)));
+        }
+        if let Some(log) = self.log_scale {
+            params.push(format!("log={log}"));
+        }
+        if let Some(cb) = self.colorbar {
+            params.push(format!("colorbar={cb}"));
+        }
+        if let Some(axes) = self.axes {
+            params.push(format!("axes={axes}"));
+        }
+    }
+}
+
+/// Self-contained scene + companion mesh data payload encoded in `?bundle_b64=<deflate+base64url>` (`M3.2`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlineShareableBundle {
+    /// Display label / filename of the primary entry (for example `"slice.json"` or `"tet.vtu"`).
+    pub label: String,
+    /// Raw bytes of the primary `.json` scene or mesh file.
+    pub primary_bytes: Vec<u8>,
+    /// Companion mesh files (source `.vtu`/`.msh`/`.pvd` and step `.vtu` files) keyed by relative path.
+    pub companion_files: BTreeMap<String, Vec<u8>>,
+}
+
+impl InlineShareableBundle {
+    /// Encodes this bundle into a compressed URL-safe Base64 string suitable for `?bundle_b64=`.
+    pub fn encode_base64url(&self) -> Result<String, ViewerError> {
+        let json_bytes = serde_json::to_vec(self)
+            .map_err(|e| ViewerError::Validation(format!("bundle serialize error: {e}")))?;
+        encode_compressed_base64url(&json_bytes)
+    }
+
+    /// Decodes an [`InlineShareableBundle`] from a `?bundle_b64=` compressed Base64url string.
+    pub fn decode_base64url(encoded: &str) -> Result<Self, ViewerError> {
+        let decompressed = decode_compressed_base64url(encoded)?;
+        serde_json::from_slice(&decompressed)
+            .map_err(|e| ViewerError::Validation(format!("invalid bundle_b64 JSON: {e}")))
+    }
+}
+
+/// Parsed shareable link specification combining a scene/mesh target, companion data URLs,
+/// or an inline compressed scene/bundle with optional view-state overrides (`M3.2`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ShareableLinkSpec {
+    /// Remote URL to the primary `.json` scene or mesh file (`?scene=`, `?url=`, or `?file=`).
+    pub primary_url: Option<String>,
+    /// Inline [`Scene`] decoded from `?scene_b64=<deflate+base64url>` or `?scene_json=<json>`.
+    pub inline_scene: Option<Scene>,
+    /// Self-contained scene + companion data bundle decoded from `?bundle_b64=<deflate+base64url>`.
+    pub inline_bundle: Option<InlineShareableBundle>,
+    /// Companion data URLs mapped by source name or filename (`?data=<name>:<url>` or `?data=<url>`).
+    pub data_urls: BTreeMap<String, String>,
+    /// Optional camera, time-step, and coloring overrides.
+    pub view_overrides: ShareableViewOverrides,
+}
+
+impl ShareableLinkSpec {
+    /// Parses a [`ShareableLinkSpec`] from a query string (`?scene=...`), hash fragment (`#scene=...`),
+    /// full viewer URL (`https://.../viewer/?scene=...&data=...`), or direct file URL (`https://.../slice.json`).
+    pub fn from_url_or_query(input: &str) -> Result<Option<Self>, ViewerError> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+
+        // Merge query parameters from `?query` and `#fragment` if present.
+        let mut combined_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let is_explicit_query_or_hash = trimmed.starts_with('?') || trimmed.starts_with('#');
+
+        if is_explicit_query_or_hash {
+            let (q_part, h_part) = match trimmed.split_once('#') {
+                Some((q, h)) => (q, Some(h)),
+                None => (trimmed, None),
+            };
+            merge_into_query_map(
+                &mut combined_map,
+                q_part.strip_prefix('#').unwrap_or(q_part),
+            );
+            if let Some(h) = h_part {
+                merge_into_query_map(&mut combined_map, h);
+            }
+        } else {
+            let (_, after_q) = match trimmed.split_once('?') {
+                Some((base, rest)) => (base, Some(rest)),
+                None => (trimmed, None),
+            };
+            if let Some(rest) = after_q {
+                let (q_part, h_part) = match rest.split_once('#') {
+                    Some((q, h)) => (q, Some(h)),
+                    None => (rest, None),
+                };
+                merge_into_query_map(&mut combined_map, q_part);
+                if let Some(h) = h_part {
+                    merge_into_query_map(&mut combined_map, h);
+                }
+            } else if let Some((_, h_part)) = trimmed.split_once('#')
+                && h_part.contains('=')
+            {
+                merge_into_query_map(&mut combined_map, h_part);
+            }
+        }
+
+        if has_shareable_target_keys(&combined_map) {
+            return Self::from_query_map(&combined_map);
+        }
+
+        if is_explicit_query_or_hash {
+            return Ok(None);
+        }
+
+        // Treat as a direct file URL (`https://.../slice.json`), optionally carrying view overrides in `#fragment`.
+        let mut spec = Self {
+            primary_url: Some(trimmed.split('#').next().unwrap_or(trimmed).to_string()),
+            ..Default::default()
+        };
+        if !combined_map.is_empty() {
+            spec.view_overrides = parse_view_overrides(&combined_map)?;
+        }
+        Ok(Some(spec))
+    }
+
+    /// Parses a [`ShareableLinkSpec`] from a pre-parsed query parameter map (`M3.2`).
+    pub fn from_query_map(
+        query_map: &BTreeMap<String, Vec<String>>,
+    ) -> Result<Option<Self>, ViewerError> {
+        let primary_url = extract_url_from_query_map(query_map);
+
+        let inline_scene = if let Some(b64) = first_non_empty(query_map, "scene_b64") {
+            let bytes = decode_compressed_base64url(b64)?;
+            Some(Scene::from_json_bytes(&bytes)?)
+        } else if let Some(json_str) = first_non_empty(query_map, "scene_json") {
+            Some(Scene::from_json_str(json_str)?)
+        } else {
+            None
+        };
+
+        let inline_bundle = if let Some(b64) = first_non_empty(query_map, "bundle_b64") {
+            Some(InlineShareableBundle::decode_base64url(b64)?)
+        } else {
+            None
+        };
+
+        if primary_url.is_none() && inline_scene.is_none() && inline_bundle.is_none() {
+            return Ok(None);
+        }
+
+        let mut data_urls = BTreeMap::new();
+        if let Some(values) = query_map.get("data") {
+            for raw in values {
+                let val = raw.trim();
+                if val.is_empty() {
+                    continue;
+                }
+                if let Some((source_name, target_url)) = split_named_data_param(val) {
+                    let filename = url_display_label(target_url);
+                    data_urls.insert(source_name.to_string(), target_url.to_string());
+                    data_urls.insert(filename, target_url.to_string());
+                } else {
+                    let filename = url_display_label(val);
+                    data_urls
+                        .entry("*".to_string())
+                        .or_insert_with(|| val.to_string());
+                    data_urls.insert(filename, val.to_string());
+                }
+            }
+        }
+        for (key, values) in query_map {
+            let named = key
+                .strip_prefix("data.")
+                .or_else(|| key.strip_prefix("source."));
+            if let Some(source_name) = named
+                && !source_name.is_empty()
+            {
+                for val in values {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        let filename = url_display_label(trimmed);
+                        data_urls.insert(source_name.to_string(), trimmed.to_string());
+                        data_urls.insert(filename, trimmed.to_string());
+                    }
+                }
+            }
+        }
+
+        let view_overrides = parse_view_overrides(query_map)?;
+
+        Ok(Some(Self {
+            primary_url,
+            inline_scene,
+            inline_bundle,
+            data_urls,
+            view_overrides,
+        }))
+    }
+
+    /// Resolves the remote URL for a scene source (`source_name`, `source_file`) against
+    /// `self.data_urls` first, falling back to `base_url` if available (`M3.2`).
+    #[must_use]
+    pub fn resolve_source_url(
+        &self,
+        source_name: &str,
+        source_file: &str,
+        base_url: Option<&str>,
+        total_sources: usize,
+    ) -> Option<String> {
+        if let Some(u) = self.data_urls.get(source_name) {
+            return Some(u.clone());
+        }
+        if let Some(u) = self.data_urls.get(source_file) {
+            return Some(u.clone());
+        }
+        let base_name = url_display_label(source_file);
+        if let Some(u) = self.data_urls.get(&base_name) {
+            return Some(u.clone());
+        }
+        if total_sources == 1
+            && let Some(u) = self.data_urls.get("*")
+        {
+            return Some(u.clone());
+        }
+        if source_file.starts_with("http://")
+            || source_file.starts_with("https://")
+            || source_file.starts_with("file://")
+            || source_file.starts_with("data:")
+            || source_file.starts_with("blob:")
+        {
+            return Some(source_file.to_string());
+        }
+        base_url.map(|base| resolve_relative_url(base, source_file))
+    }
+
+    /// Formats this [`ShareableLinkSpec`] as a complete shareable viewer URL based on `base_viewer_url` (`M3.2`).
+    pub fn to_viewer_url(&self, base_viewer_url: &str) -> Result<String, ViewerError> {
+        let mut params = Vec::new();
+        if let Some(ref bundle) = self.inline_bundle {
+            let encoded = bundle.encode_base64url()?;
+            params.push(format!("bundle_b64={encoded}"));
+        } else if let Some(ref scene) = self.inline_scene {
+            let json = scene.to_json_string()?;
+            let encoded = encode_compressed_base64url(json.as_bytes())?;
+            params.push(format!("scene_b64={encoded}"));
+        } else if let Some(ref url) = self.primary_url {
+            params.push(format!("scene={}", percent_encode_query_component(url)));
+        } else {
+            return Err(ViewerError::Validation(
+                "ShareableLinkSpec has no primary_url, inline_scene, or inline_bundle".to_string(),
+            ));
+        }
+
+        // Emit explicit `data.<name>=<url>` or `data=<url>` parameters (deduplicating basename aliases).
+        let mut emitted_urls = std::collections::BTreeSet::new();
+        if let Some(wildcard) = self.data_urls.get("*") {
+            params.push(format!("data={}", percent_encode_query_component(wildcard)));
+            emitted_urls.insert(wildcard.clone());
+        }
+        for (k, v) in &self.data_urls {
+            if k == "*" || emitted_urls.contains(v) {
+                continue;
+            }
+            if k == &url_display_label(v) {
+                continue;
+            }
+            params.push(format!(
+                "data.{}={}",
+                percent_encode_query_component(k),
+                percent_encode_query_component(v)
+            ));
+            emitted_urls.insert(v.clone());
+        }
+
+        self.view_overrides.append_query_params(&mut params);
+
+        let clean_base = base_viewer_url
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(base_viewer_url)
+            .trim();
+        Ok(format!("{clean_base}?{}", params.join("&")))
+    }
+}
+
+fn merge_into_query_map(target: &mut BTreeMap<String, Vec<String>>, raw_query: &str) {
+    for (k, vals) in parse_query_map(raw_query) {
+        target.entry(k).or_default().extend(vals);
+    }
+}
+
+fn has_shareable_target_keys(map: &BTreeMap<String, Vec<String>>) -> bool {
+    for k in [
+        "url",
+        "scene",
+        "file",
+        "scene_b64",
+        "scene_json",
+        "bundle_b64",
+    ] {
+        if map
+            .get(k)
+            .is_some_and(|v| v.iter().any(|s| !s.trim().is_empty()))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn first_non_empty<'a>(map: &'a BTreeMap<String, Vec<String>>, key: &str) -> Option<&'a str> {
+    map.get(key)?
+        .iter()
+        .map(|s| s.trim())
+        .find(|s| !s.is_empty())
+}
+
+fn split_named_data_param(val: &str) -> Option<(&str, &str)> {
+    if val.starts_with("http://")
+        || val.starts_with("https://")
+        || val.starts_with("file://")
+        || val.starts_with("data:")
+        || val.starts_with("blob:")
+        || val.starts_with('/')
+    {
+        return None;
+    }
+    let (prefix, rest) = val.split_once(':')?;
+    if prefix.is_empty() || prefix.contains('/') || rest.trim().is_empty() {
+        return None;
+    }
+    Some((prefix.trim(), rest.trim()))
+}
+
+fn parse_view_overrides(
+    map: &BTreeMap<String, Vec<String>>,
+) -> Result<ShareableViewOverrides, ViewerError> {
+    let parse_f64 = |key: &str| -> Result<Option<f64>, ViewerError> {
+        let Some(raw) = first_non_empty(map, key) else {
+            return Ok(None);
+        };
+        let val = raw.parse::<f64>().map_err(|_| {
+            ViewerError::Validation(format!("invalid numeric query parameter `{key}={raw}`"))
+        })?;
+        if !val.is_finite() {
+            return Err(ViewerError::Validation(format!(
+                "non-finite query parameter `{key}={raw}`"
+            )));
+        }
+        Ok(Some(val))
+    };
+
+    let parse_bool = |key: &str| -> Result<Option<bool>, ViewerError> {
+        let Some(raw) = first_non_empty(map, key) else {
+            return Ok(None);
+        };
+        match raw.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(Some(true)),
+            "0" | "false" | "no" | "off" => Ok(Some(false)),
+            _ => Err(ViewerError::Validation(format!(
+                "invalid boolean query parameter `{key}={raw}`"
+            ))),
+        }
+    };
+
+    let step = if let Some(raw) = first_non_empty(map, "step") {
+        Some(
+            raw.parse::<usize>()
+                .map_err(|_| ViewerError::Validation(format!("invalid step index `step={raw}`")))?,
+        )
+    } else {
+        None
+    };
+
+    let colormap = if let Some(raw) = first_non_empty(map, "colormap") {
+        Some(parse_colormap_query(raw)?)
+    } else {
+        None
+    };
+
+    let log_scale = match parse_bool("log")? {
+        Some(v) => Some(v),
+        None => parse_bool("log_scale")?,
+    };
+
+    Ok(ShareableViewOverrides {
+        azimuth_deg: parse_f64("az")?.or(parse_f64("azimuth")?),
+        elevation_deg: parse_f64("el")?.or(parse_f64("elevation")?),
+        roll_deg: parse_f64("roll")?,
+        zoom: parse_f64("zoom")?,
+        step,
+        color_by: first_non_empty(map, "color_by").map(ToString::to_string),
+        colormap,
+        log_scale,
+        colorbar: parse_bool("colorbar")?,
+        axes: parse_bool("axes")?,
+    })
+}
+
+const fn format_colormap_query(cmap: ColormapName) -> &'static str {
+    match cmap {
+        ColormapName::Viridis => "viridis",
+        ColormapName::Cividis => "cividis",
+        ColormapName::CoolWarm => "cool_warm",
+        ColormapName::Turbo => "turbo",
+        ColormapName::Grayscale => "grayscale",
+    }
+}
+
+fn parse_colormap_query(raw: &str) -> Result<ColormapName, ViewerError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "viridis" => Ok(ColormapName::Viridis),
+        "cividis" => Ok(ColormapName::Cividis),
+        "cool_warm" | "coolwarm" | "cool-warm" => Ok(ColormapName::CoolWarm),
+        "turbo" => Ok(ColormapName::Turbo),
+        "grayscale" | "greyscale" | "gray" => Ok(ColormapName::Grayscale),
+        other => Err(ViewerError::Validation(format!(
+            "unknown colormap `{other}` in shareable link (expected viridis, cividis, cool_warm, turbo, or grayscale)"
+        ))),
+    }
+}
+
+/// A primary file and any companion source/step files fetched from a URL or shareable link (`M3.1`, `M3.2`).
+#[derive(Debug, Clone)]
+pub struct FetchedUrlBundle {
+    /// The requested URL (or synthetic shareable link identifier).
+    pub url: String,
+    /// Short display label derived from `url` or embedded bundle.
+    pub label: String,
+    /// Raw bytes of the primary file (a `.json` scene, `.pvd`, `.vtu`, or `.msh`).
+    pub primary_bytes: Vec<u8>,
+    /// Companion source meshes and `.pvd` step files resolved relative to `url` or data overrides.
+    pub companion_files: InMemoryFileStore,
+    /// Optional view-state overrides parsed from the shareable link (`M3.2`).
+    pub view_overrides: ShareableViewOverrides,
+}
+
+/// Fetches a scene or mesh at `url` (or resolves a full shareable viewer link / query string)
+/// using a caller-supplied synchronous `fetcher` closure (`M3.1`, `M3.2`).
+pub fn fetch_url_bundle_with<F>(url: &str, fetcher: F) -> Result<FetchedUrlBundle, ViewerError>
 where
     F: FnMut(&str) -> Result<Vec<u8>, String>,
 {
-    let trimmed_url = url.trim();
-    if trimmed_url.is_empty() {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
         return Err(ViewerError::Validation("URL must not be empty".to_string()));
     }
-
-    let primary_bytes = fetcher(trimmed_url).map_err(|msg| {
-        ViewerError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("failed to load `{trimmed_url}`: {msg}"),
-        ))
+    let spec = ShareableLinkSpec::from_url_or_query(trimmed)?.ok_or_else(|| {
+        ViewerError::Validation(format!("no scene or mesh target found in `{trimmed}`"))
     })?;
+    fetch_shareable_link_with(&spec, fetcher)
+}
 
-    let label = url_display_label(trimmed_url);
+/// Resolves and fetches all resources required by a [`ShareableLinkSpec`] using `fetcher` (`M3.2`).
+pub fn fetch_shareable_link_with<F>(
+    spec: &ShareableLinkSpec,
+    mut fetcher: F,
+) -> Result<FetchedUrlBundle, ViewerError>
+where
+    F: FnMut(&str) -> Result<Vec<u8>, String>,
+{
+    if let Some(ref inline_bundle) = spec.inline_bundle {
+        let mut companion_files = InMemoryFileStore::new();
+        for (k, v) in &inline_bundle.companion_files {
+            companion_files.insert(k, v.clone());
+        }
+        return Ok(FetchedUrlBundle {
+            url: spec
+                .primary_url
+                .clone()
+                .unwrap_or_else(|| format!("inline:{}", inline_bundle.label)),
+            label: inline_bundle.label.clone(),
+            primary_bytes: inline_bundle.primary_bytes.clone(),
+            companion_files,
+            view_overrides: spec.view_overrides.clone(),
+        });
+    }
+
+    let (base_url, label, primary_bytes) = if let Some(ref scene) = spec.inline_scene {
+        let json_bytes = scene.to_json_string()?.into_bytes();
+        let base = spec.primary_url.clone();
+        let lbl = base
+            .as_deref()
+            .map_or_else(|| "shared_scene.json".to_string(), url_display_label);
+        (base, lbl, json_bytes)
+    } else if let Some(ref primary_url) = spec.primary_url {
+        let trimmed_url = primary_url.trim();
+        let bytes = fetcher(trimmed_url).map_err(|msg| {
+            ViewerError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("failed to load `{trimmed_url}`: {msg}"),
+            ))
+        })?;
+        (
+            Some(trimmed_url.to_string()),
+            url_display_label(trimmed_url),
+            bytes,
+        )
+    } else {
+        return Err(ViewerError::Validation(
+            "shareable link has no scene, mesh URL, or inline bundle".to_string(),
+        ));
+    };
+
     let label_path = Path::new(&label);
     let mut companion_files = InMemoryFileStore::new();
 
     if is_json_label_or_bytes(label_path, &primary_bytes) {
         let scene = Scene::from_json_bytes(&primary_bytes)?;
-        for source in scene.sources.values() {
-            let source_url = resolve_relative_url(trimmed_url, &source.file);
+        let total_sources = scene.sources.len();
+        for (source_name, source) in &scene.sources {
+            let source_url = spec
+                .resolve_source_url(
+                    source_name,
+                    &source.file,
+                    base_url.as_deref(),
+                    total_sources,
+                )
+                .ok_or_else(|| {
+                    ViewerError::Validation(format!(
+                        "cannot resolve relative source `{}` (`{}`) without a base URL or `?data=` parameter",
+                        source_name, source.file
+                    ))
+                })?;
             let source_bytes = fetcher(&source_url).map_err(|msg| {
                 ViewerError::Io(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -626,7 +1240,12 @@ where
             if is_pvd {
                 let entries = parse_pvd_entries(&source_bytes)?;
                 for entry in entries {
-                    let step_url = resolve_relative_url(&source_url, &entry.file);
+                    let step_url = spec
+                        .data_urls
+                        .get(&entry.file)
+                        .or_else(|| spec.data_urls.get(&url_display_label(&entry.file)))
+                        .cloned()
+                        .unwrap_or_else(|| resolve_relative_url(&source_url, &entry.file));
                     let step_bytes = fetcher(&step_url).map_err(|msg| {
                         ViewerError::Io(std::io::Error::new(
                             std::io::ErrorKind::NotFound,
@@ -644,9 +1263,15 @@ where
             companion_files.insert(&source_url, source_bytes);
         }
     } else if detect_mesh_format(label_path, &primary_bytes, None) == Some(MeshFormat::Pvd) {
+        let base_str = base_url.as_deref().unwrap_or("");
         let entries = parse_pvd_entries(&primary_bytes)?;
         for entry in entries {
-            let step_url = resolve_relative_url(trimmed_url, &entry.file);
+            let step_url = spec
+                .data_urls
+                .get(&entry.file)
+                .or_else(|| spec.data_urls.get(&url_display_label(&entry.file)))
+                .cloned()
+                .unwrap_or_else(|| resolve_relative_url(base_str, &entry.file));
             let step_bytes = fetcher(&step_url).map_err(|msg| {
                 ViewerError::Io(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -662,15 +1287,19 @@ where
     } else if detect_mesh_format(label_path, &primary_bytes, None).is_none() {
         return Err(ViewerError::MeshIo(IoError::UnsupportedFeature {
             offset: 0,
-            feature: format!("unknown mesh or scene format for `{trimmed_url}`"),
+            feature: format!(
+                "unknown mesh or scene format for `{}`",
+                base_url.as_deref().unwrap_or(&label)
+            ),
         }));
     }
 
     Ok(FetchedUrlBundle {
-        url: trimmed_url.to_string(),
+        url: base_url.unwrap_or_else(|| label.clone()),
         label,
         primary_bytes,
         companion_files,
+        view_overrides: spec.view_overrides.clone(),
     })
 }
 

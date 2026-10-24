@@ -911,3 +911,253 @@ fn viewer_session_supports_drag_and_drop_and_url_loading_for_meshes_series_and_s
 
     session.destroy(&mut egui_renderer);
 }
+
+#[test]
+fn shareable_link_roundtrips_scene_plus_remote_data_urls_and_view_overrides() {
+    use tetraglass_viewer::{ShareableLinkSpec, ShareableViewOverrides};
+
+    let root = workspace_root();
+    let hex_bytes = fs::read(root.join("testdata/vtk/hex_linear.vtu")).expect("read hex_linear");
+    let slice_json_bytes = fs::read(root.join("gallery/slice.json")).expect("read slice.json");
+    let pvd_bytes = fs::read(root.join("testdata/vtk/series.pvd")).expect("read pvd");
+    let step0_bytes = fs::read(root.join("testdata/vtk/series_0.vtu")).expect("read step0");
+    let step1_bytes = fs::read(root.join("testdata/vtk/series_1.vtu")).expect("read step1");
+    let step2_bytes = fs::read(root.join("testdata/vtk/series_2.vtu")).expect("read step2");
+
+    // 1. Build a shareable link pointing to a remote scene URL + a separate CDN mesh URL + camera/style overrides.
+    let mut data_urls = std::collections::BTreeMap::new();
+    data_urls.insert(
+        "mesh".to_string(),
+        "https://cdn.example.org/meshes/custom_hex.vtu".to_string(),
+    );
+    let spec = ShareableLinkSpec {
+        primary_url: Some("https://scenes.example.org/gallery/slice.json".to_string()),
+        inline_scene: None,
+        inline_bundle: None,
+        data_urls,
+        view_overrides: ShareableViewOverrides {
+            azimuth_deg: Some(115.0),
+            elevation_deg: Some(28.0),
+            roll_deg: Some(5.0),
+            zoom: Some(1.4),
+            step: None,
+            color_by: Some("solid".to_string()),
+            colormap: Some(ColormapName::Turbo),
+            log_scale: Some(true),
+            colorbar: Some(false),
+            axes: Some(false),
+        },
+    };
+    let link = spec
+        .to_viewer_url("https://tetraglass.example/viewer/")
+        .expect("encode viewer URL");
+    assert!(link.starts_with("https://tetraglass.example/viewer/?scene="));
+    assert!(link.contains("data.mesh=https%3A%2F%2Fcdn.example.org%2Fmeshes%2Fcustom_hex.vtu"));
+
+    // Notice the fetcher ONLY serves the mesh from `cdn.example.org` (not relative to `scenes.example.org`),
+    // proving the `data.mesh` query parameter overrode the scene's relative source path.
+    let fetcher = |requested_url: &str| -> Result<Vec<u8>, String> {
+        match requested_url {
+            "https://scenes.example.org/gallery/slice.json" => Ok(slice_json_bytes.clone()),
+            "https://cdn.example.org/meshes/custom_hex.vtu" => Ok(hex_bytes.clone()),
+            "https://scenes.example.org/data/series.pvd" => Ok(pvd_bytes.clone()),
+            "https://scenes.example.org/data/series_0.vtu" => Ok(step0_bytes.clone()),
+            "https://scenes.example.org/data/series_1.vtu" => Ok(step1_bytes.clone()),
+            "https://scenes.example.org/data/series_2.vtu" => Ok(step2_bytes.clone()),
+            other => Err(format!("HTTP 404 for {other}")),
+        }
+    };
+
+    let doc = ViewerDocument::from_url_with_fetcher(&link, fetcher)
+        .expect("load shareable scene + data link");
+    assert_eq!(doc.file_label(), "slice.json");
+    assert_eq!(
+        doc.source_url(),
+        Some("https://scenes.example.org/gallery/slice.json")
+    );
+    let cam = doc.camera_from_scene();
+    assert!((cam.azimuth_deg - 115.0).abs() < 1e-6);
+    assert!((cam.elevation_deg - 28.0).abs() < 1e-6);
+    assert!((cam.roll_deg - 5.0).abs() < 1e-6);
+    assert!((cam.zoom - 1.4).abs() < 1e-6);
+    assert_eq!(doc.selected_field_index(), 0); // "solid"
+    assert_eq!(doc.colormap(), ColormapName::Turbo);
+    assert!(doc.use_log_scale());
+    assert!(!doc.colorbar_enabled());
+    assert!(!doc.axes_enabled());
+
+    // 2. Also verify a shareable link with inline compressed scene JSON (`?scene_b64=...`) + remote data URL.
+    let inline_scene_spec = ShareableLinkSpec {
+        primary_url: None,
+        inline_scene: Some(
+            tetraglass_scene::Scene::from_json_bytes(&slice_json_bytes).expect("parse slice.json"),
+        ),
+        inline_bundle: None,
+        data_urls: [(
+            "*".to_string(),
+            "https://cdn.example.org/meshes/custom_hex.vtu".to_string(),
+        )]
+        .into_iter()
+        .collect(),
+        view_overrides: ShareableViewOverrides {
+            azimuth_deg: Some(62.5),
+            ..Default::default()
+        },
+    };
+    let inline_scene_link = inline_scene_spec
+        .to_viewer_url("https://tetraglass.example/viewer/")
+        .expect("encode inline scene link");
+    assert!(inline_scene_link.contains("scene_b64="));
+    assert!(inline_scene_link.contains("data=https%3A%2F%2Fcdn.example.org"));
+
+    let inline_doc = ViewerDocument::from_url_with_fetcher(&inline_scene_link, fetcher)
+        .expect("load inline scene_b64 + remote data URL");
+    assert!((inline_doc.camera_from_scene().azimuth_deg - 62.5).abs() < 1e-6);
+    assert!(inline_doc.active_surface().unwrap().num_triangles() > 0);
+
+    // 3. Verify time-step override (`?scene=...series.pvd&step=2`).
+    let series_link = "https://tetraglass.example/viewer/?scene=https%3A%2F%2Fscenes.example.org%2Fdata%2Fseries.pvd&step=2";
+    let series_doc =
+        ViewerDocument::from_url_with_fetcher(series_link, fetcher).expect("load series link");
+    assert_eq!(series_doc.num_time_steps(), 3);
+    assert_eq!(series_doc.current_time_step(), 2);
+}
+
+#[test]
+fn viewer_session_builds_and_opens_self_contained_and_remote_shareable_links() {
+    use tetraglass_viewer::DroppedFilePayload;
+
+    let root = workspace_root();
+    let hex_bytes = fs::read(root.join("testdata/vtk/hex_linear.vtu")).expect("read hex_linear");
+    let slice_json_bytes = fs::read(root.join("gallery/slice.json")).expect("read slice.json");
+    let pvd_bytes = fs::read(root.join("testdata/vtk/series.pvd")).expect("read pvd");
+    let step0_bytes = fs::read(root.join("testdata/vtk/series_0.vtu")).expect("read step0");
+    let step1_bytes = fs::read(root.join("testdata/vtk/series_1.vtu")).expect("read step1");
+    let step2_bytes = fs::read(root.join("testdata/vtk/series_2.vtu")).expect("read step2");
+
+    let headless = HeadlessContext::new().expect("headless wgpu context");
+    let mut egui_renderer = egui_wgpu::Renderer::new(
+        headless.device(),
+        wgpu::TextureFormat::Rgba8Unorm,
+        egui_wgpu::RendererOptions::default(),
+    );
+    let viewport1 = ViewportState::new(headless.device(), headless.queue(), &mut egui_renderer, 4)
+        .expect("create ViewportState 1");
+    let mut session1 = ViewerSession::new(
+        ViewerDocument::default_demo().expect("demo"),
+        viewport1,
+        headless.device(),
+    )
+    .expect("create session1");
+
+    // 1. Drop `slice.json` + `hex_linear.vtu` into `session1`, customize camera & colormap, and build a shareable link.
+    session1
+        .ingest_dropped_files(
+            [
+                DroppedFilePayload::new("slice.json", slice_json_bytes),
+                DroppedFilePayload::new("hex_linear.vtu", hex_bytes),
+            ],
+            headless.device(),
+            headless.queue(),
+        )
+        .expect("ingest dropped scene + mesh");
+    let expected_tris = session1
+        .document()
+        .active_surface()
+        .unwrap()
+        .num_triangles();
+    let mut cam = session1.viewport().camera();
+    cam.azimuth_deg = 77.5;
+    cam.elevation_deg = 41.25;
+    cam.zoom = 1.65;
+    session1.viewport_mut().set_camera(cam);
+    session1
+        .document_mut()
+        .set_colormap(ColormapName::CoolWarm)
+        .expect("set colormap");
+    assert!(session1.document_mut().set_axes_enabled(false));
+
+    let bundle_link = session1
+        .build_shareable_link("https://tetraglass.example/viewer/")
+        .expect("build self-contained shareable link");
+    assert!(bundle_link.starts_with("https://tetraglass.example/viewer/?bundle_b64="));
+
+    // 2. Open `bundle_link` in a brand-new `session2` with a fetcher that rejects all network traffic.
+    let viewport2 = ViewportState::new(headless.device(), headless.queue(), &mut egui_renderer, 4)
+        .expect("create ViewportState 2");
+    let mut session2 = ViewerSession::new(
+        ViewerDocument::default_demo().expect("demo 2"),
+        viewport2,
+        headless.device(),
+    )
+    .expect("create session2");
+
+    session2
+        .load_from_url_with_fetcher(
+            &bundle_link,
+            |unexpected_url| Err(format!("unexpected network fetch: {unexpected_url}")),
+            headless.device(),
+            headless.queue(),
+        )
+        .expect("open self-contained bundle_b64 link offline");
+
+    assert_eq!(session2.document().file_label(), "slice.json");
+    assert_eq!(
+        session2
+            .document()
+            .active_surface()
+            .unwrap()
+            .num_triangles(),
+        expected_tris
+    );
+    assert!((session2.viewport().camera().azimuth_deg - 77.5).abs() < 1e-6);
+    assert!((session2.viewport().camera().elevation_deg - 41.25).abs() < 1e-6);
+    assert!((session2.viewport().camera().zoom - 1.65).abs() < 1e-6);
+    assert_eq!(session2.document().colormap(), ColormapName::CoolWarm);
+    assert!(!session2.document().axes_enabled());
+
+    // 3. Load a remote `.pvd` series into `session1`, change step & camera, build a compact URL link, and open it in `session2`.
+    let fetcher = |requested_url: &str| -> Result<Vec<u8>, String> {
+        match requested_url {
+            "https://example.org/viz/testdata/vtk/series.pvd" => Ok(pvd_bytes.clone()),
+            "https://example.org/viz/testdata/vtk/series_0.vtu" => Ok(step0_bytes.clone()),
+            "https://example.org/viz/testdata/vtk/series_1.vtu" => Ok(step1_bytes.clone()),
+            "https://example.org/viz/testdata/vtk/series_2.vtu" => Ok(step2_bytes.clone()),
+            other => Err(format!("HTTP 404 for {other}")),
+        }
+    };
+    session1
+        .load_from_url_with_fetcher(
+            "https://example.org/viz/testdata/vtk/series.pvd",
+            fetcher,
+            headless.device(),
+            headless.queue(),
+        )
+        .expect("load remote pvd");
+    session1
+        .document_mut()
+        .set_time_step(2)
+        .expect("advance to step 2");
+    let mut cam2 = session1.viewport().camera();
+    cam2.azimuth_deg = 132.0;
+    session1.viewport_mut().set_camera(cam2);
+
+    let remote_link = session1
+        .build_shareable_link("https://tetraglass.example/viewer/")
+        .expect("build remote shareable link");
+    assert!(remote_link.starts_with(
+        "https://tetraglass.example/viewer/?scene=https%3A%2F%2Fexample.org%2Fviz%2Ftestdata%2Fvtk%2Fseries.pvd"
+    ));
+    assert!(remote_link.contains("step=2"));
+    assert!(remote_link.contains("az=132"));
+
+    session2
+        .load_from_url_with_fetcher(&remote_link, fetcher, headless.device(), headless.queue())
+        .expect("open remote shareable link in session2");
+    assert_eq!(session2.document().file_label(), "series.pvd");
+    assert_eq!(session2.document().current_time_step(), 2);
+    assert!((session2.viewport().camera().azimuth_deg - 132.0).abs() < 1e-6);
+
+    session1.destroy(&mut egui_renderer);
+    session2.destroy(&mut egui_renderer);
+}

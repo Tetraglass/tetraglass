@@ -60,7 +60,7 @@ Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 complete (2026-
 **Gate:** one CFD result shown both in Cycles (via `render --engine cycles`) and in the browser.
 
 - [x] **M3.1 Web viewer.** WASM build on WebGPU, drag-and-drop and URL loading, a clear message without WebGPU.
-- [ ] **M3.2 Shareable links.** A link to a scene plus data opens in the web viewer.
+- [x] **M3.2 Shareable links.** A link to a scene plus data opens in the web viewer.
 - [ ] **M3.3 Transparency.** Weighted blended order-independent transparency.
 - [ ] **M3.4 glTF export.** Baked colors, normalized scalar in a second texture coordinate, one .glb per time step.
 - [ ] **M3.5 Bundle format.** Write `docs/bundle-format.md`, then the export crate's bundle writer (`/blender-bridge`).

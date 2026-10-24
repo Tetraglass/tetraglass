@@ -317,3 +317,11 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (enforces `D-007`).
 - Dependencies added: promoted existing transitive `Cargo.lock` crates `js-sys = "0.3"`, `wasm-bindgen = "0.2"`, `wasm-bindgen-futures = "0.4"`, and `web-sys = "0.3"` (`MIT OR Apache-2.0`) to `[target.'cfg(target_arch = "wasm32")'.dependencies]` of `tetraglass-viewer`.
 - Follow-ups: M3.2 Shareable links.
+
+## 2026-10-24 — M3.2 Shareable links
+
+- Done: implemented shareable web-viewer links (`ShareableLinkSpec`, `ShareableViewOverrides`, `InlineShareableBundle`, `encode_compressed_base64url`, `decode_compressed_base64url`, `percent_encode_query_component`, `fetch_shareable_link_with`) in `tetraglass-viewer` supporting three link modes—(1) remote scene/mesh URL (`?scene=<url>`, `?url=<url>`, `?file=<url>`) with companion data URL overrides (`?data=<url>`, `?data=<source>:<url>`, `?data.<source>=<url>`), (2) inline zlib-compressed + URL-safe base64 scene JSON (`?scene_b64=...` or `?scene_json=...`) paired with remote companion data URLs, and (3) self-contained inline scene + companion mesh data bundles (`?bundle_b64=...`)—along with query/fragment view-state overrides (`az`, `el`, `roll`, `zoom`, `step`, `color_by`, `colormap`, `log`, `colorbar`, `axes`), `ViewerDocument::apply_shareable_overrides`, `ViewerSession::export_scene_with_live_view`, `ViewerSession::build_shareable_link`, `ViewerSession::build_inline_bundle_shareable_link`, `WebViewerHandle::shareable_link`, and a `"Copy shareable link"` button in the viewer control panel.
+- Tests: `shareable_link_roundtrips_scene_plus_remote_data_urls_and_view_overrides` and `viewer_session_builds_and_opens_self_contained_and_remote_shareable_links` in `crates/tetraglass-viewer/tests/viewer_document.rs`.
+- Decisions: none.
+- Dependencies added: none (reused existing workspace dependencies `base64`, `flate2`, and `serde`).
+- Follow-ups: M3.3 Transparency.

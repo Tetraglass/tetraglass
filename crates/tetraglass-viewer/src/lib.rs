@@ -46,9 +46,12 @@ use thiserror::Error;
 
 pub mod web_support;
 pub use web_support::{
-    DroppedFilePayload, FetchedUrlBundle, InMemoryFileStore, WebGpuErrorMessage, WebGpuStatus,
-    extract_url_from_query_map, extract_url_from_query_str, fetch_url_bundle_with, parse_query_map,
-    resolve_relative_url, url_display_label, webgpu_only_wgpu_configuration,
+    DroppedFilePayload, FetchedUrlBundle, InMemoryFileStore, InlineShareableBundle,
+    MAX_SHAREABLE_DECOMPRESSED_BYTES, ShareableLinkSpec, ShareableViewOverrides,
+    WebGpuErrorMessage, WebGpuStatus, decode_compressed_base64url, encode_compressed_base64url,
+    extract_url_from_query_map, extract_url_from_query_str, fetch_shareable_link_with,
+    fetch_url_bundle_with, parse_query_map, percent_encode_query_component, resolve_relative_url,
+    url_display_label, webgpu_only_wgpu_configuration,
 };
 
 /// Browser (`wasm32-unknown-unknown`) entry points, WebGPU capability checks, and `fetch` loader (`M3.1`).
@@ -288,6 +291,8 @@ impl SceneFileWatcher {
 pub struct ViewerDocument {
     file_label: String,
     scene_path: Option<PathBuf>,
+    source_url: Option<String>,
+    primary_bytes: Option<Vec<u8>>,
     is_raw_mesh_path: bool,
     base_dir: PathBuf,
     scene: Scene,
@@ -342,6 +347,8 @@ impl ViewerDocument {
         let mut doc = Self {
             file_label,
             scene_path: Some(path.to_path_buf()),
+            source_url: None,
+            primary_bytes: Some(bytes),
             is_raw_mesh_path: !is_json,
             base_dir,
             scene,
@@ -374,6 +381,8 @@ impl ViewerDocument {
         let mut doc = Self {
             file_label: "in-memory scene".to_string(),
             scene_path: None,
+            source_url: None,
+            primary_bytes: None,
             is_raw_mesh_path: false,
             base_dir,
             scene,
@@ -454,6 +463,8 @@ impl ViewerDocument {
         let mut doc = Self {
             file_label,
             scene_path: None,
+            source_url: None,
+            primary_bytes: None,
             is_raw_mesh_path: true,
             base_dir: PathBuf::new(),
             scene,
@@ -514,6 +525,8 @@ impl ViewerDocument {
         let mut doc = Self {
             file_label,
             scene_path: None,
+            source_url: None,
+            primary_bytes: Some(bytes),
             is_raw_mesh_path: !is_json,
             base_dir: PathBuf::new(),
             scene,
@@ -535,7 +548,7 @@ impl ViewerDocument {
         Ok(doc)
     }
 
-    /// Creates a [`ViewerDocument`] from a pre-fetched [`FetchedUrlBundle`] (`M3.1`).
+    /// Creates a [`ViewerDocument`] from a pre-fetched [`FetchedUrlBundle`] (`M3.1`, `M3.2`).
     pub fn from_fetched_bundle(bundle: FetchedUrlBundle) -> Result<Self, ViewerError> {
         let mut doc = Self::from_file_bytes_with_store(
             bundle.label.clone(),
@@ -543,11 +556,66 @@ impl ViewerDocument {
             &bundle.companion_files,
         )?;
         doc.file_label = bundle.label;
+        if !bundle.url.starts_with("inline:") {
+            doc.source_url = Some(bundle.url);
+        }
+        doc.apply_shareable_overrides(&bundle.view_overrides)?;
         Ok(doc)
     }
 
+    /// Applies optional [`ShareableViewOverrides`] (camera, time step, field coloring, colormap,
+    /// log scale, colorbar, and axes triad) to this document (`M3.2`).
+    pub fn apply_shareable_overrides(
+        &mut self,
+        overrides: &ShareableViewOverrides,
+    ) -> Result<(), ViewerError> {
+        if overrides.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(az) = overrides.azimuth_deg {
+            self.scene.view.camera.azimuth = az;
+            self.scene.view.camera.position = None;
+        }
+        if let Some(el) = overrides.elevation_deg {
+            self.scene.view.camera.elevation = el;
+            self.scene.view.camera.position = None;
+        }
+        if let Some(roll) = overrides.roll_deg {
+            self.scene.view.camera.roll = roll;
+        }
+        if let Some(zoom) = overrides.zoom {
+            self.scene.view.camera.zoom = zoom;
+            self.scene.view.camera.position = None;
+        }
+
+        if let Some(step) = overrides.step {
+            self.set_time_step(step)?;
+        }
+        if let Some(ref color_by) = overrides.color_by {
+            if color_by.eq_ignore_ascii_case("solid") || color_by.eq_ignore_ascii_case("none") {
+                self.set_color_by(None)?;
+            } else {
+                self.set_color_by(Some(color_by.clone()))?;
+            }
+        }
+        if let Some(cmap) = overrides.colormap {
+            self.set_colormap(cmap)?;
+        }
+        if let Some(log) = overrides.log_scale {
+            self.set_log_scale(log)?;
+        }
+        if let Some(cb) = overrides.colorbar {
+            self.set_colorbar_enabled(cb)?;
+        }
+        if let Some(axes) = overrides.axes {
+            self.set_axes_enabled(axes);
+        }
+        Ok(())
+    }
+
     /// Fetches `url` (and any referenced scene sources or `.pvd` step files) using `fetcher` and
-    /// builds a [`ViewerDocument`] (`M3.1`).
+    /// builds a [`ViewerDocument`] (`M3.1`, `M3.2`).
     pub fn from_url_with_fetcher<F>(url: &str, fetcher: F) -> Result<Self, ViewerError>
     where
         F: FnMut(&str) -> Result<Vec<u8>, String>,
@@ -566,6 +634,18 @@ impl ViewerDocument {
     #[must_use]
     pub fn scene_path(&self) -> Option<&Path> {
         self.scene_path.as_deref()
+    }
+
+    /// Returns the remote URL from which this document was loaded, if any (`M3.2`).
+    #[must_use]
+    pub fn source_url(&self) -> Option<&str> {
+        self.source_url.as_deref()
+    }
+
+    /// Returns the raw primary file bytes if this document was loaded from a file or URL (`M3.2`).
+    #[must_use]
+    pub fn primary_bytes(&self) -> Option<&[u8]> {
+        self.primary_bytes.as_deref()
     }
 
     /// Returns a reference to the current [`Scene`].
@@ -805,6 +885,16 @@ impl ViewerDocument {
         self.use_log_scale = log_scale;
         if let Some(rep) = self.scene.view.show.first_mut() {
             rep.log_scale = log_scale;
+            if log_scale
+                && let tetraglass_scene::RangeSpec::Bounds([lo, hi]) = rep.range
+                && lo <= 0.0
+            {
+                rep.range = if hi > 0.0 {
+                    tetraglass_scene::RangeSpec::bounds((hi * 1e-6).min(1e-6), hi)
+                } else {
+                    tetraglass_scene::RangeSpec::AUTO
+                };
+            }
         }
         self.evaluated = self
             .evaluator
@@ -1249,6 +1339,7 @@ pub struct ViewerSession {
     file_store: InMemoryFileStore,
     url_input: String,
     last_load_error: Option<String>,
+    last_shared_link: Option<String>,
     url_loading_in_progress: bool,
     async_drop_tx: mpsc::Sender<Result<Vec<DroppedFilePayload>, String>>,
     async_drop_rx: mpsc::Receiver<Result<Vec<DroppedFilePayload>, String>>,
@@ -1264,6 +1355,7 @@ impl std::fmt::Debug for ViewerSession {
             .field("clip_state", &self.clip_state)
             .field("url_input", &self.url_input)
             .field("last_load_error", &self.last_load_error)
+            .field("last_shared_link", &self.last_shared_link)
             .finish_non_exhaustive()
     }
 }
@@ -1325,6 +1417,7 @@ impl ViewerSession {
             file_store: InMemoryFileStore::new(),
             url_input: String::new(),
             last_load_error: None,
+            last_shared_link: None,
             url_loading_in_progress: false,
             async_drop_tx,
             async_drop_rx,
@@ -1393,6 +1486,137 @@ impl ViewerSession {
         &self.file_store
     }
 
+    /// Returns the most recently generated shareable link copied by the user, if any (`M3.2`).
+    #[must_use]
+    pub fn last_shared_link(&self) -> Option<&str> {
+        self.last_shared_link.as_deref()
+    }
+
+    /// Exports a [`Scene`] snapshot reflecting the session's current live camera orientation,
+    /// active time step, field selection, colormap, logarithmic scaling, and annotation toggles (`M3.2`).
+    #[must_use]
+    pub fn export_scene_with_live_view(&self) -> Scene {
+        let mut scene = self.doc.scene().clone();
+        let cam = self.viewport.camera();
+        scene.view.camera.azimuth = cam.azimuth_deg;
+        scene.view.camera.elevation = cam.elevation_deg;
+        scene.view.camera.roll = cam.roll_deg;
+        scene.view.camera.zoom = cam.zoom;
+        scene.view.camera.view_angle = cam.view_angle_deg;
+        scene.view.camera.position = None;
+        if self.doc.num_time_steps() > 1 {
+            scene
+                .output
+                .get_or_insert_with(|| Output::new("out.png"))
+                .time = TimeSelector::step(self.doc.current_time_step());
+        }
+        scene
+    }
+
+    /// Builds a shareable web-viewer link (`M3.2`) rooted at `base_viewer_url`.
+    ///
+    /// - When the active document was loaded from a remote URL (`doc.source_url().is_some()`),
+    ///   produces a compact query-string link (`?scene=<url>&az=...&el=...&zoom=...&color_by=...`)
+    ///   referencing that URL together with the live camera and styling overrides.
+    /// - Otherwise (for example, when files were dropped into the viewer or opened from local bytes),
+    ///   delegates to [`Self::build_inline_bundle_shareable_link`] so the resulting link is
+    ///   self-contained (`?bundle_b64=<zlib+base64url>`) and carries both the scene and its mesh data.
+    pub fn build_shareable_link(&self, base_viewer_url: &str) -> Result<String, ViewerError> {
+        if let Some(source_url) = self.doc.source_url() {
+            let cam = self.viewport.camera();
+            let color_by = self
+                .doc
+                .scene()
+                .view
+                .show
+                .first()
+                .map(|r| r.color_by.clone().unwrap_or_else(|| "solid".to_string()));
+            let spec = ShareableLinkSpec {
+                primary_url: Some(source_url.to_string()),
+                inline_scene: None,
+                inline_bundle: None,
+                data_urls: std::collections::BTreeMap::new(),
+                view_overrides: ShareableViewOverrides {
+                    azimuth_deg: Some(cam.azimuth_deg),
+                    elevation_deg: Some(cam.elevation_deg),
+                    roll_deg: Some(cam.roll_deg),
+                    zoom: Some(cam.zoom),
+                    step: Some(self.doc.current_time_step()),
+                    color_by,
+                    colormap: Some(self.doc.colormap()),
+                    log_scale: Some(self.doc.use_log_scale()),
+                    colorbar: Some(self.doc.colorbar_enabled()),
+                    axes: Some(self.doc.axes_enabled()),
+                },
+            };
+            spec.to_viewer_url(base_viewer_url)
+        } else {
+            self.build_inline_bundle_shareable_link(base_viewer_url)
+        }
+    }
+
+    /// Builds a self-contained shareable web-viewer link (`?bundle_b64=<zlib+base64url>`) that
+    /// packages the live [`Scene`] JSON together with all companion mesh files (`M3.2`).
+    pub fn build_inline_bundle_shareable_link(
+        &self,
+        base_viewer_url: &str,
+    ) -> Result<String, ViewerError> {
+        let scene = self.export_scene_with_live_view();
+        let scene_bytes = scene.to_json_string()?.into_bytes();
+        let mut companion_files = self.file_store.to_btree_map();
+        if self.doc.is_raw_mesh_path
+            && let Some(bytes) = self.doc.primary_bytes()
+        {
+            companion_files.insert(self.doc.file_label().to_string(), bytes.to_vec());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            for source in scene.sources.values() {
+                if !companion_files.contains_key(&source.file) {
+                    let source_path = self.doc.base_dir.join(&source.file);
+                    if let Ok(bytes) = fs::read(&source_path) {
+                        companion_files.insert(source.file.clone(), bytes.clone());
+                        if source.file.to_ascii_lowercase().ends_with(".pvd")
+                            && let Ok(entries) = tetraglass_io::parse_pvd_entries(&bytes)
+                        {
+                            let pvd_dir =
+                                source_path.parent().unwrap_or(self.doc.base_dir.as_path());
+                            for entry in entries {
+                                if !companion_files.contains_key(&entry.file)
+                                    && let Ok(step_bytes) = fs::read(pvd_dir.join(&entry.file))
+                                {
+                                    companion_files.insert(entry.file, step_bytes);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let label = if self
+            .doc
+            .file_label()
+            .to_ascii_lowercase()
+            .ends_with(".json")
+        {
+            self.doc.file_label().to_string()
+        } else {
+            format!("{}.scene.json", self.doc.file_label())
+        };
+        let spec = ShareableLinkSpec {
+            primary_url: None,
+            inline_scene: None,
+            inline_bundle: Some(InlineShareableBundle {
+                label,
+                primary_bytes: scene_bytes,
+                companion_files,
+            }),
+            data_urls: std::collections::BTreeMap::new(),
+            view_overrides: ShareableViewOverrides::default(),
+        };
+        spec.to_viewer_url(base_viewer_url)
+    }
+
     /// Replaces the active [`ViewerDocument`] and uploads its surfaces, camera, background, and
     /// annotations to the GPU [`ViewportState`] (`M3.1`).
     pub fn replace_document(
@@ -1403,6 +1627,7 @@ impl ViewerSession {
     ) -> Result<(), ViewerError> {
         self.is_playing = false;
         self.last_load_error = None;
+        self.last_shared_link = None;
         self.clip_generation = self.clip_generation.wrapping_add(1);
         self.active_exact_clip_surface = None;
         self.viewport.clear_pick();
@@ -1471,10 +1696,19 @@ impl ViewerSession {
     {
         let trimmed = url.trim();
         self.url_input = trimmed.to_string();
-        match ViewerDocument::from_url_with_fetcher(trimmed, fetcher) {
-            Ok(doc) => {
-                self.replace_document(doc, device, queue)?;
-                Ok(())
+        match fetch_url_bundle_with(trimmed, fetcher) {
+            Ok(bundle) => {
+                self.file_store = bundle.companion_files.clone();
+                match ViewerDocument::from_fetched_bundle(bundle) {
+                    Ok(doc) => {
+                        self.replace_document(doc, device, queue)?;
+                        Ok(())
+                    }
+                    Err(err) => {
+                        self.last_load_error = Some(err.to_string());
+                        Err(err)
+                    }
+                }
             }
             Err(err) => {
                 self.last_load_error = Some(err.to_string());
@@ -2000,6 +2234,7 @@ impl ViewerSession {
         let mut trigger_reload = false;
         let mut trigger_load_url = false;
         let mut trigger_reset_camera = false;
+        let mut trigger_copy_shareable_link = false;
         let mut trigger_clear_pick = false;
         let mut clip_drag_update: Option<([f64; 3], [f64; 3], ClipKeep)> = None;
         let mut clip_drag_finished = false;
@@ -2298,8 +2533,22 @@ impl ViewerSession {
                     "Camera: az {:.1}°, el {:.1}°, zoom {:.2}x",
                     cam.azimuth_deg, cam.elevation_deg, cam.zoom
                 ));
-                if ui.button("Reset camera").clicked() {
-                    trigger_reset_camera = true;
+                ui.horizontal(|ui| {
+                    if ui.button("Reset camera").clicked() {
+                        trigger_reset_camera = true;
+                    }
+                    if ui
+                        .button("Copy shareable link")
+                        .on_hover_text(
+                            "Copy a web-viewer URL containing the scene, data, and live view state",
+                        )
+                        .clicked()
+                    {
+                        trigger_copy_shareable_link = true;
+                    }
+                });
+                if self.last_shared_link.is_some() {
+                    ui.small("Copied shareable link to clipboard.");
                 }
 
                 // --- Value probe section ---
@@ -2403,6 +2652,24 @@ impl ViewerSession {
 
         if trigger_reset_camera {
             self.viewport.set_camera(self.doc.camera_from_scene());
+        }
+        if trigger_copy_shareable_link {
+            #[cfg(target_arch = "wasm32")]
+            let base_url = web_sys::window()
+                .and_then(|w| w.location().href().ok())
+                .unwrap_or_else(|| "http://localhost:8080/".to_string());
+            #[cfg(not(target_arch = "wasm32"))]
+            let base_url = "http://localhost:8080/".to_string();
+
+            match self.build_shareable_link(&base_url) {
+                Ok(link) => {
+                    ui.ctx().copy_text(link.clone());
+                    self.last_shared_link = Some(link);
+                }
+                Err(err) => {
+                    self.last_load_error = Some(err.to_string());
+                }
+            }
         }
         if trigger_clear_pick {
             self.viewport.clear_pick();

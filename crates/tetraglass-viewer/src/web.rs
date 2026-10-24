@@ -11,9 +11,9 @@ use tetraglass_io::{MeshFormat, parse_pvd_entries};
 use tetraglass_scene::Scene;
 
 use crate::web_support::{
-    FetchedUrlBundle, InMemoryFileStore, WebGpuStatus, detect_mesh_format,
-    extract_url_from_query_map, extract_url_from_query_str, is_json_label_or_bytes,
-    resolve_relative_url, url_display_label, webgpu_only_wgpu_configuration,
+    FetchedUrlBundle, InMemoryFileStore, ShareableLinkSpec, WebGpuStatus, detect_mesh_format,
+    is_json_label_or_bytes, resolve_relative_url, url_display_label,
+    webgpu_only_wgpu_configuration,
 };
 use crate::{ViewerApp, ViewerDocument};
 
@@ -203,23 +203,77 @@ pub async fn fetch_bytes_from_url(url: &str) -> Result<Vec<u8>, String> {
     Ok(js_sys::Uint8Array::new(&ab_val).to_vec())
 }
 
-/// Asynchronously fetches a scene JSON, `.pvd` collection, or raw `.vtu`/`.msh` mesh at `url`
-/// along with any referenced companion files over browser `fetch()`.
+/// Asynchronously fetches a scene JSON, `.pvd` collection, raw `.vtu`/`.msh` mesh, or full
+/// [`ShareableLinkSpec`] at `url` along with any referenced companion files over browser `fetch()`.
 pub async fn fetch_url_bundle_async(url: &str) -> Result<FetchedUrlBundle, String> {
-    let trimmed_url = url.trim();
-    if trimmed_url.is_empty() {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
         return Err("URL must not be empty".to_string());
     }
 
-    let primary_bytes = fetch_bytes_from_url(trimmed_url).await?;
-    let label = url_display_label(trimmed_url);
+    let spec = ShareableLinkSpec::from_url_or_query(trimmed)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no scene or mesh target found in `{trimmed}`"))?;
+
+    if let Some(ref inline_bundle) = spec.inline_bundle {
+        let mut companion_files = InMemoryFileStore::new();
+        for (k, v) in &inline_bundle.companion_files {
+            companion_files.insert(k, v.clone());
+        }
+        return Ok(FetchedUrlBundle {
+            url: spec
+                .primary_url
+                .clone()
+                .unwrap_or_else(|| format!("inline:{}", inline_bundle.label)),
+            label: inline_bundle.label.clone(),
+            primary_bytes: inline_bundle.primary_bytes.clone(),
+            companion_files,
+            view_overrides: spec.view_overrides,
+        });
+    }
+
+    let (base_url, label, primary_bytes) = if let Some(ref scene) = spec.inline_scene {
+        let json_bytes = scene
+            .to_json_string()
+            .map_err(|e| e.to_string())?
+            .into_bytes();
+        let base = spec.primary_url.clone();
+        let lbl = base
+            .as_deref()
+            .map_or_else(|| "shared_scene.json".to_string(), url_display_label);
+        (base, lbl, json_bytes)
+    } else if let Some(ref primary_url) = spec.primary_url {
+        let trimmed_url = primary_url.trim();
+        let bytes = fetch_bytes_from_url(trimmed_url).await?;
+        (
+            Some(trimmed_url.to_string()),
+            url_display_label(trimmed_url),
+            bytes,
+        )
+    } else {
+        return Err("shareable link has no scene, mesh URL, or inline bundle".to_string());
+    };
+
     let label_path = Path::new(&label);
     let mut companion_files = InMemoryFileStore::new();
 
     if is_json_label_or_bytes(label_path, &primary_bytes) {
         let scene = Scene::from_json_bytes(&primary_bytes).map_err(|e| e.to_string())?;
-        for source in scene.sources.values() {
-            let source_url = resolve_relative_url(trimmed_url, &source.file);
+        let total_sources = scene.sources.len();
+        for (source_name, source) in &scene.sources {
+            let source_url = spec
+                .resolve_source_url(
+                    source_name,
+                    &source.file,
+                    base_url.as_deref(),
+                    total_sources,
+                )
+                .ok_or_else(|| {
+                    format!(
+                        "cannot resolve relative source `{}` (`{}`) without a base URL or `?data=` parameter",
+                        source_name, source.file
+                    )
+                })?;
             let source_bytes = fetch_bytes_from_url(&source_url).await?;
             let explicit_format = source.format.map(MeshFormat::from);
             let is_pvd =
@@ -228,7 +282,12 @@ pub async fn fetch_url_bundle_async(url: &str) -> Result<FetchedUrlBundle, Strin
             if is_pvd {
                 let entries = parse_pvd_entries(&source_bytes).map_err(|e| e.to_string())?;
                 for entry in entries {
-                    let step_url = resolve_relative_url(&source_url, &entry.file);
+                    let step_url = spec
+                        .data_urls
+                        .get(&entry.file)
+                        .or_else(|| spec.data_urls.get(&url_display_label(&entry.file)))
+                        .cloned()
+                        .unwrap_or_else(|| resolve_relative_url(&source_url, &entry.file));
                     let step_bytes = fetch_bytes_from_url(&step_url).await?;
                     companion_files.insert(&entry.file, step_bytes.clone());
                     companion_files.insert(&step_url, step_bytes);
@@ -238,26 +297,36 @@ pub async fn fetch_url_bundle_async(url: &str) -> Result<FetchedUrlBundle, Strin
             companion_files.insert(&source_url, source_bytes);
         }
     } else if detect_mesh_format(label_path, &primary_bytes, None) == Some(MeshFormat::Pvd) {
+        let base_str = base_url.as_deref().unwrap_or("");
         let entries = parse_pvd_entries(&primary_bytes).map_err(|e| e.to_string())?;
         for entry in entries {
-            let step_url = resolve_relative_url(trimmed_url, &entry.file);
+            let step_url = spec
+                .data_urls
+                .get(&entry.file)
+                .or_else(|| spec.data_urls.get(&url_display_label(&entry.file)))
+                .cloned()
+                .unwrap_or_else(|| resolve_relative_url(base_str, &entry.file));
             let step_bytes = fetch_bytes_from_url(&step_url).await?;
             companion_files.insert(&entry.file, step_bytes.clone());
             companion_files.insert(&step_url, step_bytes);
         }
     } else if detect_mesh_format(label_path, &primary_bytes, None).is_none() {
-        return Err(format!("unknown mesh or scene format for `{trimmed_url}`"));
+        return Err(format!(
+            "unknown mesh or scene format for `{}`",
+            base_url.as_deref().unwrap_or(&label)
+        ));
     }
 
     Ok(FetchedUrlBundle {
-        url: trimmed_url.to_string(),
+        url: base_url.unwrap_or_else(|| label.clone()),
         label,
         primary_bytes,
         companion_files,
+        view_overrides: spec.view_overrides,
     })
 }
 
-/// JavaScript handle for controlling the Tetraglass WebGPU viewer (`M3.1`).
+/// JavaScript handle for controlling the Tetraglass WebGPU viewer (`M3.1`, `M3.2`).
 #[derive(Clone)]
 #[wasm_bindgen]
 pub struct WebViewerHandle {
@@ -317,9 +386,15 @@ impl WebViewerHandle {
             ..Default::default()
         };
 
-        let browser_query_url = web_sys::window()
-            .and_then(|w| w.location().search().ok())
-            .and_then(|q| extract_url_from_query_str(&q));
+        let browser_share_target = web_sys::window().and_then(|w| {
+            let search = w.location().search().ok().unwrap_or_default();
+            let hash = w.location().hash().ok().unwrap_or_default();
+            let combined = format!("{search}{hash}");
+            ShareableLinkSpec::from_url_or_query(&combined)
+                .ok()
+                .flatten()
+                .map(|_| combined)
+        });
 
         let start_res = self
             .runner
@@ -327,15 +402,19 @@ impl WebViewerHandle {
                 canvas,
                 web_options,
                 Box::new(move |cc| {
-                    let initial_url = extract_url_from_query_map(
-                        &cc.integration_info.web_info.location.query_map,
-                    )
-                    .or(browser_query_url);
+                    let initial_target = browser_share_target.or_else(|| {
+                        ShareableLinkSpec::from_query_map(
+                            &cc.integration_info.web_info.location.query_map,
+                        )
+                        .ok()
+                        .flatten()
+                        .and_then(|spec| spec.to_viewer_url("").ok())
+                    });
                     let doc = ViewerDocument::default_demo()?;
                     let mut app = ViewerApp::new(cc, doc, None)?;
-                    if let Some(url) = initial_url {
+                    if let Some(target) = initial_target {
                         app.session_mut()
-                            .request_load_url(&url, Some(cc.egui_ctx.clone()));
+                            .request_load_url(&target, Some(cc.egui_ctx.clone()));
                     }
                     Ok(Box::new(app))
                 }),
@@ -352,12 +431,23 @@ impl WebViewerHandle {
         start_res
     }
 
-    /// Triggers an asynchronous load of a `.vtu`, `.msh`, `.pvd`, or `.json` scene from `url`.
+    /// Triggers an asynchronous load of a `.vtu`, `.msh`, `.pvd`, `.json` scene, or shareable link from `url`.
     #[wasm_bindgen]
     pub fn load_url(&self, url: &str) {
         if let Some(mut app) = self.runner.app_mut::<ViewerApp>() {
             app.session_mut().request_load_url(url, None);
         }
+    }
+
+    /// Generates a shareable viewer URL for the currently open scene, data, and camera state (`M3.2`).
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn shareable_link(&self) -> Option<String> {
+        let base_url = web_sys::window()
+            .and_then(|w| w.location().href().ok())
+            .unwrap_or_else(|| "http://localhost:8080/".to_string());
+        let app = self.runner.app_mut::<ViewerApp>()?;
+        app.session().build_shareable_link(&base_url).ok()
     }
 
     /// Shuts down the viewer and releases WebGPU resources.
