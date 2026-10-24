@@ -24,6 +24,27 @@
 //!   - Cell types & node ordering: linear (`1..=7, 15`), quadratic serendipity (`8, 9, 11, 16..=19`),
 //!     complete quadratic (`10, 12, 13`), and cubic (`21, 26`) elements permuted into VTK canonical
 //!     node ordering via [`gmsh_element_spec`].
+//!
+//! # Examples
+//!
+//! Round-tripping an [`UnstructuredGrid`](tetraglass_core::UnstructuredGrid) through in-memory
+//! `.vtu` bytes (works identically on native and `wasm32-unknown-unknown`):
+//!
+//! ```
+//! use tetraglass_core::{SyntheticCellLayout, SyntheticGridSpec};
+//! use tetraglass_io::{read_vtu, write_vtu_to_bytes};
+//!
+//! let grid = SyntheticGridSpec::new(2, 2, 2, SyntheticCellLayout::Hexahedra)
+//!     .generate()
+//!     .expect("valid synthetic grid");
+//! let vtu_bytes = write_vtu_to_bytes(&grid)?;
+//! let loaded = read_vtu(&vtu_bytes)?;
+//!
+//! assert_eq!(loaded.num_points(), grid.num_points());
+//! assert_eq!(loaded.num_cells(), grid.num_cells());
+//! assert!(loaded.point_data().get("linear").is_some());
+//! # Ok::<(), tetraglass_io::IoError>(())
+//! ```
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;

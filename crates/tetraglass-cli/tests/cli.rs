@@ -608,3 +608,79 @@ fn gallery_scenes_and_author_scene_skill_example_validate_and_match_baselines() 
     assert_eq!(skill_img.width(), 800);
     assert_eq!(skill_img.height(), 600);
 }
+
+#[test]
+fn mdbook_guide_and_gallery_cover_all_filters_and_chapters_exist() {
+    let root = workspace_root();
+    let book_dir = root.join("docs/book");
+    assert!(
+        book_dir.join("book.toml").is_file(),
+        "missing docs/book/book.toml"
+    );
+
+    let src_dir = book_dir.join("src");
+    let summary =
+        std::fs::read_to_string(src_dir.join("SUMMARY.md")).expect("read docs/book/src/SUMMARY.md");
+
+    let required_chapters = [
+        "introduction.md",
+        "getting-started.md",
+        "embedding.md",
+        "scene-format.md",
+        "filters.md",
+        "gallery.md",
+    ];
+    for chapter in required_chapters {
+        assert!(
+            summary.contains(chapter),
+            "SUMMARY.md must link to `{chapter}`"
+        );
+        let path = src_dir.join(chapter);
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        assert!(
+            content.lines().count() >= 25,
+            "chapter `{chapter}` is unexpectedly short ({} lines)",
+            content.lines().count()
+        );
+    }
+
+    let gallery_readme =
+        std::fs::read_to_string(root.join("gallery/README.md")).expect("read gallery/README.md");
+    let gallery_book =
+        std::fs::read_to_string(src_dir.join("gallery.md")).expect("read docs/book/src/gallery.md");
+
+    let mut seen_filter_types = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(root.join("gallery")).expect("read gallery/") {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let filename = path.file_name().unwrap().to_str().unwrap();
+        assert!(
+            gallery_readme.contains(filename),
+            "gallery/README.md is missing `{filename}`"
+        );
+        assert!(
+            gallery_book.contains(filename),
+            "docs/book/src/gallery.md is missing `{filename}`"
+        );
+        let raw = std::fs::read_to_string(&path).expect("read gallery json");
+        let val: serde_json::Value = serde_json::from_str(&raw).expect("parse gallery json");
+        if let Some(filters) = val.get("filters").and_then(|f| f.as_object()) {
+            for (_, fdef) in filters {
+                if let Some(ty) = fdef.get("type").and_then(|t| t.as_str()) {
+                    seen_filter_types.insert(ty.to_owned());
+                }
+            }
+        }
+    }
+
+    for expected_filter in ["surface", "slice", "contour", "clip", "threshold"] {
+        assert!(
+            seen_filter_types.contains(expected_filter),
+            "gallery/ scenes do not cover filter type `{expected_filter}`"
+        );
+    }
+}

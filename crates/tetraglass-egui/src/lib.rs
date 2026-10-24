@@ -9,6 +9,37 @@
 //!   [`egui_wgpu::CallbackTrait::prepare`].
 //! - Scene geometry is never drawn inside `egui`'s render pass (`CallbackTrait::paint` is a no-op);
 //!   instead, the resolved offscreen target is displayed as a registered `egui::TextureId`.
+//!
+//! # Examples
+//!
+//! Inspecting the field options exposed for an `egui` toolbar and embedding [`ViewportWidget`]
+//! inside an `eframe::App`:
+//!
+//! ```
+//! use tetraglass_core::{SyntheticCellLayout, SyntheticGridSpec};
+//! use tetraglass_egui::{ViewportState, ViewportWidget, available_field_options};
+//! use tetraglass_filters::extract_external_surface;
+//! use tetraglass_render::{ColorBy, ColormapKind, SurfaceStyle};
+//!
+//! let grid = SyntheticGridSpec::new(2, 2, 2, SyntheticCellLayout::Hexahedra).generate()?;
+//! let surface = extract_external_surface(&grid)?;
+//!
+//! let options = available_field_options(&surface);
+//! assert!(options.iter().any(|opt| opt.label == "Point: linear"));
+//!
+//! // Inside your eframe::App::new(cc):
+//! // let render_state = cc.wgpu_render_state.as_ref().expect("wgpu backend");
+//! // let mut viewport = ViewportState::new(&render_state.device, &render_state.queue)?;
+//! // viewport.set_surface(&render_state.device, &surface, &SurfaceStyle {
+//! //     color_by: ColorBy::point("linear"),
+//! //     colormap: ColormapKind::Viridis,
+//! //     ..SurfaceStyle::default()
+//! // })?;
+//! //
+//! // Inside your eframe::App::ui(ui, frame):
+//! // ViewportWidget::new(&mut self.viewport).show(ui);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use std::sync::{Arc, Mutex};
 

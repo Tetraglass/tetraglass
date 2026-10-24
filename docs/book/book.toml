@@ -1,0 +1,12 @@
+[book]
+title = "Tetraglass Guide"
+description = "User and developer guide for Tetraglass, a Rust-native scientific visualization library for FEM/CFD results on unstructured meshes."
+authors = ["Tetraglass Contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/Tetraglass/tetraglass"
+edit-url-template = "https://github.com/Tetraglass/tetraglass/edit/main/docs/book/{path}"
+default-theme = "navy"
+preferred-dark-theme = "navy"

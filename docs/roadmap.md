@@ -52,7 +52,7 @@ Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 next.**
 - [x] **M2.7 Picking.** GPU ID buffer; value probe in the widget and viewer.
 - [x] **M2.8 Interactive clipping.** Shader clip plane while dragging; exact clip on a worker thread, swapped in when ready.
 - [x] **M2.9 Performance pass.** Meet the M1.9 target or record what was cut.
-- [ ] **M2.10 Documentation.** mdBook guide (getting started, embedding, scene format, filters), rustdoc examples, gallery covering every filter.
+- [x] **M2.10 Documentation.** mdBook guide (getting started, embedding, scene format, filters), rustdoc examples, gallery covering every filter.
 - [ ] **M2.11 Gate and release 0.1.** `/milestone-gate`.
 
 ## M3 Web and export (Aug–Oct 2027)

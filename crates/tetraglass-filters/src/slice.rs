@@ -9,7 +9,7 @@ use crate::linearize::{LinearizeParams, linearize};
 use crate::marching_tets::{DEFAULT_TET_CHUNK_SIZE, extract_isosurfaces_with_chunk_size};
 use crate::surface::FilterError;
 
-/// Parameters for the plane [`slice`] filter (`docs/scene-format.md`).
+/// Parameters for the plane [`slice()`] filter (`docs/scene-format.md`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SliceParams {
     /// Point on the slice plane in world coordinates. When `None`, defaults to the center of the

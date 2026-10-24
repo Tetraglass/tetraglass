@@ -317,8 +317,8 @@ pub struct PolyhedronFaces {
 impl PolyhedronFaces {
     /// Creates a new polyhedron face-stream container without validating against a grid.
     ///
-    /// Full structural validation is performed when constructing an [`UnstructuredGrid`](crate::UnstructuredGrid)
-    /// or via [`PolyhedronFaces::validate`].
+    /// Full structural validation is performed when constructing an
+    /// [`UnstructuredGrid`](crate::UnstructuredGrid).
     #[must_use]
     pub fn new(face_offsets: Vec<u32>, faces: Vec<u32>) -> Self {
         Self {

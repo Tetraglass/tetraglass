@@ -290,3 +290,11 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: all M1.9 / D-019 performance targets met with wide headroom; nothing cut.
 - Dependencies added: none.
 - Follow-ups: M2.10 Documentation.
+
+## 2026-10-24 — M2.10 Documentation
+
+- Done: authored the mdBook user and developer guide in `docs/book/` (`book.toml`, `src/SUMMARY.md`, `src/introduction.md`, `src/getting-started.md`, `src/embedding.md`, `src/scene-format.md`, `src/filters.md`, and `src/gallery.md`); added runnable crate-level rustdoc examples (`//! # Examples`) to `tetraglass-core`, `tetraglass-io`, `tetraglass-filters`, `tetraglass-render`, and `tetraglass-egui`; fixed all intra-doc link warnings so `cargo doc --workspace --no-deps` builds cleanly with zero warnings; updated the root `README.md` with CLI/Rust quickstarts, workspace crate table, and documentation links.
+- Tests: crate-level doctests across `tetraglass-core`, `tetraglass-io`, `tetraglass-filters`, `tetraglass-scene`, `tetraglass-render`, and `tetraglass-egui`, plus `mdbook_guide_and_gallery_cover_all_filters_and_chapters_exist` in `crates/tetraglass-cli/tests/cli.rs` verifying all mdBook chapters and gallery coverage across all five filter types (`surface`, `slice`, `contour`, `clip`, `threshold`).
+- Decisions: none.
+- Dependencies added: none.
+- Follow-ups: M2.11 Gate and release 0.1 (`/milestone-gate`).

@@ -4,6 +4,40 @@
 //! GPU crates (`wgpu`), GUI crates (`egui`), filesystem I/O, or native C libraries.
 //!
 //! See `docs/design-plan.md` in the repository for how this crate fits the architecture.
+//!
+//! # Examples
+//!
+//! Constructing a single-tetrahedron [`UnstructuredGrid`] with a point scalar array and
+//! querying its cached bounding box and value range:
+//!
+//! ```
+//! use tetraglass_core::{CellType, ComponentCount, DataArray, UnstructuredGrid};
+//!
+//! let points = vec![
+//!     [0.0, 0.0, 0.0],
+//!     [1.0, 0.0, 0.0],
+//!     [0.0, 1.0, 0.0],
+//!     [0.0, 0.0, 1.0],
+//! ];
+//! let mut grid = UnstructuredGrid::new(
+//!     points,
+//!     vec![CellType::Tetra],
+//!     vec![4],
+//!     vec![0, 1, 2, 3],
+//!     None,
+//! )?;
+//! grid.point_data_mut().insert(
+//!     "temperature",
+//!     DataArray::from_f64(ComponentCount::Scalar, vec![300.0, 310.0, 320.0, 350.0])?,
+//! )?;
+//!
+//! assert_eq!(grid.num_points(), 4);
+//! assert_eq!(grid.num_cells(), 1);
+//! assert_eq!(grid.bounds().unwrap().min, [0.0, 0.0, 0.0]);
+//! let temp_range = grid.point_data().get("temperature").unwrap().component_range(0).unwrap();
+//! assert_eq!((temp_range.min, temp_range.max), (300.0, 350.0));
+//! # Ok::<(), tetraglass_core::CoreError>(())
+//! ```
 
 mod array;
 mod cell;
