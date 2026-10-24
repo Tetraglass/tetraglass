@@ -64,3 +64,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let shaded_rgb = shade_three_point(base_color.rgb, in.world_pos, in.world_normal, frame);
     return vec4<f32>(shaded_rgb, base_color.a);
 }
+
+struct EdgeVertexInput {
+    @location(0) position: vec3<f32>,
+};
+
+struct EdgeVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+};
+
+@vertex
+fn vs_edge(in: EdgeVertexInput) -> EdgeVertexOutput {
+    var out: EdgeVertexOutput;
+    var clip = frame.view_proj * vec4<f32>(in.position, 1.0);
+    // Apply a small clip-space depth offset toward the camera so wireframe edges sit cleanly
+    // on top of coplanar surface triangles without z-fighting.
+    clip.z = max(clip.z - 0.0005 * clip.w, 0.0);
+    out.clip_position = clip;
+    return out;
+}
+
+@fragment
+fn fs_edge(_in: EdgeVertexOutput) -> @location(0) vec4<f32> {
+    return surface.edge_color;
+}

@@ -115,6 +115,12 @@ pub struct SurfaceStyle {
     pub use_log_scale: bool,
     /// Fallback / solid color in sRGB `[r, g, b, a]` (`0.0..=1.0`).
     pub solid_color_srgb: [f32; 4],
+    /// Whether to draw the shaded triangle faces (`true` for `Surface` and `SurfaceWithEdges`).
+    pub draw_surface: bool,
+    /// Whether to draw original element wireframe edges (`true` for `SurfaceWithEdges` and `Wireframe`).
+    pub draw_edges: bool,
+    /// Wireframe edge color in sRGB `[r, g, b, a]` (`0.0..=1.0`).
+    pub edge_color_srgb: [f32; 4],
 }
 
 impl Default for SurfaceStyle {
@@ -125,6 +131,9 @@ impl Default for SurfaceStyle {
             range: None,
             use_log_scale: false,
             solid_color_srgb: [0.82, 0.83, 0.86, 1.0],
+            draw_surface: true,
+            draw_edges: false,
+            edge_color_srgb: [0.12, 0.14, 0.18, 1.0],
         }
     }
 }
@@ -356,6 +365,7 @@ struct SurfaceUniforms {
     coloring_mode: u32,
     use_log_scale: u32,
     solid_color: [f32; 4],
+    edge_color: [f32; 4],
 }
 
 /// Uploaded GPU buffers and bind group for a [`SurfaceMesh`].
@@ -370,14 +380,18 @@ pub struct GpuSurface {
     dataset_center: [f64; 3],
     bounds: Option<BoundingBox>,
     vertex_count: u32,
+    edge_vertex_count: u32,
     num_triangles: usize,
     geometry_buffer: wgpu::Buffer,
+    edge_vertex_buffer: wgpu::Buffer,
     scalar_buffer: wgpu::Buffer,
     cell_scalar_buffer: wgpu::Buffer,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     active_color_by: ColorBy,
     active_colormap: ColormapKind,
+    draw_surface: bool,
+    draw_edges: bool,
     data_range: [f64; 2],
     effective_range: [f64; 2],
 }
@@ -399,6 +413,12 @@ impl GpuSurface {
     #[must_use]
     pub const fn vertex_count(&self) -> u32 {
         self.vertex_count
+    }
+
+    /// Returns the number of wireframe line vertices (`2 * num_wireframe_edges`) in the GPU edge buffer.
+    #[must_use]
+    pub const fn edge_vertex_count(&self) -> u32 {
+        self.edge_vertex_count
     }
 
     /// Returns the currently active [`ColormapKind`].
@@ -433,6 +453,7 @@ pub struct Renderer {
     frame_bind_groups: [wgpu::BindGroup; 3],
     surface_bind_group_layout: wgpu::BindGroupLayout,
     surface_pipeline: wgpu::RenderPipeline,
+    edge_pipeline: wgpu::RenderPipeline,
     annotation_uniform_buffer: wgpu::Buffer,
     annotation_sampler: wgpu::Sampler,
     annotation_bind_group_layout: wgpu::BindGroupLayout,
@@ -672,6 +693,60 @@ impl Renderer {
             cache: None,
         });
 
+        let edge_vertex_buffers = [Some(wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<[f32; 3]>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
+            }],
+        })];
+
+        let edge_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("tetraglass_edge_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_edge"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &edge_vertex_buffers,
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_edge"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let annotation_shader_source = concat!(
             include_str!("shaders/common.wgsl"),
             "\n",
@@ -818,6 +893,7 @@ impl Renderer {
             frame_bind_groups,
             surface_bind_group_layout,
             surface_pipeline,
+            edge_pipeline,
             annotation_uniform_buffer,
             annotation_sampler,
             annotation_bind_group_layout,
@@ -889,6 +965,27 @@ impl Renderer {
             geom_vertices.push(SurfaceGeometryVertex::zeroed());
         }
 
+        let wireframe_edges = surface.wireframe_edges();
+        let edge_vertex_count_usize = wireframe_edges.len() * 2;
+        let edge_vertex_count = u32::try_from(edge_vertex_count_usize).map_err(|_| {
+            tetraglass_core::CoreError::IndexOverflow {
+                value: edge_vertex_count_usize as u64,
+            }
+        })?;
+        let mut edge_vertices: Vec<[f32; 3]> = Vec::with_capacity(edge_vertex_count_usize.max(1));
+        for &[i0, i1] in wireframe_edges {
+            for p in [points[i0 as usize], points[i1 as usize]] {
+                edge_vertices.push([
+                    (p[0] - dataset_center[0]) as f32,
+                    (p[1] - dataset_center[1]) as f32,
+                    (p[2] - dataset_center[2]) as f32,
+                ]);
+            }
+        }
+        if edge_vertices.is_empty() {
+            edge_vertices.push([0.0, 0.0, 0.0]);
+        }
+
         let extracted = extract_scalars(surface, &style.color_by)?;
 
         let effective_range = style.range.unwrap_or(extracted.data_range);
@@ -897,11 +994,18 @@ impl Renderer {
             extracted.coloring_mode,
             style.use_log_scale,
             style.solid_color_srgb,
+            style.edge_color_srgb,
         );
 
         let geometry_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("tetraglass_surface_geometry"),
             contents: bytemuck::cast_slice(&geom_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let edge_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("tetraglass_surface_edges"),
+            contents: bytemuck::cast_slice(&edge_vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
@@ -942,14 +1046,18 @@ impl Renderer {
             dataset_center,
             bounds: surface.bounds(),
             vertex_count,
+            edge_vertex_count,
             num_triangles,
             geometry_buffer,
+            edge_vertex_buffer,
             scalar_buffer,
             cell_scalar_buffer,
             uniform_buffer,
             bind_group,
             active_color_by: style.color_by.clone(),
             active_colormap: style.colormap,
+            draw_surface: style.draw_surface,
+            draw_edges: style.draw_edges,
             data_range: extracted.data_range,
             effective_range,
         })
@@ -995,6 +1103,7 @@ impl Renderer {
             coloring_mode,
             style.use_log_scale,
             style.solid_color_srgb,
+            style.edge_color_srgb,
         );
         queue.write_buffer(
             &gpu_surface.uniform_buffer,
@@ -1002,6 +1111,8 @@ impl Renderer {
             bytemuck::bytes_of(&uniforms),
         );
         gpu_surface.active_colormap = style.colormap;
+        gpu_surface.draw_surface = style.draw_surface;
+        gpu_surface.draw_edges = style.draw_edges;
         gpu_surface.effective_range = effective_range;
         Ok(())
     }
@@ -1194,7 +1305,7 @@ impl Renderer {
 
         pass.set_pipeline(&self.surface_pipeline);
         for surface in surfaces {
-            if surface.vertex_count == 0 {
+            if !surface.draw_surface || surface.vertex_count == 0 {
                 continue;
             }
             let cm_idx = match surface.active_colormap {
@@ -1207,6 +1318,27 @@ impl Renderer {
             pass.set_vertex_buffer(0, surface.geometry_buffer.slice(..));
             pass.set_vertex_buffer(1, surface.scalar_buffer.slice(..));
             pass.draw(0..surface.vertex_count, 0..1);
+        }
+
+        if surfaces
+            .iter()
+            .any(|s| s.draw_edges && s.edge_vertex_count > 0)
+        {
+            pass.set_pipeline(&self.edge_pipeline);
+            for surface in surfaces {
+                if !surface.draw_edges || surface.edge_vertex_count == 0 {
+                    continue;
+                }
+                let cm_idx = match surface.active_colormap {
+                    ColormapKind::Viridis => 0,
+                    ColormapKind::Cividis => 1,
+                    ColormapKind::CoolWarm => 2,
+                };
+                pass.set_bind_group(0, &self.frame_bind_groups[cm_idx], &[]);
+                pass.set_bind_group(1, &surface.bind_group, &[]);
+                pass.set_vertex_buffer(0, surface.edge_vertex_buffer.slice(..));
+                pass.draw(0..surface.edge_vertex_count, 0..1);
+            }
         }
 
         if let Some((ref vbuf, ref bg, vcount)) = prepared_annotations {
@@ -1225,6 +1357,7 @@ fn build_surface_uniforms(
     coloring_mode: u32,
     use_log_scale: bool,
     solid_color_srgb: [f32; 4],
+    edge_color_srgb: [f32; 4],
 ) -> SurfaceUniforms {
     SurfaceUniforms {
         range_min: range[0] as f32,
@@ -1236,6 +1369,12 @@ fn build_surface_uniforms(
             srgb_channel_to_linear(solid_color_srgb[1]),
             srgb_channel_to_linear(solid_color_srgb[2]),
             solid_color_srgb[3],
+        ],
+        edge_color: [
+            srgb_channel_to_linear(edge_color_srgb[0]),
+            srgb_channel_to_linear(edge_color_srgb[1]),
+            srgb_channel_to_linear(edge_color_srgb[2]),
+            edge_color_srgb[3],
         ],
     }
 }

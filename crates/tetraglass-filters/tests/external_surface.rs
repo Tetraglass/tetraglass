@@ -4,8 +4,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tetraglass_core::{ArrayBuffer, SyntheticCellLayout, SyntheticGridSpec, UnstructuredGrid};
-use tetraglass_filters::extract_external_surface;
+use tetraglass_core::{
+    ArrayBuffer, CellType, ComponentCount, DataArray, SyntheticCellLayout, SyntheticGridSpec,
+    UnstructuredGrid,
+};
+use tetraglass_filters::{extract_external_surface, extract_external_surface_with_subdivisions};
 use tetraglass_io::{read_vtu, read_vtu_from_path, write_vtu_to_bytes};
 
 fn vtk_dir() -> PathBuf {
@@ -59,8 +62,11 @@ fn mixed_linear_has_no_internal_faces_and_maps_cell_data() {
     // = 10 quads + 10 tris = 20 cell faces;
     // 4 shared internal faces (2 shared quads = 4 cell quads; 2 shared tris = 4 cell tris) ->
     // 6 external quads + 6 external tris = 12 external faces = 6 * 2 + 6 = 18 triangles.
+    // The 12 external faces have 11 vertices and (by Euler V - E + F = 2) 11 + 12 - 2 = 21
+    // original element edges (whereas all 18 triangles have 27 edges including the 6 quad diagonals).
     assert_eq!(surface.num_faces(), 12);
     assert_eq!(surface.num_triangles(), 18);
+    assert_eq!(surface.num_wireframe_edges(), 21);
 
     // Verify none of the 4 internal shared faces are present:
     // - hex/wedge shared quad at x = 1, z in [0, 1]: vertices {1, 2, 5, 6}
@@ -110,20 +116,40 @@ fn covers_all_cell_families_in_testdata() {
     assert_eq!(surf_tet_lin.num_triangles(), 12);
     assert!((surf_tet_lin.total_area() - 6.0).abs() < 1e-12);
 
-    // 2. Quadratic tetrahedra on [0, 1]^3 (corner-node stopgap): 12 outer triangles, area = 6.0
+    // 2. Quadratic tetrahedra on [0, 1]^3:
+    // 12 outer triangle faces, each tessellated into S^2 = 4 sub-triangles at default S = 2
+    // (48 triangles total, area = 6.0), and 18 original outer element edges * 2 = 36 wireframe segments.
     let tet_quad = read_vtu_from_path(dir.join("tet_quadratic.vtu")).unwrap();
     let surf_tet_quad = extract_external_surface(&tet_quad).unwrap();
     assert_eq!(surf_tet_quad.num_faces(), 12);
-    assert_eq!(surf_tet_quad.num_triangles(), 12);
+    assert_eq!(surf_tet_quad.num_triangles(), 48);
+    assert_eq!(surf_tet_quad.num_wireframe_edges(), 36);
     assert!((surf_tet_quad.total_area() - 6.0).abs() < 1e-12);
 
-    // 3. Third-order Lagrange hexahedra on [0, 2] x [0, 1]^2 (corner-node stopgap):
-    // 2 hexes sharing 1 internal face -> 10 external quad faces = 20 triangles, area = 10.0
+    // At S = 1, higher-order faces use only corner nodes (12 triangles, 18 wireframe edges).
+    let surf_tet_quad_s1 = extract_external_surface_with_subdivisions(&tet_quad, 1).unwrap();
+    assert_eq!(surf_tet_quad_s1.num_faces(), 12);
+    assert_eq!(surf_tet_quad_s1.num_triangles(), 12);
+    assert_eq!(surf_tet_quad_s1.num_wireframe_edges(), 18);
+
+    // 3. Third-order Lagrange hexahedra on [0, 2] x [0, 1]^2:
+    // 2 hexes sharing 1 internal face -> 10 external quad faces.
+    // At default S = 2: each quad face is tessellated into 2 * S^2 = 8 sub-triangles (80 triangles),
+    // and the 20 original outer element edges are split into 20 * 2 = 40 wireframe segments.
     let hex_lag = read_vtu_from_path(dir.join("hex_lagrange_p3.vtu")).unwrap();
     let surf_hex_lag = extract_external_surface(&hex_lag).unwrap();
     assert_eq!(surf_hex_lag.num_faces(), 10);
-    assert_eq!(surf_hex_lag.num_triangles(), 20);
+    assert_eq!(surf_hex_lag.num_triangles(), 80);
+    assert_eq!(surf_hex_lag.num_wireframe_edges(), 40);
     assert!((surf_hex_lag.total_area() - 10.0).abs() < 1e-12);
+
+    // At S = 3 (matching order = 3): 10 * 2 * 9 = 180 triangles, 20 * 3 = 60 wireframe segments,
+    // and every face lattice node coincides with an existing VTK p3 node (zero new points allocated).
+    let surf_hex_lag_s3 = extract_external_surface_with_subdivisions(&hex_lag, 3).unwrap();
+    assert_eq!(surf_hex_lag_s3.num_faces(), 10);
+    assert_eq!(surf_hex_lag_s3.num_triangles(), 180);
+    assert_eq!(surf_hex_lag_s3.num_wireframe_edges(), 60);
+    assert_eq!(surf_hex_lag_s3.num_points(), hex_lag.num_points());
 
     // 4. Polyhedra: 6-face cube + 7-face beveled prism sharing 1 quad face ->
     // 11 external polygon faces (9 quads + 2 pentagons = 18 + 6 = 24 triangles).
@@ -170,4 +196,73 @@ fn synthetic_tet_and_hex_grids_have_exact_boundary_faces_and_zero_internal_faces
         hex_spec.expected_boundary_faces() * 2
     );
     assert!((hex_surf.total_area() - 6.0).abs() < 1e-11);
+}
+
+#[test]
+fn curved_higher_order_surface_converges_and_excludes_internal_wireframe_edges() {
+    // Build a 10-node QuadraticTetra whose mid-edge node 4 on edge (0 -> 1) is bowed outward
+    // in -y by dy = -0.35, curving the bottom and front triangle faces.
+    let mut points = vec![
+        [0.0, 0.0, 0.0], // 0
+        [1.0, 0.0, 0.0], // 1
+        [0.0, 1.0, 0.0], // 2
+        [0.0, 0.0, 1.0], // 3
+        [0.5, 0.0, 0.0], // 4: (0,1)
+        [0.5, 0.5, 0.0], // 5: (1,2)
+        [0.0, 0.5, 0.0], // 6: (2,0)
+        [0.0, 0.0, 0.5], // 7: (0,3)
+        [0.5, 0.0, 0.5], // 8: (1,3)
+        [0.0, 0.5, 0.5], // 9: (2,3)
+    ];
+    let quad_vals: Vec<f64> = points
+        .iter()
+        .map(|&[r, s, t]| 1.0 + 2.0 * r * r - 1.5 * r * s + 3.0 * s * t + 0.5 * t * t)
+        .collect();
+    points[4][1] = -0.35;
+
+    let mut grid = UnstructuredGrid::new(
+        points,
+        vec![CellType::QuadraticTetra],
+        vec![10],
+        (0..10).collect(),
+        None,
+    )
+    .unwrap();
+    grid.insert_point_data(
+        "q",
+        DataArray::from_f64(ComponentCount::Scalar, quad_vals).unwrap(),
+    )
+    .unwrap();
+
+    let s1 = extract_external_surface_with_subdivisions(&grid, 1).unwrap();
+    let s2 = extract_external_surface_with_subdivisions(&grid, 2).unwrap();
+    let s4 = extract_external_surface_with_subdivisions(&grid, 4).unwrap();
+
+    // 4 logical outer faces, subdivided into 4 * S^2 triangles;
+    // 6 original tetrahedron edges, segmented into 6 * S wireframe segments (no interior edges!).
+    assert_eq!(s1.num_faces(), 4);
+    assert_eq!(s1.num_triangles(), 4);
+    assert_eq!(s1.num_wireframe_edges(), 6);
+
+    assert_eq!(s2.num_faces(), 4);
+    assert_eq!(s2.num_triangles(), 16);
+    assert_eq!(s2.num_wireframe_edges(), 12);
+
+    assert_eq!(s4.num_faces(), 4);
+    assert_eq!(s4.num_triangles(), 64);
+    assert_eq!(s4.num_wireframe_edges(), 24);
+
+    // Curved surface area strictly increases from S=1 (flat corners) -> S=2 -> S=4 as the
+    // parabolic boundary curve is resolved.
+    let area1 = s1.total_area();
+    let area2 = s2.total_area();
+    let area4 = s4.total_area();
+    assert!(
+        area2 > area1 + 0.15,
+        "S=2 surface area ({area2}) must exceed S=1 flat-corner area ({area1})"
+    );
+    assert!(
+        area4 > area2 + 0.01,
+        "S=4 surface area ({area4}) must refine S=2 area ({area2})"
+    );
 }

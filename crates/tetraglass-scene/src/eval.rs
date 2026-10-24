@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tetraglass_core::{
     ArrayBuffer, Attributes, BoundingBox, SurfaceMesh, TimeSeries, UnstructuredGrid, ValueRange,
 };
-use tetraglass_filters::extract_external_surface;
+use tetraglass_filters::{DEFAULT_SUBDIVISIONS, extract_external_surface_with_subdivisions};
 use tetraglass_io::IoError;
 
 use crate::{
@@ -418,7 +418,9 @@ impl SceneEvaluator {
                 Filter::Surface { input } => {
                     let (upstream_hash, upstream_data) = self.evaluate_dataset(scene, input)?;
                     let surface_hash = hash_surface_extraction(upstream_hash);
-                    let surface = self.get_or_extract_surface(surface_hash, upstream_data)?;
+                    let subdivisions = resolve_source_subdivisions(scene, input);
+                    let surface =
+                        self.get_or_extract_surface(surface_hash, upstream_data, subdivisions)?;
                     return Ok((surface_hash, EvaluatedDataset::Surface(surface)));
                 }
             }
@@ -444,7 +446,8 @@ impl SceneEvaluator {
             EvaluatedDataset::Surface(surface) => Ok((node_hash, surface)),
             other @ EvaluatedDataset::Grid(_) => {
                 let surface_hash = hash_surface_extraction(node_hash);
-                let surface = self.get_or_extract_surface(surface_hash, other)?;
+                let subdivisions = resolve_source_subdivisions(scene, dataset_name);
+                let surface = self.get_or_extract_surface(surface_hash, other, subdivisions)?;
                 Ok((surface_hash, surface))
             }
         }
@@ -454,6 +457,7 @@ impl SceneEvaluator {
         &mut self,
         surface_hash: PipelineHash,
         upstream_data: EvaluatedDataset,
+        subdivisions: u8,
     ) -> Result<Arc<SurfaceMesh>, SceneError> {
         if let Some(cached) = self.surface_cache.get(&surface_hash) {
             self.cache_hits += 1;
@@ -462,7 +466,10 @@ impl SceneEvaluator {
 
         self.filter_executions += 1;
         let surface = match upstream_data {
-            EvaluatedDataset::Grid(grid) => Arc::new(extract_external_surface(&grid)?),
+            EvaluatedDataset::Grid(grid) => Arc::new(extract_external_surface_with_subdivisions(
+                &grid,
+                subdivisions,
+            )?),
             EvaluatedDataset::Surface(surf) => surf,
         };
         self.surface_cache
@@ -609,6 +616,14 @@ impl SceneEvaluator {
             time_value: resolved_time,
         })
     }
+}
+
+fn resolve_source_subdivisions(scene: &Scene, dataset_name: &str) -> u8 {
+    find_root_source_name(dataset_name, scene)
+        .and_then(|src_name| scene.sources.get(src_name))
+        .map_or(DEFAULT_SUBDIVISIONS, |src| {
+            u8::try_from(src.linearize_level.clamp(1, 32)).unwrap_or(DEFAULT_SUBDIVISIONS)
+        })
 }
 
 fn find_root_source_name<'a>(dataset_name: &'a str, scene: &'a Scene) -> Option<&'a str> {

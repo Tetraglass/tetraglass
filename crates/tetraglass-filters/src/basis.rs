@@ -304,11 +304,152 @@ pub fn lagrange_wedge_lattice_nodes(order: u8) -> Vec<[u8; 4]> {
     nodes
 }
 
-/// Evaluates the nodal shape functions $N_0(r, s, t), \dots, N_{n-1}(r, s, t)$ for a 3D
+/// Returns the `(i, j, l0)` barycentric integer lattice coordinates (`i + j + l0 == order`)
+/// for each VTK node slot of a [`CellType::LagrangeTriangle`] of degree `order`.
+#[must_use]
+pub fn lagrange_tri_lattice_nodes(order: u8) -> Vec<[u8; 3]> {
+    let p = order;
+    let n = (p as usize) + 1;
+    let mut nodes = Vec::with_capacity(n * (n + 1) / 2);
+
+    // 1. 3 corners
+    nodes.extend_from_slice(&[[0, 0, p], [p, 0, 0], [0, p, 0]]);
+
+    // 2. 3 edges: (0 -> 1), (1 -> 2), (2 -> 0)
+    for m in 1..p {
+        nodes.push([m, 0, p - m]);
+    }
+    for m in 1..p {
+        nodes.push([p - m, m, 0]);
+    }
+    for m in 1..p {
+        nodes.push([0, p - m, m]);
+    }
+
+    // 3. Face interior
+    for j in 1..p {
+        for i in 1..(p - j) {
+            nodes.push([i, j, p - i - j]);
+        }
+    }
+
+    nodes
+}
+
+/// Returns the `(i, j)` integer lattice coordinates (`0..=order`) for each VTK node slot
+/// of a [`CellType::LagrangeQuadrilateral`] of degree `order`.
+#[must_use]
+pub fn lagrange_quad_lattice_nodes(order: u8) -> Vec<[u8; 2]> {
+    let p = order;
+    let n = (p as usize) + 1;
+    let mut nodes = Vec::with_capacity(n * n);
+
+    // 1. 4 corners
+    nodes.extend_from_slice(&[[0, 0], [p, 0], [p, p], [0, p]]);
+
+    // 2. 4 edges: (0 -> 1), (1 -> 2), (3 -> 2), (0 -> 3)
+    for m in 1..p {
+        nodes.push([m, 0]);
+    }
+    for m in 1..p {
+        nodes.push([p, m]);
+    }
+    for m in 1..p {
+        nodes.push([m, p]);
+    }
+    for m in 1..p {
+        nodes.push([0, m]);
+    }
+
+    // 3. Face interior
+    for j in 1..p {
+        for i in 1..p {
+            nodes.push([i, j]);
+        }
+    }
+
+    nodes
+}
+
+/// Returns the reference `[r, s, t]` coordinate of local corner slot `corner_slot` on `cell_type`.
+#[must_use]
+pub const fn corner_reference_rst(cell_type: CellType, corner_slot: u8) -> [f64; 3] {
+    match cell_type {
+        CellType::Triangle | CellType::QuadraticTriangle | CellType::LagrangeTriangle { .. } => {
+            match corner_slot {
+                0 => [0.0, 0.0, 0.0],
+                1 => [1.0, 0.0, 0.0],
+                _ => [0.0, 1.0, 0.0],
+            }
+        }
+        CellType::Quad | CellType::QuadraticQuad | CellType::LagrangeQuadrilateral { .. } => {
+            match corner_slot {
+                0 => [0.0, 0.0, 0.0],
+                1 => [1.0, 0.0, 0.0],
+                2 => [1.0, 1.0, 0.0],
+                _ => [0.0, 1.0, 0.0],
+            }
+        }
+        CellType::Tetra | CellType::QuadraticTetra | CellType::LagrangeTetrahedron { .. } => {
+            match corner_slot {
+                0 => [0.0, 0.0, 0.0],
+                1 => [1.0, 0.0, 0.0],
+                2 => [0.0, 1.0, 0.0],
+                _ => [0.0, 0.0, 1.0],
+            }
+        }
+        CellType::Hexahedron
+        | CellType::QuadraticHexahedron
+        | CellType::LagrangeHexahedron { .. } => match corner_slot {
+            0 => [0.0, 0.0, 0.0],
+            1 => [1.0, 0.0, 0.0],
+            2 => [1.0, 1.0, 0.0],
+            3 => [0.0, 1.0, 0.0],
+            4 => [0.0, 0.0, 1.0],
+            5 => [1.0, 0.0, 1.0],
+            6 => [1.0, 1.0, 1.0],
+            _ => [0.0, 1.0, 1.0],
+        },
+        CellType::Wedge | CellType::QuadraticWedge | CellType::LagrangeWedge { .. } => {
+            match corner_slot {
+                0 => [0.0, 0.0, 0.0],
+                1 => [1.0, 0.0, 0.0],
+                2 => [0.0, 1.0, 0.0],
+                3 => [0.0, 0.0, 1.0],
+                4 => [1.0, 0.0, 1.0],
+                _ => [0.0, 1.0, 1.0],
+            }
+        }
+        CellType::Pyramid | CellType::QuadraticPyramid => match corner_slot {
+            0 => [0.0, 0.0, 0.0],
+            1 => [1.0, 0.0, 0.0],
+            2 => [1.0, 1.0, 0.0],
+            3 => [0.0, 1.0, 0.0],
+            _ => [0.5, 0.5, 1.0],
+        },
+        _ => [0.0, 0.0, 0.0],
+    }
+}
+
+/// Evaluates the nodal shape functions $N_0(r, s, t), \dots, N_{n-1}(r, s, t)$ for a 2D or 3D
 /// higher-order cell at reference coordinates `rst = [r, s, t]` into `weights_out`.
 pub fn evaluate_cell_basis(cell_type: CellType, rst: [f64; 3], weights_out: &mut [f64]) {
     let [r, s, t] = rst;
     match cell_type {
+        CellType::QuadraticTriangle => {
+            eval_lagrange_tri(2, &lagrange_tri_lattice_nodes(2), r, s, weights_out);
+        }
+        CellType::LagrangeTriangle { order } => {
+            let nodes = lagrange_tri_lattice_nodes(order);
+            eval_lagrange_tri(order, &nodes, r, s, weights_out);
+        }
+        CellType::QuadraticQuad => {
+            eval_quadratic_quad(r, s, weights_out);
+        }
+        CellType::LagrangeQuadrilateral { order } => {
+            let nodes = lagrange_quad_lattice_nodes(order);
+            eval_lagrange_quad(order, &nodes, r, s, weights_out);
+        }
         CellType::QuadraticTetra => {
             eval_lagrange_tet(2, &lagrange_tet_lattice_nodes(2), r, s, t, weights_out);
         }
@@ -335,6 +476,59 @@ pub fn evaluate_cell_basis(cell_type: CellType, rst: [f64; 3], weights_out: &mut
         }
         _ => {}
     }
+}
+
+/// Evaluates a 2D Lagrange triangle of degree `order` with precomputed `lattice_nodes`.
+pub fn eval_lagrange_tri(
+    order: u8,
+    lattice_nodes: &[[u8; 3]],
+    r: f64,
+    s: f64,
+    weights_out: &mut [f64],
+) {
+    let l0 = 1.0 - r - s;
+    for (slot, &[i, j, l]) in lattice_nodes.iter().enumerate() {
+        weights_out[slot] = simplex_basis_term(order, i, r)
+            * simplex_basis_term(order, j, s)
+            * simplex_basis_term(order, l, l0);
+    }
+}
+
+/// Evaluates a 2D Lagrange quadrilateral of degree `order` with precomputed `lattice_nodes`.
+pub fn eval_lagrange_quad(
+    order: u8,
+    lattice_nodes: &[[u8; 2]],
+    r: f64,
+    s: f64,
+    weights_out: &mut [f64],
+) {
+    let n = (order as usize) + 1;
+    let mut lr = vec![0.0; n];
+    let mut ls = vec![0.0; n];
+    for m in 0..=order {
+        let idx = m as usize;
+        lr[idx] = lagrange_1d_basis(order, m, r);
+        ls[idx] = lagrange_1d_basis(order, m, s);
+    }
+    for (slot, &[i, j]) in lattice_nodes.iter().enumerate() {
+        weights_out[slot] = lr[i as usize] * ls[j as usize];
+    }
+}
+
+/// Evaluates the 8-node serendipity quadratic quadrilateral (`VTK_QUADRATIC_QUAD`, type 23).
+pub fn eval_quadratic_quad(r: f64, s: f64, weights_out: &mut [f64]) {
+    let xi = 2.0 * r - 1.0;
+    let eta = 2.0 * s - 1.0;
+    let corner_signs: [[f64; 2]; 4] = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
+    for (i, &[sx, sy]) in corner_signs.iter().enumerate() {
+        weights_out[i] = 0.25 * (1.0 + sx * xi) * (1.0 + sy * eta) * (sx * xi + sy * eta - 1.0);
+    }
+    let one_minus_xi2 = 1.0 - xi * xi;
+    let one_minus_eta2 = 1.0 - eta * eta;
+    weights_out[4] = 0.5 * one_minus_xi2 * (1.0 - eta);
+    weights_out[5] = 0.5 * (1.0 + xi) * one_minus_eta2;
+    weights_out[6] = 0.5 * one_minus_xi2 * (1.0 + eta);
+    weights_out[7] = 0.5 * (1.0 - xi) * one_minus_eta2;
 }
 
 /// Evaluates a Lagrange tetrahedron of degree `order` with precomputed `lattice_nodes`.

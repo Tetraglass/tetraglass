@@ -10,5 +10,7 @@ mod linearize;
 mod surface;
 
 pub use linearize::{DEFAULT_SUBDIVISIONS, LinearizeParams, linearize, linearize_default};
-pub use surface::{FilterError, extract_external_surface};
+pub use surface::{
+    FilterError, extract_external_surface, extract_external_surface_with_subdivisions,
+};
 pub use tetraglass_core::{SurfaceMesh, TetView};

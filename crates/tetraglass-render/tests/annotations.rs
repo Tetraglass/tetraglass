@@ -34,6 +34,7 @@ fn render_annotations_draws_title_colorbar_and_axes_triad() {
         range: None,
         use_log_scale: false,
         solid_color_srgb: [0.8, 0.8, 0.8, 1.0],
+        ..SurfaceStyle::default()
     };
 
     let unannotated_opts = HeadlessRenderOptions {

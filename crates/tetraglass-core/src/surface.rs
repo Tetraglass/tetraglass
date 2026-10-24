@@ -17,6 +17,7 @@ pub struct SurfaceMesh {
     triangle_source_cells: Vec<u32>,
     num_faces: usize,
     face_source_cells: Vec<u32>,
+    wireframe_edges: Vec<[u32; 2]>,
     point_data: Attributes,
     cell_data: Attributes,
 }
@@ -29,6 +30,10 @@ impl SurfaceMesh {
     /// - Every vertex index in `triangles` must be `< points.len()`.
     /// - `point_data.expected_tuples()` must equal `points.len()`.
     /// - `cell_data.expected_tuples()` must equal `triangles.len()`.
+    ///
+    /// By default, [`Self::wireframe_edges`] is initialized from the unique edges of `triangles`.
+    /// Call [`Self::with_wireframe_edges`] to override it with original element boundary edges
+    /// (excluding quad-triangulation diagonals and internal higher-order face subdivision edges).
     pub fn new(
         points: impl Into<Arc<[[f64; 3]]>>,
         triangles: Vec<[u32; 3]>,
@@ -78,6 +83,7 @@ impl SurfaceMesh {
 
         let bounds = BoundingBox::from_points(&points);
         let num_faces = face_source_cells.len();
+        let wireframe_edges = default_wireframe_edges_from_triangles(&triangles);
 
         Ok(Self {
             points,
@@ -86,9 +92,37 @@ impl SurfaceMesh {
             triangle_source_cells,
             num_faces,
             face_source_cells,
+            wireframe_edges,
             point_data,
             cell_data,
         })
+    }
+
+    /// Replaces the wireframe edge list with `wireframe_edges` after validating that every
+    /// endpoint index is `< self.num_points()`.
+    pub fn with_wireframe_edges(
+        mut self,
+        wireframe_edges: Vec<[u32; 2]>,
+    ) -> Result<Self, CoreError> {
+        let num_points = self.points.len();
+        for (edge_idx, &[a, b]) in wireframe_edges.iter().enumerate() {
+            if (a as usize) >= num_points {
+                return Err(CoreError::PointIndexOutOfBounds {
+                    cell_index: edge_idx,
+                    point_index: a,
+                    num_points,
+                });
+            }
+            if (b as usize) >= num_points {
+                return Err(CoreError::PointIndexOutOfBounds {
+                    cell_index: edge_idx,
+                    point_index: b,
+                    num_points,
+                });
+            }
+        }
+        self.wireframe_edges = wireframe_edges;
+        Ok(self)
     }
 
     /// Returns the number of points in the surface mesh.
@@ -103,10 +137,17 @@ impl SurfaceMesh {
         self.triangles.len()
     }
 
-    /// Returns the number of logical polygon faces before fan-triangulation of quads/polygons.
+    /// Returns the number of logical polygon faces before fan-triangulation of quads/polygons
+    /// or higher-order face subdivision.
     #[must_use]
     pub const fn num_faces(&self) -> usize {
         self.num_faces
+    }
+
+    /// Returns the number of wireframe edge segments on the surface mesh.
+    #[must_use]
+    pub fn num_wireframe_edges(&self) -> usize {
+        self.wireframe_edges.len()
     }
 
     /// Returns the 3D point coordinates slice.
@@ -131,6 +172,16 @@ impl SurfaceMesh {
     #[must_use]
     pub fn triangles(&self) -> &[[u32; 3]] {
         &self.triangles
+    }
+
+    /// Returns the original element wireframe edge segments (`[v0, v1]` point indices).
+    ///
+    /// For extracted external surfaces (`M2.2`), these are the outer boundaries of the original
+    /// mesh faces (segmented along curved higher-order edges), excluding quad/polygon fan
+    /// diagonals and internal higher-order face subdivision edges.
+    #[must_use]
+    pub fn wireframe_edges(&self) -> &[[u32; 2]] {
+        &self.wireframe_edges
     }
 
     /// Returns the source cell index in the originating [`UnstructuredGrid`] for each triangle.
@@ -223,4 +274,18 @@ impl SurfaceMesh {
         }
         Ok(grid)
     }
+}
+
+fn default_wireframe_edges_from_triangles(triangles: &[[u32; 3]]) -> Vec<[u32; 2]> {
+    let mut edges = Vec::with_capacity(triangles.len() * 3);
+    for &[a, b, c] in triangles {
+        for (u, v) in [(a, b), (b, c), (c, a)] {
+            if u != v {
+                edges.push(if u < v { [u, v] } else { [v, u] });
+            }
+        }
+    }
+    edges.sort_unstable();
+    edges.dedup();
+    edges
 }

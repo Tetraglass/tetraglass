@@ -205,3 +205,15 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-005 and D-009).
 - Dependencies added: none.
 - Follow-ups: M2.2 Curved surfaces (external surface of higher-order cells with tessellated faces; wireframe from original element edges).
+
+## 2026-10-24 — M2.2 Curved surfaces
+
+- Extended `SurfaceMesh` (`crates/tetraglass-core/src/surface.rs`) with `wireframe_edges` (`wireframe_edges(&self) -> &[[u32; 2]]`, `num_wireframe_edges(&self) -> usize`, and `with_wireframe_edges`) storing original element boundary edge segments.
+- Extended `crates/tetraglass-filters/src/basis.rs` with 2D higher-order surface cell basis evaluators (`QuadraticTriangle`, `LagrangeTriangle { order }`, `QuadraticQuad`, `LagrangeQuadrilateral { order }`) and `corner_reference_rst`.
+- Implemented curved higher-order face tessellation (`extract_external_surface_with_subdivisions`, with `extract_external_surface` defaulting to `DEFAULT_SUBDIVISIONS = 2`) in `crates/tetraglass-filters/src/surface.rs`:
+  - Subdivides external higher-order triangle faces into $S^2$ sub-triangles and external higher-order quad faces into $2 S^2$ sub-triangles using the element's Lagrange or serendipity basis functions, reusing original mesh vertex indices whenever a lattice point coincides with an element node and deduplicating shared edge vertices across adjacent faces.
+  - Emits only the outer perimeter edges of the original mesh faces into `SurfaceMesh::wireframe_edges` (`S` segments per curved higher-order edge), excluding quad/polygon fan diagonals and internal higher-order face subdivision edges.
+- Wired `source.linearize_level` into `SceneEvaluator::get_or_extract_surface` (`crates/tetraglass-scene/src/eval.rs`).
+- Added original-element wireframe edge rendering (`edge_pipeline`, `SurfaceStyle::{draw_surface, draw_edges, edge_color_srgb}`) to `crates/tetraglass-render`, and wired `RepresentationStyle::{Surface, SurfaceWithEdges, Wireframe}` and `edge_color` in `tetraglass-cli` and `tetraglass-viewer`.
+- Verified with `crates/tetraglass-filters/tests/external_surface.rs`, `crates/tetraglass-render/tests/render_mixed_linear.rs` (`/render-check`), and `cargo xtask verify`.
+- Follow-ups: M2.3 Tet kernel and slice (marching tetrahedra kernel, slice filter, scene integration, and gallery scene).

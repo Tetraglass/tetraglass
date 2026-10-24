@@ -29,8 +29,8 @@ use tetraglass_render::{
 use tetraglass_scene::{
     ArrayAssociation, BackgroundSpec, CameraConfig, ColorSpec, ColorbarSpec, ColormapName,
     DEFAULT_MSAA_SAMPLES, DatasetMetadata, EvaluatedColoring, EvaluatedRepresentation,
-    EvaluatedScene, LightingPreset, Output, Representation, ResolvedComponent, Scene, SceneError,
-    SceneEvaluator, Source, TimeSelector, View, validate_scene_with_metadata,
+    EvaluatedScene, LightingPreset, Output, Representation, RepresentationStyle, ResolvedComponent,
+    Scene, SceneError, SceneEvaluator, Source, TimeSelector, View, validate_scene_with_metadata,
 };
 use thiserror::Error;
 
@@ -1560,6 +1560,17 @@ pub const fn map_colormap_kind(name: ColormapName) -> ViewportColormap {
 #[must_use]
 pub fn build_surface_style(rep: &EvaluatedRepresentation) -> ViewportSurfaceStyle {
     let solid_color_srgb = [rep.color[0], rep.color[1], rep.color[2], rep.opacity as f32];
+    let edge_color_srgb = [
+        rep.edge_color[0],
+        rep.edge_color[1],
+        rep.edge_color[2],
+        rep.opacity as f32,
+    ];
+    let (draw_surface, draw_edges) = match rep.style {
+        RepresentationStyle::Wireframe => (false, true),
+        RepresentationStyle::SurfaceWithEdges => (true, true),
+        _ => (true, false),
+    };
     match &rep.coloring {
         None => ViewportSurfaceStyle {
             color_by: ViewportColorBy::Solid,
@@ -1567,6 +1578,9 @@ pub fn build_surface_style(rep: &EvaluatedRepresentation) -> ViewportSurfaceStyl
             range: None,
             use_log_scale: false,
             solid_color_srgb,
+            draw_surface,
+            draw_edges,
+            edge_color_srgb,
         },
         Some(c) => ViewportSurfaceStyle {
             color_by: build_color_by(c),
@@ -1574,6 +1588,9 @@ pub fn build_surface_style(rep: &EvaluatedRepresentation) -> ViewportSurfaceStyl
             range: Some(c.effective_range),
             use_log_scale: c.log_scale,
             solid_color_srgb,
+            draw_surface,
+            draw_edges,
+            edge_color_srgb,
         },
     }
 }

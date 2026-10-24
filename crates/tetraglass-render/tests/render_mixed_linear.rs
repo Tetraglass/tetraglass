@@ -66,6 +66,7 @@ fn render_mixed_linear_colored_by_linear_and_cell_id() {
             range: None,
             use_log_scale: false,
             solid_color_srgb: [0.8, 0.8, 0.8, 1.0],
+            ..SurfaceStyle::default()
         },
         camera: Some(camera.clone()),
         ..HeadlessRenderOptions::default()
@@ -153,6 +154,7 @@ fn render_mixed_linear_colored_by_linear_and_cell_id() {
         range: None,
         use_log_scale: false,
         solid_color_srgb: [0.8, 0.8, 0.8, 1.0],
+        ..SurfaceStyle::default()
     };
     renderer
         .update_surface_style(ctx.queue(), &mut gpu_surface, &surface, &cell_style)
@@ -233,4 +235,83 @@ fn render_validates_errors_and_diff_highlighting() {
     assert_eq!(cmp.differing_pixels, 1);
     assert_eq!(cmp.max_channel_diff, 10);
     assert_eq!(cmp.diff_image.pixel(0, 0), [255, 0, 255, 255]);
+}
+
+#[test]
+fn render_surface_with_edges_and_wireframe_draws_original_element_edges() {
+    let root = workspace_root();
+    let vtu_path = root.join("testdata/vtk/tet_quadratic.vtu");
+    let grid = read_vtu_from_path(&vtu_path).expect("load tet_quadratic.vtu");
+    let surface = extract_external_surface(&grid).expect("extract curved surface");
+    assert_eq!(surface.num_faces(), 12);
+    assert_eq!(surface.num_triangles(), 48);
+    assert_eq!(surface.num_wireframe_edges(), 36);
+
+    let bounds = surface.bounds().expect("surface bounds");
+    let camera = Camera::fit_bounds(bounds, 35.0, 25.0);
+    let ctx = HeadlessContext::new().expect("headless context");
+
+    let base_opts = HeadlessRenderOptions {
+        width: 400,
+        height: 300,
+        sample_count: 4,
+        background_srgb: [1.0, 1.0, 1.0, 1.0],
+        style: SurfaceStyle {
+            color_by: ColorBy::point("linear"),
+            colormap: ColormapKind::Viridis,
+            ..SurfaceStyle::default()
+        },
+        camera: Some(camera.clone()),
+        ..HeadlessRenderOptions::default()
+    };
+    let img_surface = ctx
+        .render_surface(&surface, &base_opts)
+        .expect("render surface");
+
+    let mut edges_opts = base_opts.clone();
+    edges_opts.style.draw_edges = true;
+    edges_opts.style.edge_color_srgb = [0.0, 0.0, 0.0, 1.0];
+    let img_with_edges = ctx
+        .render_surface(&surface, &edges_opts)
+        .expect("render surface_with_edges");
+
+    let mut wire_opts = edges_opts.clone();
+    wire_opts.style.draw_surface = false;
+    let img_wireframe = ctx
+        .render_surface(&surface, &wire_opts)
+        .expect("render wireframe");
+
+    let out_dir = root.join("target/render-tests");
+    img_with_edges
+        .save_png(out_dir.join("tet_quadratic_surface_with_edges.png"))
+        .expect("save tet_quadratic_surface_with_edges.png");
+    img_wireframe
+        .save_png(out_dir.join("tet_quadratic_wireframe.png"))
+        .expect("save tet_quadratic_wireframe.png");
+
+    let cmp_edges = img_surface
+        .compare(&img_with_edges, 2, 0.0)
+        .expect("compare surface vs surface_with_edges");
+    assert!(
+        cmp_edges.differing_pixels > 200,
+        "expected surface_with_edges to draw visible edge pixels, got {}",
+        cmp_edges.differing_pixels
+    );
+
+    // Wireframe-only image must have dark line pixels on white background, but far fewer
+    // non-white pixels than the filled surface render.
+    let count_non_white = |img: &RenderedImage| -> usize {
+        img.as_rgba8()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|px| px[0] < 250 || px[1] < 250 || px[2] < 250)
+            .count()
+    };
+    let wire_non_white = count_non_white(&img_wireframe);
+    let surf_non_white = count_non_white(&img_surface);
+    assert!(
+        wire_non_white > 200 && wire_non_white * 3 < surf_non_white,
+        "unexpected wireframe pixel count {wire_non_white} vs surface {surf_non_white}"
+    );
 }

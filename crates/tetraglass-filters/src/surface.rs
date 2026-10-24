@@ -1,11 +1,16 @@
-//! External boundary surface extraction via face hashing (`M0.6`).
+//! External boundary surface extraction via face hashing (`M0.6`) and curved higher-order
+//! face tessellation with original-element wireframe edges (`M2.2`).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tetraglass_core::{
     ArrayBuffer, Attributes, CellType, CoreError, DataArray, SurfaceMesh, UnstructuredGrid,
     try_u32_from_usize,
 };
+
+use crate::basis::{corner_reference_rst, evaluate_cell_basis};
+use crate::linearize::DEFAULT_SUBDIVISIONS;
 
 /// Errors returned by filters in `tetraglass-filters`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -58,8 +63,14 @@ impl FaceKey {
 
 #[derive(Debug, Clone)]
 enum OrientedFace {
-    Tri([u32; 3]),
-    Quad([u32; 4]),
+    Tri {
+        verts: [u32; 3],
+        corner_slots: [u8; 3],
+    },
+    Quad {
+        verts: [u32; 4],
+        corner_slots: [u8; 4],
+    },
     Poly(Vec<u32>),
 }
 
@@ -70,18 +81,11 @@ struct CandidateFace {
     owner_count: u32,
 }
 
-/// Extracts the external boundary surface of an [`UnstructuredGrid`] by face hashing,
-/// keeping faces that have exactly one owner cell.
+/// Extracts the external boundary surface of an [`UnstructuredGrid`] using the default
+/// higher-order face subdivision level ([`DEFAULT_SUBDIVISIONS`] = `2`).
 ///
-/// - **Linear 3D cells (`Tetra`, `Hexahedron`, `Wedge`, `Pyramid`):** hashes all boundary faces
-///   with outward-pointing vertex winding.
-/// - **Higher-order 3D cells (`Quadratic*`, `Lagrange*`):** uses the corner nodes (`0..4`, `0..8`,
-///   `0..6`, `0..5` in VTK node ordering) as a stopgap until curved surface tessellation in `M2.2`.
-/// - **Polyhedra (`Polyhedron`):** hashes each polygon face from the cell's face stream.
-/// - **2D surface cells (`Triangle`, `Quad`, and their quadratic/Lagrange counterparts):** emitted
-///   directly as single-owner surface faces.
-/// - **Attributes:** carries all point arrays via cheap `Arc` clones and maps all cell arrays
-///   to surface triangles through `triangle_source_cells`.
+/// See [`extract_external_surface_with_subdivisions`] for details on curved higher-order
+/// face tessellation and original-element wireframe edges.
 ///
 /// ```
 /// use tetraglass_core::{CellType, UnstructuredGrid};
@@ -105,8 +109,38 @@ struct CandidateFace {
 /// let surface = extract_external_surface(&grid).unwrap();
 /// assert_eq!(surface.num_faces(), 4);
 /// assert_eq!(surface.num_triangles(), 4);
+/// assert_eq!(surface.num_wireframe_edges(), 6);
 /// ```
 pub fn extract_external_surface(grid: &UnstructuredGrid) -> Result<SurfaceMesh, FilterError> {
+    extract_external_surface_with_subdivisions(grid, DEFAULT_SUBDIVISIONS)
+}
+
+/// Extracts the external boundary surface of an [`UnstructuredGrid`] by face hashing,
+/// keeping faces that have exactly one owner cell and tessellating higher-order faces
+/// at `subdivisions` (`>= 1`).
+///
+/// - **Linear 3D cells (`Tetra`, `Hexahedron`, `Wedge`, `Pyramid`):** hashes all boundary faces
+///   with outward-pointing vertex winding.
+/// - **Higher-order 2D/3D cells (`Quadratic*`, `Lagrange*`):** when `subdivisions >= 2`,
+///   each external triangle face is tessellated into `subdivisions^2` sub-triangles and each
+///   external quad face into `2 * subdivisions^2` sub-triangles using the element's Lagrange
+///   or serendipity basis functions.
+/// - **Original element wireframe edges (`M2.2`):** [`SurfaceMesh::wireframe_edges`] stores
+///   only the outer boundary edges of the original mesh faces (segmented into `subdivisions`
+///   segments along curved higher-order edges), excluding quad/polygon fan diagonals and
+///   internal higher-order face subdivision edges.
+/// - **Polyhedra (`Polyhedron`):** hashes each polygon face from the cell's face stream.
+/// - **Attributes:** carries point arrays (zero-copy via `Arc` when no new subdivision points
+///   are needed, or interpolated via basis functions) and maps cell arrays to surface triangles
+///   through `triangle_source_cells`.
+pub fn extract_external_surface_with_subdivisions(
+    grid: &UnstructuredGrid,
+    subdivisions: u8,
+) -> Result<SurfaceMesh, FilterError> {
+    if subdivisions == 0 {
+        return Err(FilterError::InvalidSubdivisionLevel { subdivisions });
+    }
+
     let num_cells = grid.num_cells();
     let mut candidates: Vec<CandidateFace> = Vec::with_capacity(num_cells * 4);
     let mut first_seen: HashMap<FaceKey, usize> = HashMap::with_capacity(num_cells * 4);
@@ -143,25 +177,46 @@ pub fn extract_external_surface(grid: &UnstructuredGrid) -> Result<SurfaceMesh, 
             CellType::Triangle
             | CellType::QuadraticTriangle
             | CellType::LagrangeTriangle { .. } => {
-                let tri = [conn[0], conn[1], conn[2]];
-                register_face(source_cell, FaceKey::from_tri(tri), OrientedFace::Tri(tri));
+                let verts = [conn[0], conn[1], conn[2]];
+                register_face(
+                    source_cell,
+                    FaceKey::from_tri(verts),
+                    OrientedFace::Tri {
+                        verts,
+                        corner_slots: [0, 1, 2],
+                    },
+                );
             }
 
             // 2D quad family (corners 0, 1, 2, 3).
             CellType::Quad | CellType::QuadraticQuad | CellType::LagrangeQuadrilateral { .. } => {
-                let quad = [conn[0], conn[1], conn[2], conn[3]];
+                let verts = [conn[0], conn[1], conn[2], conn[3]];
                 register_face(
                     source_cell,
-                    FaceKey::from_quad(quad),
-                    OrientedFace::Quad(quad),
+                    FaceKey::from_quad(verts),
+                    OrientedFace::Quad {
+                        verts,
+                        corner_slots: [0, 1, 2, 3],
+                    },
                 );
             }
 
             // 3D tetrahedron family (corners 0, 1, 2, 3).
             CellType::Tetra | CellType::QuadraticTetra | CellType::LagrangeTetrahedron { .. } => {
-                let [c0, c1, c2, c3] = [conn[0], conn[1], conn[2], conn[3]];
-                for tri in [[c0, c1, c3], [c1, c2, c3], [c2, c0, c3], [c0, c2, c1]] {
-                    register_face(source_cell, FaceKey::from_tri(tri), OrientedFace::Tri(tri));
+                for corner_slots in [[0u8, 1, 3], [1, 2, 3], [2, 0, 3], [0, 2, 1]] {
+                    let verts = [
+                        conn[corner_slots[0] as usize],
+                        conn[corner_slots[1] as usize],
+                        conn[corner_slots[2] as usize],
+                    ];
+                    register_face(
+                        source_cell,
+                        FaceKey::from_tri(verts),
+                        OrientedFace::Tri {
+                            verts,
+                            corner_slots,
+                        },
+                    );
                 }
             }
 
@@ -169,52 +224,92 @@ pub fn extract_external_surface(grid: &UnstructuredGrid) -> Result<SurfaceMesh, 
             CellType::Hexahedron
             | CellType::QuadraticHexahedron
             | CellType::LagrangeHexahedron { .. } => {
-                let [c0, c1, c2, c3, c4, c5, c6, c7] = [
-                    conn[0], conn[1], conn[2], conn[3], conn[4], conn[5], conn[6], conn[7],
-                ];
-                for quad in [
-                    [c0, c3, c2, c1], // -z
-                    [c4, c5, c6, c7], // +z
-                    [c0, c1, c5, c4], // -y
-                    [c2, c3, c7, c6], // +y
-                    [c0, c4, c7, c3], // -x
-                    [c1, c2, c6, c5], // +x
+                for corner_slots in [
+                    [0u8, 3, 2, 1], // -z
+                    [4, 5, 6, 7],   // +z
+                    [0, 1, 5, 4],   // -y
+                    [2, 3, 7, 6],   // +y
+                    [0, 4, 7, 3],   // -x
+                    [1, 2, 6, 5],   // +x
                 ] {
+                    let verts = [
+                        conn[corner_slots[0] as usize],
+                        conn[corner_slots[1] as usize],
+                        conn[corner_slots[2] as usize],
+                        conn[corner_slots[3] as usize],
+                    ];
                     register_face(
                         source_cell,
-                        FaceKey::from_quad(quad),
-                        OrientedFace::Quad(quad),
+                        FaceKey::from_quad(verts),
+                        OrientedFace::Quad {
+                            verts,
+                            corner_slots,
+                        },
                     );
                 }
             }
 
             // 3D wedge / triangular prism family (corners 0..6).
             CellType::Wedge | CellType::QuadraticWedge | CellType::LagrangeWedge { .. } => {
-                let [c0, c1, c2, c3, c4, c5] =
-                    [conn[0], conn[1], conn[2], conn[3], conn[4], conn[5]];
-                for tri in [[c0, c2, c1], [c3, c4, c5]] {
-                    register_face(source_cell, FaceKey::from_tri(tri), OrientedFace::Tri(tri));
-                }
-                for quad in [[c0, c1, c4, c3], [c1, c2, c5, c4], [c2, c0, c3, c5]] {
+                for corner_slots in [[0u8, 2, 1], [3, 4, 5]] {
+                    let verts = [
+                        conn[corner_slots[0] as usize],
+                        conn[corner_slots[1] as usize],
+                        conn[corner_slots[2] as usize],
+                    ];
                     register_face(
                         source_cell,
-                        FaceKey::from_quad(quad),
-                        OrientedFace::Quad(quad),
+                        FaceKey::from_tri(verts),
+                        OrientedFace::Tri {
+                            verts,
+                            corner_slots,
+                        },
+                    );
+                }
+                for corner_slots in [[0u8, 1, 4, 3], [1, 2, 5, 4], [2, 0, 3, 5]] {
+                    let verts = [
+                        conn[corner_slots[0] as usize],
+                        conn[corner_slots[1] as usize],
+                        conn[corner_slots[2] as usize],
+                        conn[corner_slots[3] as usize],
+                    ];
+                    register_face(
+                        source_cell,
+                        FaceKey::from_quad(verts),
+                        OrientedFace::Quad {
+                            verts,
+                            corner_slots,
+                        },
                     );
                 }
             }
 
             // 3D pyramid family (corners 0..5).
             CellType::Pyramid | CellType::QuadraticPyramid => {
-                let [c0, c1, c2, c3, c4] = [conn[0], conn[1], conn[2], conn[3], conn[4]];
-                let base = [c0, c3, c2, c1];
+                let base_slots = [0u8, 3, 2, 1];
+                let base_verts = [conn[0], conn[3], conn[2], conn[1]];
                 register_face(
                     source_cell,
-                    FaceKey::from_quad(base),
-                    OrientedFace::Quad(base),
+                    FaceKey::from_quad(base_verts),
+                    OrientedFace::Quad {
+                        verts: base_verts,
+                        corner_slots: base_slots,
+                    },
                 );
-                for tri in [[c0, c1, c4], [c1, c2, c4], [c2, c3, c4], [c3, c0, c4]] {
-                    register_face(source_cell, FaceKey::from_tri(tri), OrientedFace::Tri(tri));
+                for corner_slots in [[0u8, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]] {
+                    let verts = [
+                        conn[corner_slots[0] as usize],
+                        conn[corner_slots[1] as usize],
+                        conn[corner_slots[2] as usize],
+                    ];
+                    register_face(
+                        source_cell,
+                        FaceKey::from_tri(verts),
+                        OrientedFace::Tri {
+                            verts,
+                            corner_slots,
+                        },
+                    );
                 }
             }
 
@@ -223,11 +318,7 @@ pub fn extract_external_surface(grid: &UnstructuredGrid) -> Result<SurfaceMesh, 
                 if let Some(face_iter) = grid.polyhedron_cell_faces(cell_idx) {
                     for face_verts in face_iter {
                         let key = FaceKey::from_slice(face_verts);
-                        let oriented = match face_verts {
-                            &[a, b, c] => OrientedFace::Tri([a, b, c]),
-                            &[a, b, c, d] => OrientedFace::Quad([a, b, c, d]),
-                            other => OrientedFace::Poly(other.to_vec()),
-                        };
+                        let oriented = OrientedFace::Poly(face_verts.to_vec());
                         register_face(source_cell, key, oriented);
                     }
                 }
@@ -238,22 +329,80 @@ pub fn extract_external_surface(grid: &UnstructuredGrid) -> Result<SurfaceMesh, 
     let mut triangles: Vec<[u32; 3]> = Vec::new();
     let mut triangle_source_cells: Vec<u32> = Vec::new();
     let mut face_source_cells: Vec<u32> = Vec::new();
+    let mut wireframe_edges: Vec<[u32; 2]> = Vec::new();
+
+    let mut subdiv_ctx = if subdivisions >= 2 {
+        Some(SurfaceSubdivContext::new(grid))
+    } else {
+        None
+    };
 
     for cand in candidates {
         if cand.owner_count != 1 {
             continue;
         }
         face_source_cells.push(cand.source_cell);
+        let cell_idx = cand.source_cell as usize;
+        let cell_type = grid.cell_types()[cell_idx];
+        let is_higher_order = is_higher_order_face_cell(cell_type) && subdivisions >= 2;
+
         match cand.face {
-            OrientedFace::Tri(tri) => {
-                triangles.push(tri);
-                triangle_source_cells.push(cand.source_cell);
+            OrientedFace::Tri {
+                verts: [v0, v1, v2],
+                corner_slots,
+            } => {
+                if is_higher_order {
+                    let ctx = subdiv_ctx.as_mut().expect("subdiv_ctx initialized");
+                    let conn = grid
+                        .cell_connectivity(cell_idx)
+                        .expect("validated cell connectivity");
+                    ctx.tessellate_tri_face(
+                        cand.source_cell,
+                        cell_type,
+                        conn,
+                        corner_slots,
+                        subdivisions,
+                        &mut triangles,
+                        &mut triangle_source_cells,
+                        &mut wireframe_edges,
+                    )?;
+                } else {
+                    triangles.push([v0, v1, v2]);
+                    triangle_source_cells.push(cand.source_cell);
+                    push_canonical_edge(&mut wireframe_edges, v0, v1);
+                    push_canonical_edge(&mut wireframe_edges, v1, v2);
+                    push_canonical_edge(&mut wireframe_edges, v2, v0);
+                }
             }
-            OrientedFace::Quad([v0, v1, v2, v3]) => {
-                triangles.push([v0, v1, v2]);
-                triangle_source_cells.push(cand.source_cell);
-                triangles.push([v0, v2, v3]);
-                triangle_source_cells.push(cand.source_cell);
+            OrientedFace::Quad {
+                verts: [v0, v1, v2, v3],
+                corner_slots,
+            } => {
+                if is_higher_order {
+                    let ctx = subdiv_ctx.as_mut().expect("subdiv_ctx initialized");
+                    let conn = grid
+                        .cell_connectivity(cell_idx)
+                        .expect("validated cell connectivity");
+                    ctx.tessellate_quad_face(
+                        cand.source_cell,
+                        cell_type,
+                        conn,
+                        corner_slots,
+                        subdivisions,
+                        &mut triangles,
+                        &mut triangle_source_cells,
+                        &mut wireframe_edges,
+                    )?;
+                } else {
+                    triangles.push([v0, v1, v2]);
+                    triangle_source_cells.push(cand.source_cell);
+                    triangles.push([v0, v2, v3]);
+                    triangle_source_cells.push(cand.source_cell);
+                    push_canonical_edge(&mut wireframe_edges, v0, v1);
+                    push_canonical_edge(&mut wireframe_edges, v1, v2);
+                    push_canonical_edge(&mut wireframe_edges, v2, v3);
+                    push_canonical_edge(&mut wireframe_edges, v3, v0);
+                }
             }
             OrientedFace::Poly(verts) => {
                 if let Some((&v0, rest)) = verts.split_first() {
@@ -262,11 +411,22 @@ pub fn extract_external_surface(grid: &UnstructuredGrid) -> Result<SurfaceMesh, 
                         triangle_source_cells.push(cand.source_cell);
                     }
                 }
+                let n = verts.len();
+                for k in 0..n {
+                    push_canonical_edge(&mut wireframe_edges, verts[k], verts[(k + 1) % n]);
+                }
             }
         }
     }
 
-    let point_data = grid.point_data().clone();
+    wireframe_edges.sort_unstable();
+    wireframe_edges.dedup();
+
+    let (points, point_data) = match subdiv_ctx {
+        Some(ctx) if ctx.has_new_points() => ctx.finish_points_and_attributes()?,
+        _ => (grid.points_arc(), grid.point_data().clone()),
+    };
+
     let mut cell_data = Attributes::new(triangles.len());
     for (name, arr) in grid.cell_data().iter() {
         let mapped = map_cell_array(arr, &triangle_source_cells)?;
@@ -274,14 +434,489 @@ pub fn extract_external_surface(grid: &UnstructuredGrid) -> Result<SurfaceMesh, 
     }
 
     let surface = SurfaceMesh::new(
-        grid.points_arc(),
+        points,
         triangles,
         triangle_source_cells,
         face_source_cells,
         point_data,
         cell_data,
-    )?;
+    )?
+    .with_wireframe_edges(wireframe_edges)?;
     Ok(surface)
+}
+
+#[inline]
+fn push_canonical_edge(edges: &mut Vec<[u32; 2]>, a: u32, b: u32) {
+    if a != b {
+        edges.push(if a < b { [a, b] } else { [b, a] });
+    }
+}
+
+const fn is_higher_order_face_cell(cell_type: CellType) -> bool {
+    match cell_type {
+        CellType::QuadraticTriangle
+        | CellType::QuadraticQuad
+        | CellType::QuadraticTetra
+        | CellType::QuadraticHexahedron
+        | CellType::QuadraticWedge
+        | CellType::QuadraticPyramid => true,
+        CellType::LagrangeTriangle { order }
+        | CellType::LagrangeQuadrilateral { order }
+        | CellType::LagrangeTetrahedron { order }
+        | CellType::LagrangeHexahedron { order }
+        | CellType::LagrangeWedge { order } => order >= 2,
+        _ => false,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PositionKey([i64; 3]);
+
+struct SurfaceSubdivContext<'a> {
+    grid: &'a UnstructuredGrid,
+    quant_scale: f64,
+    new_points: Vec<[f64; 3]>,
+    boundary_dedup: HashMap<PositionKey, u32>,
+    new_point_attrs: Vec<(String, SurfaceAttrAccumulator<'a>)>,
+    weights_scratch: Vec<f64>,
+}
+
+enum SurfaceAttrAccumulator<'a> {
+    F32 {
+        comp: tetraglass_core::ComponentCount,
+        src: &'a [f32],
+        new_vals: Vec<f32>,
+    },
+    F64 {
+        comp: tetraglass_core::ComponentCount,
+        src: &'a [f64],
+        new_vals: Vec<f64>,
+    },
+    I32 {
+        comp: tetraglass_core::ComponentCount,
+        src: &'a [i32],
+        new_vals: Vec<i32>,
+    },
+    I64 {
+        comp: tetraglass_core::ComponentCount,
+        src: &'a [i64],
+        new_vals: Vec<i64>,
+    },
+    U8 {
+        comp: tetraglass_core::ComponentCount,
+        src: &'a [u8],
+        new_vals: Vec<u8>,
+    },
+}
+
+impl<'a> SurfaceAttrAccumulator<'a> {
+    fn from_source(source: &'a DataArray) -> Self {
+        let comp = source.components();
+        match source.buffer() {
+            ArrayBuffer::F32(src) => Self::F32 {
+                comp,
+                src,
+                new_vals: Vec::new(),
+            },
+            ArrayBuffer::F64(src) => Self::F64 {
+                comp,
+                src,
+                new_vals: Vec::new(),
+            },
+            ArrayBuffer::I32(src) => Self::I32 {
+                comp,
+                src,
+                new_vals: Vec::new(),
+            },
+            ArrayBuffer::I64(src) => Self::I64 {
+                comp,
+                src,
+                new_vals: Vec::new(),
+            },
+            ArrayBuffer::U8(src) => Self::U8 {
+                comp,
+                src,
+                new_vals: Vec::new(),
+            },
+        }
+    }
+
+    fn push_interpolated(&mut self, cell_nodes: &[u32], weights: &[f64]) {
+        match self {
+            Self::F32 {
+                comp,
+                src,
+                new_vals,
+            } => {
+                let ncomp = comp.as_usize();
+                for c in 0..ncomp {
+                    let mut sum = 0.0f64;
+                    for (&node_id, &w) in cell_nodes.iter().zip(weights.iter()) {
+                        sum += w * f64::from(src[(node_id as usize) * ncomp + c]);
+                    }
+                    new_vals.push(sum as f32);
+                }
+            }
+            Self::F64 {
+                comp,
+                src,
+                new_vals,
+            } => {
+                let ncomp = comp.as_usize();
+                for c in 0..ncomp {
+                    let mut sum = 0.0f64;
+                    for (&node_id, &w) in cell_nodes.iter().zip(weights.iter()) {
+                        sum += w * src[(node_id as usize) * ncomp + c];
+                    }
+                    new_vals.push(sum);
+                }
+            }
+            Self::I32 {
+                comp,
+                src,
+                new_vals,
+            } => {
+                let ncomp = comp.as_usize();
+                for c in 0..ncomp {
+                    let mut sum = 0.0f64;
+                    for (&node_id, &w) in cell_nodes.iter().zip(weights.iter()) {
+                        sum += w * f64::from(src[(node_id as usize) * ncomp + c]);
+                    }
+                    new_vals.push(sum.round() as i32);
+                }
+            }
+            Self::I64 {
+                comp,
+                src,
+                new_vals,
+            } => {
+                let ncomp = comp.as_usize();
+                for c in 0..ncomp {
+                    let mut sum = 0.0f64;
+                    for (&node_id, &w) in cell_nodes.iter().zip(weights.iter()) {
+                        sum += w * (src[(node_id as usize) * ncomp + c] as f64);
+                    }
+                    new_vals.push(sum.round() as i64);
+                }
+            }
+            Self::U8 {
+                comp,
+                src,
+                new_vals,
+            } => {
+                let ncomp = comp.as_usize();
+                for c in 0..ncomp {
+                    let mut sum = 0.0f64;
+                    for (&node_id, &w) in cell_nodes.iter().zip(weights.iter()) {
+                        sum += w * f64::from(src[(node_id as usize) * ncomp + c]);
+                    }
+                    new_vals.push(sum.round().clamp(0.0, 255.0) as u8);
+                }
+            }
+        }
+    }
+
+    fn finish(self) -> Result<DataArray, CoreError> {
+        match self {
+            Self::F32 {
+                comp,
+                src,
+                new_vals,
+            } => {
+                let mut out = Vec::with_capacity(src.len() + new_vals.len());
+                out.extend_from_slice(src);
+                out.extend_from_slice(&new_vals);
+                DataArray::from_f32(comp, out)
+            }
+            Self::F64 {
+                comp,
+                src,
+                new_vals,
+            } => {
+                let mut out = Vec::with_capacity(src.len() + new_vals.len());
+                out.extend_from_slice(src);
+                out.extend_from_slice(&new_vals);
+                DataArray::from_f64(comp, out)
+            }
+            Self::I32 {
+                comp,
+                src,
+                new_vals,
+            } => {
+                let mut out = Vec::with_capacity(src.len() + new_vals.len());
+                out.extend_from_slice(src);
+                out.extend_from_slice(&new_vals);
+                DataArray::from_i32(comp, out)
+            }
+            Self::I64 {
+                comp,
+                src,
+                new_vals,
+            } => {
+                let mut out = Vec::with_capacity(src.len() + new_vals.len());
+                out.extend_from_slice(src);
+                out.extend_from_slice(&new_vals);
+                DataArray::from_i64(comp, out)
+            }
+            Self::U8 {
+                comp,
+                src,
+                new_vals,
+            } => {
+                let mut out = Vec::with_capacity(src.len() + new_vals.len());
+                out.extend_from_slice(src);
+                out.extend_from_slice(&new_vals);
+                DataArray::from_u8(comp, out)
+            }
+        }
+    }
+}
+
+type PointBufferAndAttributes = (Arc<[[f64; 3]]>, Attributes);
+
+impl<'a> SurfaceSubdivContext<'a> {
+    fn new(grid: &'a UnstructuredGrid) -> Self {
+        let diag = grid.bounds().map_or(1.0, |b| b.diagonal()).max(1e-12);
+        let quant_scale = 1e9 / diag;
+        let new_point_attrs = grid
+            .point_data()
+            .iter()
+            .map(|(name, arr)| (name.to_string(), SurfaceAttrAccumulator::from_source(arr)))
+            .collect();
+        Self {
+            grid,
+            quant_scale,
+            new_points: Vec::new(),
+            boundary_dedup: HashMap::new(),
+            new_point_attrs,
+            weights_scratch: Vec::new(),
+        }
+    }
+
+    fn has_new_points(&self) -> bool {
+        !self.new_points.is_empty()
+    }
+
+    fn finish_points_and_attributes(self) -> Result<PointBufferAndAttributes, CoreError> {
+        let base_pts = self.grid.points();
+        let total_pts = base_pts.len() + self.new_points.len();
+        let mut points = Vec::with_capacity(total_pts);
+        points.extend_from_slice(base_pts);
+        points.extend_from_slice(&self.new_points);
+
+        let mut point_data = Attributes::new(total_pts);
+        for (name, acc) in self.new_point_attrs {
+            point_data.insert(name, acc.finish()?)?;
+        }
+        Ok((Arc::from(points), point_data))
+    }
+
+    fn evaluate_face_point(
+        &mut self,
+        cell_type: CellType,
+        conn: &[u32],
+        rst: [f64; 3],
+        on_face_perimeter: bool,
+    ) -> Result<u32, CoreError> {
+        self.weights_scratch.resize(conn.len(), 0.0);
+        evaluate_cell_basis(cell_type, rst, &mut self.weights_scratch);
+
+        // Fast path: if this subdivision lattice point coincides with an existing VTK node of the
+        // cell (e.g. corner nodes for all S, mid-edge nodes of Quadratic* at S = 2, or Lagrange
+        // nodes when S == order), reuse its original mesh vertex index directly.
+        if let Some(slot) = self
+            .weights_scratch
+            .iter()
+            .position(|&w| (w - 1.0).abs() < 1e-11)
+            && self
+                .weights_scratch
+                .iter()
+                .enumerate()
+                .all(|(idx, &w)| idx == slot || w.abs() < 1e-11)
+        {
+            return Ok(conn[slot]);
+        }
+
+        let src_points = self.grid.points();
+        let mut pos = [0.0f64; 3];
+        for (&node_id, &w) in conn.iter().zip(self.weights_scratch.iter()) {
+            let p = src_points[node_id as usize];
+            pos[0] += w * p[0];
+            pos[1] += w * p[1];
+            pos[2] += w * p[2];
+        }
+
+        if on_face_perimeter {
+            let key = PositionKey([
+                (pos[0] * self.quant_scale).round() as i64,
+                (pos[1] * self.quant_scale).round() as i64,
+                (pos[2] * self.quant_scale).round() as i64,
+            ]);
+            if let Some(&existing) = self.boundary_dedup.get(&key) {
+                return Ok(existing);
+            }
+            let new_idx = try_u32_from_usize(src_points.len() + self.new_points.len())?;
+            self.new_points.push(pos);
+            for (_, acc) in &mut self.new_point_attrs {
+                acc.push_interpolated(conn, &self.weights_scratch);
+            }
+            self.boundary_dedup.insert(key, new_idx);
+            Ok(new_idx)
+        } else {
+            let new_idx = try_u32_from_usize(src_points.len() + self.new_points.len())?;
+            self.new_points.push(pos);
+            for (_, acc) in &mut self.new_point_attrs {
+                acc.push_interpolated(conn, &self.weights_scratch);
+            }
+            Ok(new_idx)
+        }
+    }
+
+    // Helper Takes 8 explicit arguments for clarity rather than an intermediate struct.
+    #[allow(clippy::too_many_arguments)]
+    fn tessellate_tri_face(
+        &mut self,
+        source_cell: u32,
+        cell_type: CellType,
+        conn: &[u32],
+        corner_slots: [u8; 3],
+        subdivisions: u8,
+        triangles: &mut Vec<[u32; 3]>,
+        triangle_source_cells: &mut Vec<u32>,
+        wireframe_edges: &mut Vec<[u32; 2]>,
+    ) -> Result<(), CoreError> {
+        let s = subdivisions as usize;
+        let sf = f64::from(subdivisions);
+        let rst0 = corner_reference_rst(cell_type, corner_slots[0]);
+        let rst1 = corner_reference_rst(cell_type, corner_slots[1]);
+        let rst2 = corner_reference_rst(cell_type, corner_slots[2]);
+
+        let mut rows: Vec<Vec<u32>> = Vec::with_capacity(s + 1);
+        for j in 0..=s {
+            let mut row = Vec::with_capacity(s + 1 - j);
+            for i in 0..=(s - j) {
+                let u = (i as f64) / sf;
+                let v = (j as f64) / sf;
+                let w = 1.0 - u - v;
+                let rst = if cell_type == CellType::QuadraticPyramid && corner_slots[2] == 4 {
+                    let denom = w + u;
+                    let r = if denom > 1e-12 {
+                        (w * rst0[0] + u * rst1[0]) / denom
+                    } else {
+                        0.5
+                    };
+                    let s_coord = if denom > 1e-12 {
+                        (w * rst0[1] + u * rst1[1]) / denom
+                    } else {
+                        0.5
+                    };
+                    [r, s_coord, v]
+                } else {
+                    [
+                        w * rst0[0] + u * rst1[0] + v * rst2[0],
+                        w * rst0[1] + u * rst1[1] + v * rst2[1],
+                        w * rst0[2] + u * rst1[2] + v * rst2[2],
+                    ]
+                };
+                let on_perimeter = i == 0 || j == 0 || i + j == s;
+                let vid = self.evaluate_face_point(cell_type, conn, rst, on_perimeter)?;
+                row.push(vid);
+            }
+            rows.push(row);
+        }
+
+        for j in 0..s {
+            for i in 0..(s - j) {
+                let v00 = rows[j][i];
+                let v10 = rows[j][i + 1];
+                let v01 = rows[j + 1][i];
+                triangles.push([v00, v10, v01]);
+                triangle_source_cells.push(source_cell);
+
+                if i + j + 1 < s {
+                    let v11 = rows[j + 1][i + 1];
+                    triangles.push([v10, v11, v01]);
+                    triangle_source_cells.push(source_cell);
+                }
+            }
+        }
+
+        // Emit only the 3 outer perimeter edges of the original triangle face (each split into S segments).
+        for m in 0..s {
+            push_canonical_edge(wireframe_edges, rows[0][m], rows[0][m + 1]);
+            push_canonical_edge(wireframe_edges, rows[m][s - m], rows[m + 1][s - m - 1]);
+            push_canonical_edge(wireframe_edges, rows[s - m][0], rows[s - m - 1][0]);
+        }
+
+        Ok(())
+    }
+
+    // Helper takes 8 explicit arguments for clarity rather than an intermediate struct.
+    #[allow(clippy::too_many_arguments)]
+    fn tessellate_quad_face(
+        &mut self,
+        source_cell: u32,
+        cell_type: CellType,
+        conn: &[u32],
+        corner_slots: [u8; 4],
+        subdivisions: u8,
+        triangles: &mut Vec<[u32; 3]>,
+        triangle_source_cells: &mut Vec<u32>,
+        wireframe_edges: &mut Vec<[u32; 2]>,
+    ) -> Result<(), CoreError> {
+        let s = subdivisions as usize;
+        let sf = f64::from(subdivisions);
+        let rst0 = corner_reference_rst(cell_type, corner_slots[0]);
+        let rst1 = corner_reference_rst(cell_type, corner_slots[1]);
+        let rst2 = corner_reference_rst(cell_type, corner_slots[2]);
+        let rst3 = corner_reference_rst(cell_type, corner_slots[3]);
+
+        let stride = s + 1;
+        let mut grid_vids = Vec::with_capacity(stride * stride);
+        for j in 0..=s {
+            let v = (j as f64) / sf;
+            for i in 0..=s {
+                let u = (i as f64) / sf;
+                let w00 = (1.0 - u) * (1.0 - v);
+                let w10 = u * (1.0 - v);
+                let w11 = u * v;
+                let w01 = (1.0 - u) * v;
+                let rst = [
+                    w00 * rst0[0] + w10 * rst1[0] + w11 * rst2[0] + w01 * rst3[0],
+                    w00 * rst0[1] + w10 * rst1[1] + w11 * rst2[1] + w01 * rst3[1],
+                    w00 * rst0[2] + w10 * rst1[2] + w11 * rst2[2] + w01 * rst3[2],
+                ];
+                let on_perimeter = i == 0 || i == s || j == 0 || j == s;
+                let vid = self.evaluate_face_point(cell_type, conn, rst, on_perimeter)?;
+                grid_vids.push(vid);
+            }
+        }
+
+        let vid_at = |i: usize, j: usize| -> u32 { grid_vids[j * stride + i] };
+
+        for j in 0..s {
+            for i in 0..s {
+                let v00 = vid_at(i, j);
+                let v10 = vid_at(i + 1, j);
+                let v11 = vid_at(i + 1, j + 1);
+                let v01 = vid_at(i, j + 1);
+                triangles.push([v00, v10, v11]);
+                triangle_source_cells.push(source_cell);
+                triangles.push([v00, v11, v01]);
+                triangle_source_cells.push(source_cell);
+            }
+        }
+
+        // Emit only the 4 outer perimeter edges of the original quad face (each split into S segments).
+        for m in 0..s {
+            push_canonical_edge(wireframe_edges, vid_at(m, 0), vid_at(m + 1, 0));
+            push_canonical_edge(wireframe_edges, vid_at(s, m), vid_at(s, m + 1));
+            push_canonical_edge(wireframe_edges, vid_at(s - m, s), vid_at(s - m - 1, s));
+            push_canonical_edge(wireframe_edges, vid_at(0, s - m), vid_at(0, s - m - 1));
+        }
+
+        Ok(())
+    }
 }
 
 pub(crate) fn map_cell_array(

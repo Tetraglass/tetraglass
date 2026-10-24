@@ -86,6 +86,7 @@ impl ViewportExampleApp {
             range: None,
             use_log_scale,
             solid_color_srgb: [0.82, 0.83, 0.86, 1.0],
+            ..ViewportSurfaceStyle::default()
         };
 
         let mut viewport = ViewportState::from_render_state(&render_state, 4)?;
@@ -118,6 +119,7 @@ impl ViewportExampleApp {
             range: None,
             use_log_scale: self.use_log_scale,
             solid_color_srgb: [0.82, 0.83, 0.86, 1.0],
+            ..ViewportSurfaceStyle::default()
         };
         if let Err(err) = self
             .viewport

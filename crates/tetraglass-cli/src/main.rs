@@ -909,6 +909,17 @@ fn resolve_background_srgb(bg: &BackgroundSpec) -> [f32; 4] {
 
 fn build_surface_style(rep: &EvaluatedRepresentation) -> SurfaceStyle {
     let solid_color_srgb = [rep.color[0], rep.color[1], rep.color[2], rep.opacity as f32];
+    let edge_color_srgb = [
+        rep.edge_color[0],
+        rep.edge_color[1],
+        rep.edge_color[2],
+        rep.opacity as f32,
+    ];
+    let (draw_surface, draw_edges) = match rep.style {
+        RepresentationStyle::Wireframe => (false, true),
+        RepresentationStyle::SurfaceWithEdges => (true, true),
+        _ => (true, false),
+    };
     match &rep.coloring {
         None => SurfaceStyle {
             color_by: ColorBy::Solid,
@@ -916,6 +927,9 @@ fn build_surface_style(rep: &EvaluatedRepresentation) -> SurfaceStyle {
             range: None,
             use_log_scale: false,
             solid_color_srgb,
+            draw_surface,
+            draw_edges,
+            edge_color_srgb,
         },
         Some(c) => SurfaceStyle {
             color_by: build_color_by(c),
@@ -923,6 +937,9 @@ fn build_surface_style(rep: &EvaluatedRepresentation) -> SurfaceStyle {
             range: Some(c.effective_range),
             use_log_scale: c.log_scale,
             solid_color_srgb,
+            draw_surface,
+            draw_edges,
+            edge_color_srgb,
         },
     }
 }

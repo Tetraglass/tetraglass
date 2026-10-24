@@ -63,6 +63,7 @@ fn viewport_widget_resizes_and_runs_prepare_callback_in_egui_wgpu() {
         range: None,
         use_log_scale: false,
         solid_color_srgb: [0.8, 0.8, 0.8, 1.0],
+        ..ViewportSurfaceStyle::default()
     };
     viewport
         .set_surface(headless.device(), &surface, style, true)
@@ -229,6 +230,7 @@ fn viewport_widget_resizes_and_runs_prepare_callback_in_egui_wgpu() {
         range: None,
         use_log_scale: false,
         solid_color_srgb: [0.8, 0.8, 0.8, 1.0],
+        ..ViewportSurfaceStyle::default()
     };
     viewport
         .update_style(headless.queue(), &surface, vec_style)
