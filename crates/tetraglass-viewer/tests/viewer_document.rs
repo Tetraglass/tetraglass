@@ -946,6 +946,7 @@ fn shareable_link_roundtrips_scene_plus_remote_data_urls_and_view_overrides() {
             log_scale: Some(true),
             colorbar: Some(false),
             axes: Some(false),
+            opacity: Some(0.55),
         },
     };
     let link = spec
@@ -985,6 +986,8 @@ fn shareable_link_roundtrips_scene_plus_remote_data_urls_and_view_overrides() {
     assert!(doc.use_log_scale());
     assert!(!doc.colorbar_enabled());
     assert!(!doc.axes_enabled());
+    assert!((doc.opacity() - 0.55).abs() < 1e-4);
+    assert!((doc.active_surface_style().solid_color_srgb[3] - 0.55).abs() < 1e-4);
 
     // 2. Also verify a shareable link with inline compressed scene JSON (`?scene_b64=...`) + remote data URL.
     let inline_scene_spec = ShareableLinkSpec {
@@ -1075,6 +1078,10 @@ fn viewer_session_builds_and_opens_self_contained_and_remote_shareable_links() {
         .document_mut()
         .set_colormap(ColormapName::CoolWarm)
         .expect("set colormap");
+    session1
+        .document_mut()
+        .set_opacity(0.65)
+        .expect("set opacity");
     assert!(session1.document_mut().set_axes_enabled(false));
 
     let bundle_link = session1
@@ -1114,6 +1121,7 @@ fn viewer_session_builds_and_opens_self_contained_and_remote_shareable_links() {
     assert!((session2.viewport().camera().elevation_deg - 41.25).abs() < 1e-6);
     assert!((session2.viewport().camera().zoom - 1.65).abs() < 1e-6);
     assert_eq!(session2.document().colormap(), ColormapName::CoolWarm);
+    assert!((session2.document().opacity() - 0.65).abs() < 1e-4);
     assert!(!session2.document().axes_enabled());
 
     // 3. Load a remote `.pvd` series into `session1`, change step & camera, build a compact URL link, and open it in `session2`.

@@ -79,3 +79,15 @@ fn shade_three_point(
 
     return albedo * (ambient + headlight + key_diff + fill_diff) + vec3<f32>(spec);
 }
+
+// Weighted Blended Order-Independent Transparency (McGuire & Bavoil 2013) depth-and-alpha weight
+// adapted to WebGPU's tight [0, 1] NDC depth range.
+// Monotonically decreases with normalized depth `ndc_z` and increases with `alpha`, staying well
+// within `Rgba16Float` normal range `[6e-5, 65504]` to prevent overflow or underflow.
+fn wboit_weight(ndc_z: f32, alpha: f32) -> f32 {
+    let z = clamp(ndc_z, 0.0, 1.0);
+    let a = clamp(alpha, 1e-3, 1.0);
+    let depth_term = 1.0 - 0.95 * z;
+    let d3 = depth_term * depth_term * depth_term;
+    return a * clamp(10.0 * d3, 1e-2, 300.0);
+}

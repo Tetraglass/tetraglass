@@ -325,3 +325,14 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none.
 - Dependencies added: none (reused existing workspace dependencies `base64`, `flate2`, and `serde`).
 - Follow-ups: M3.3 Transparency.
+
+## 2026-10-25 — M3.3 Transparency (`crates/tetraglass-render`, `crates/tetraglass-viewer`)
+
+- Implemented **Weighted Blended Order-Independent Transparency (WBOIT, McGuire & Bavoil 2013)** in `tetraglass-render`:
+  - Added `WBOIT_ACCUM_FORMAT` (`Rgba16Float`) and `WBOIT_REVEAL_FORMAT` (`Rgba8Unorm`) offscreen attachments (both single-sampled and 4x MSAA resolved) and `wboit_bind_group` to `OffscreenTarget`.
+  - Added `wboit_weight(ndc_z, alpha)` in `common.wgsl`, `@fragment fn fs_wboit` in `surface.wgsl` (with `f16` quantization for commutative accumulation across draw orders), and `wboit_composite.wgsl` for full-screen triangle compositing (`accum.rgb / max(accum.a, 1e-5)` with coverage `1 - reveal.r`).
+  - Extended `GpuSurface` with `opacity()`, `is_opaque()`, and `is_transparent()`, and updated `Renderer::render_internal` to preserve the single-pass fast path when all surfaces are opaque while switching to the 3-pass WBOIT pipeline (Pass 1 opaque depth+color, Pass 2 MRT accumulation+revealage with depth test and no depth write, Pass 3 composite + wireframe edges + annotations) whenever any surface has `0.0 < opacity < 1.0`.
+- Exposed interactive opacity controls in `tetraglass-viewer`: `ViewerDocument::opacity`, `ViewerDocument::set_opacity`, `ShareableViewOverrides::opacity` (`?opacity=`), and an `Opacity` slider in `ViewerSession::show_ui`.
+- Added headless WBOIT integration tests in `crates/tetraglass-render/tests/render_mixed_linear.rs` (verifying monotonic opacity response, multi-surface draw-order invariance, internal triangle-order invariance, and opaque-inside-transparent compositing at both 1x and 4x MSAA) and opacity round-trip tests in `crates/tetraglass-viewer/tests/viewer_document.rs`.
+- Decisions: None.
+- Follow-ups: M3.4 glTF export.

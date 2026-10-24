@@ -659,6 +659,8 @@ pub struct ShareableViewOverrides {
     pub colorbar: Option<bool>,
     /// Orientation axes triad visibility (`?axes=true`).
     pub axes: Option<bool>,
+    /// Primary representation surface opacity in `[0.0, 1.0]` (`?opacity=0.6`).
+    pub opacity: Option<f64>,
 }
 
 impl ShareableViewOverrides {
@@ -675,6 +677,7 @@ impl ShareableViewOverrides {
             && self.log_scale.is_none()
             && self.colorbar.is_none()
             && self.axes.is_none()
+            && self.opacity.is_none()
     }
 
     /// Appends non-empty overrides as `key=value` query parameters to `params`.
@@ -713,6 +716,11 @@ impl ShareableViewOverrides {
         }
         if let Some(axes) = self.axes {
             params.push(format!("axes={axes}"));
+        }
+        if let Some(opacity) = self.opacity
+            && (opacity - 1.0).abs() > 1e-4
+        {
+            params.push(format!("opacity={opacity:.3}"));
         }
     }
 }
@@ -1085,6 +1093,15 @@ fn parse_view_overrides(
         None => parse_bool("log_scale")?,
     };
 
+    let opacity = parse_f64("opacity")?.or(parse_f64("alpha")?);
+    if let Some(op) = opacity
+        && !(0.0..=1.0).contains(&op)
+    {
+        return Err(ViewerError::Validation(format!(
+            "opacity query parameter `{op}` must be in [0.0, 1.0]"
+        )));
+    }
+
     Ok(ShareableViewOverrides {
         azimuth_deg: parse_f64("az")?.or(parse_f64("azimuth")?),
         elevation_deg: parse_f64("el")?.or(parse_f64("elevation")?),
@@ -1096,6 +1113,7 @@ fn parse_view_overrides(
         log_scale,
         colorbar: parse_bool("colorbar")?,
         axes: parse_bool("axes")?,
+        opacity,
     })
 }
 

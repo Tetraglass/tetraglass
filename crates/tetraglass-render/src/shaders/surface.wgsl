@@ -41,12 +41,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    if (is_clipped_by_plane(in.world_pos, surface.clip_plane)) {
-        discard;
-    }
-
+fn shade_surface_fragment(in: VertexOutput) -> vec4<f32> {
     var raw_scalar = in.scalar;
     if (surface.coloring_mode == 2u) {
         raw_scalar = cell_scalars[in.cell_index];
@@ -66,7 +61,38 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let shaded_rgb = shade_three_point(base_color.rgb, in.world_pos, in.world_normal, frame);
-    return vec4<f32>(shaded_rgb, base_color.a);
+    return vec4<f32>(shaded_rgb, clamp(base_color.a, 0.0, 1.0));
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let color = shade_surface_fragment(in);
+    if (is_clipped_by_plane(in.world_pos, surface.clip_plane)) {
+        discard;
+    }
+    return color;
+}
+
+struct WboitAccumOutput {
+    @location(0) accum: vec4<f32>,
+    @location(1) reveal: vec4<f32>,
+};
+
+@fragment
+fn fs_wboit(in: VertexOutput) -> WboitAccumOutput {
+    let color = shade_surface_fragment(in);
+    if (is_clipped_by_plane(in.world_pos, surface.clip_plane) || color.a <= 1e-5) {
+        discard;
+    }
+    let w = wboit_weight(in.clip_position.z, color.a);
+    let raw_accum = vec4<f32>(color.rgb * w, w);
+    var out: WboitAccumOutput;
+    out.accum = vec4<f32>(
+        unpack2x16float(pack2x16float(raw_accum.xy)),
+        unpack2x16float(pack2x16float(raw_accum.zw)),
+    );
+    out.reveal = vec4<f32>(color.a, color.a, color.a, color.a);
+    return out;
 }
 
 @fragment

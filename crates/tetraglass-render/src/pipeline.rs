@@ -20,6 +20,12 @@ pub const DEFAULT_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8
 /// Depth buffer texture format used by offscreen targets.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+/// Color accumulation texture format for Weighted Blended Order-Independent Transparency (`M3.3`).
+pub const WBOIT_ACCUM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// Transmittance revealage texture format for Weighted Blended Order-Independent Transparency (`M3.3`).
+pub const WBOIT_REVEAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
 /// Which component of a [`DataArray`] to map through the colormap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ScalarComponent {
@@ -214,10 +220,39 @@ impl Default for SurfaceStyle {
     }
 }
 
+fn create_wboit_composite_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("tetraglass_wboit_composite_bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
 /// Caller-owned offscreen color and depth render targets.
 ///
 /// Supports `sample_count = 1` (single-sampled) and `sample_count = 4` (4x MSAA resolved into
-/// a 1x `color_texture` suitable for both egui texture registration and PNG readback).
+/// a 1x `color_texture` suitable for both egui texture registration and PNG readback), as well
+/// as Weighted Blended Order-Independent Transparency (`M3.3`) accumulation and revealage targets.
 #[derive(Debug)]
 pub struct OffscreenTarget {
     width: u32,
@@ -229,6 +264,11 @@ pub struct OffscreenTarget {
     egui_color_view: wgpu::TextureView,
     msaa_color_view: Option<wgpu::TextureView>,
     depth_view: wgpu::TextureView,
+    wboit_accum_view: wgpu::TextureView,
+    msaa_wboit_accum_view: Option<wgpu::TextureView>,
+    wboit_reveal_view: wgpu::TextureView,
+    msaa_wboit_reveal_view: Option<wgpu::TextureView>,
+    wboit_bind_group: wgpu::BindGroup,
 }
 
 struct TargetAttachments {
@@ -237,6 +277,11 @@ struct TargetAttachments {
     egui_color_view: wgpu::TextureView,
     msaa_color_view: Option<wgpu::TextureView>,
     depth_view: wgpu::TextureView,
+    wboit_accum_view: wgpu::TextureView,
+    msaa_wboit_accum_view: Option<wgpu::TextureView>,
+    wboit_reveal_view: wgpu::TextureView,
+    msaa_wboit_reveal_view: Option<wgpu::TextureView>,
+    wboit_bind_group: wgpu::BindGroup,
 }
 
 impl OffscreenTarget {
@@ -267,6 +312,11 @@ impl OffscreenTarget {
             egui_color_view: att.egui_color_view,
             msaa_color_view: att.msaa_color_view,
             depth_view: att.depth_view,
+            wboit_accum_view: att.wboit_accum_view,
+            msaa_wboit_accum_view: att.msaa_wboit_accum_view,
+            wboit_reveal_view: att.wboit_reveal_view,
+            msaa_wboit_reveal_view: att.msaa_wboit_reveal_view,
+            wboit_bind_group: att.wboit_bind_group,
         })
     }
 
@@ -293,6 +343,11 @@ impl OffscreenTarget {
         self.egui_color_view = att.egui_color_view;
         self.msaa_color_view = att.msaa_color_view;
         self.depth_view = att.depth_view;
+        self.wboit_accum_view = att.wboit_accum_view;
+        self.msaa_wboit_accum_view = att.msaa_wboit_accum_view;
+        self.wboit_reveal_view = att.wboit_reveal_view;
+        self.msaa_wboit_reveal_view = att.msaa_wboit_reveal_view;
+        self.wboit_bind_group = att.wboit_bind_group;
         Ok(true)
     }
 
@@ -406,12 +461,90 @@ impl OffscreenTarget {
         });
         let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
+        let wboit_accum_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("tetraglass_wboit_accum"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: WBOIT_ACCUM_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let wboit_accum_view = wboit_accum_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let msaa_wboit_accum_view = if sample_count > 1 {
+            let msaa_accum = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("tetraglass_wboit_msaa_accum"),
+                size,
+                mip_level_count: 1,
+                sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: WBOIT_ACCUM_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            Some(msaa_accum.create_view(&wgpu::TextureViewDescriptor::default()))
+        } else {
+            None
+        };
+
+        let wboit_reveal_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("tetraglass_wboit_reveal"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: WBOIT_REVEAL_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let wboit_reveal_view =
+            wboit_reveal_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let msaa_wboit_reveal_view = if sample_count > 1 {
+            let msaa_reveal = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("tetraglass_wboit_msaa_reveal"),
+                size,
+                mip_level_count: 1,
+                sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: WBOIT_REVEAL_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            Some(msaa_reveal.create_view(&wgpu::TextureViewDescriptor::default()))
+        } else {
+            None
+        };
+
+        let wboit_bgl = create_wboit_composite_bind_group_layout(device);
+        let wboit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tetraglass_wboit_composite_bg"),
+            layout: &wboit_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&wboit_accum_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&wboit_reveal_view),
+                },
+            ],
+        });
+
         TargetAttachments {
             color_texture,
             color_view,
             egui_color_view,
             msaa_color_view,
             depth_view,
+            wboit_accum_view,
+            msaa_wboit_accum_view,
+            wboit_reveal_view,
+            msaa_wboit_reveal_view,
+            wboit_bind_group,
         }
     }
 }
@@ -469,6 +602,7 @@ pub struct GpuSurface {
     active_color_by: ColorBy,
     active_colormap: ColormapKind,
     active_clip_plane: Option<ShaderClipPlane>,
+    opacity: f32,
     draw_surface: bool,
     draw_edges: bool,
     data_range: [f64; 2],
@@ -512,6 +646,24 @@ impl GpuSurface {
         self.active_clip_plane
     }
 
+    /// Returns the surface opacity (`solid_color_srgb[3]`, clamped to `0.0..=1.0`) (`M3.3`).
+    #[must_use]
+    pub const fn opacity(&self) -> f32 {
+        self.opacity
+    }
+
+    /// Returns `true` if this surface has non-empty shaded faces with opaque alpha (`opacity >= 0.9999`) (`M3.3`).
+    #[must_use]
+    pub fn is_opaque(&self) -> bool {
+        self.draw_surface && self.vertex_count > 0 && self.opacity >= 0.9999
+    }
+
+    /// Returns `true` if this surface has non-empty shaded faces with semi-transparent alpha (`1e-5 < opacity < 0.9999`) (`M3.3`).
+    #[must_use]
+    pub fn is_transparent(&self) -> bool {
+        self.draw_surface && self.vertex_count > 0 && self.opacity > 1e-5 && self.opacity < 0.9999
+    }
+
     /// Returns the currently active scalar range `[min, max]` mapped across the colormap.
     #[must_use]
     pub const fn effective_range(&self) -> [f64; 2] {
@@ -538,6 +690,8 @@ pub struct Renderer {
     frame_bind_groups: [wgpu::BindGroup; 3],
     surface_bind_group_layout: wgpu::BindGroupLayout,
     surface_pipeline: wgpu::RenderPipeline,
+    wboit_accum_pipeline: wgpu::RenderPipeline,
+    wboit_composite_pipeline: wgpu::RenderPipeline,
     pick_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
     annotation_uniform_buffer: wgpu::Buffer,
@@ -778,6 +932,135 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+
+        let wboit_accum_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("tetraglass_wboit_accum_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &vertex_buffers,
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_wboit"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: WBOIT_ACCUM_FORMAT,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: WBOIT_REVEAL_FORMAT,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Zero,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrc,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Zero,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let wboit_composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("tetraglass_wboit_composite_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/wboit_composite.wgsl").into()),
+        });
+        let wboit_composite_bgl = create_wboit_composite_bind_group_layout(device);
+        let wboit_composite_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("tetraglass_wboit_composite_pipeline_layout"),
+                bind_group_layouts: &[Some(&wboit_composite_bgl)],
+                immediate_size: 0,
+            });
+        let wboit_composite_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("tetraglass_wboit_composite_pipeline"),
+                layout: Some(&wboit_composite_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &wboit_composite_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: sample_count,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &wboit_composite_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
 
         let pick_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("tetraglass_pick_pipeline"),
@@ -1023,6 +1306,8 @@ impl Renderer {
             frame_bind_groups,
             surface_bind_group_layout,
             surface_pipeline,
+            wboit_accum_pipeline,
+            wboit_composite_pipeline,
             pick_pipeline,
             edge_pipeline,
             annotation_uniform_buffer,
@@ -1192,6 +1477,7 @@ impl Renderer {
             active_color_by: style.color_by.clone(),
             active_colormap: style.colormap,
             active_clip_plane: style.clip_plane,
+            opacity: style.solid_color_srgb[3].clamp(0.0, 1.0),
             draw_surface: style.draw_surface,
             draw_edges: style.draw_edges,
             data_range: extracted.data_range,
@@ -1252,6 +1538,7 @@ impl Renderer {
         );
         gpu_surface.active_colormap = style.colormap;
         gpu_surface.active_clip_plane = style.clip_plane;
+        gpu_surface.opacity = style.solid_color_srgb[3].clamp(0.0, 1.0);
         gpu_surface.draw_surface = style.draw_surface;
         gpu_surface.draw_edges = style.draw_edges;
         gpu_surface.effective_range = effective_range;
@@ -1439,47 +1726,203 @@ impl Renderer {
             None => (&target.color_view, None),
         };
 
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("tetraglass_surface_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: color_attachment_view,
-                depth_slice: None,
-                resolve_target,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(clear_linear),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &target.depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
+        let has_transparent = surfaces.iter().any(|s| s.is_transparent());
 
-        pass.set_pipeline(&self.surface_pipeline);
-        for surface in surfaces {
-            if !surface.draw_surface || surface.vertex_count == 0 {
-                continue;
+        if !has_transparent {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("tetraglass_surface_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color_attachment_view,
+                    depth_slice: None,
+                    resolve_target,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear_linear),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &target.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            pass.set_pipeline(&self.surface_pipeline);
+            for surface in surfaces {
+                if !surface.is_opaque() {
+                    continue;
+                }
+                let cm_idx = match surface.active_colormap {
+                    ColormapKind::Viridis => 0,
+                    ColormapKind::Cividis => 1,
+                    ColormapKind::CoolWarm => 2,
+                };
+                pass.set_bind_group(0, &self.frame_bind_groups[cm_idx], &[]);
+                pass.set_bind_group(1, &surface.bind_group, &[]);
+                pass.set_vertex_buffer(0, surface.geometry_buffer.slice(..));
+                pass.set_vertex_buffer(1, surface.scalar_buffer.slice(..));
+                pass.draw(0..surface.vertex_count, 0..1);
             }
-            let cm_idx = match surface.active_colormap {
-                ColormapKind::Viridis => 0,
-                ColormapKind::Cividis => 1,
-                ColormapKind::CoolWarm => 2,
-            };
-            pass.set_bind_group(0, &self.frame_bind_groups[cm_idx], &[]);
-            pass.set_bind_group(1, &surface.bind_group, &[]);
-            pass.set_vertex_buffer(0, surface.geometry_buffer.slice(..));
-            pass.set_vertex_buffer(1, surface.scalar_buffer.slice(..));
-            pass.draw(0..surface.vertex_count, 0..1);
+
+            self.draw_edges_and_annotations(&mut pass, surfaces, &prepared_annotations);
+        } else {
+            // Pass 1: Opaque geometry pass (writes color and depth; defer MSAA resolve to Pass 3).
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("tetraglass_opaque_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: color_attachment_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(clear_linear),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &target.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+
+                pass.set_pipeline(&self.surface_pipeline);
+                for surface in surfaces {
+                    if !surface.is_opaque() {
+                        continue;
+                    }
+                    let cm_idx = match surface.active_colormap {
+                        ColormapKind::Viridis => 0,
+                        ColormapKind::Cividis => 1,
+                        ColormapKind::CoolWarm => 2,
+                    };
+                    pass.set_bind_group(0, &self.frame_bind_groups[cm_idx], &[]);
+                    pass.set_bind_group(1, &surface.bind_group, &[]);
+                    pass.set_vertex_buffer(0, surface.geometry_buffer.slice(..));
+                    pass.set_vertex_buffer(1, surface.scalar_buffer.slice(..));
+                    pass.draw(0..surface.vertex_count, 0..1);
+                }
+            }
+
+            // Pass 2: WBOIT accumulation pass (`accum` + `reveal`, depth-tested against opaque pass).
+            {
+                let (accum_attachment, accum_resolve) = match &target.msaa_wboit_accum_view {
+                    Some(msaa_view) => (msaa_view, Some(&target.wboit_accum_view)),
+                    None => (&target.wboit_accum_view, None),
+                };
+                let (reveal_attachment, reveal_resolve) = match &target.msaa_wboit_reveal_view {
+                    Some(msaa_view) => (msaa_view, Some(&target.wboit_reveal_view)),
+                    None => (&target.wboit_reveal_view, None),
+                };
+
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("tetraglass_wboit_accum_pass"),
+                    color_attachments: &[
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: accum_attachment,
+                            depth_slice: None,
+                            resolve_target: accum_resolve,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: reveal_attachment,
+                            depth_slice: None,
+                            resolve_target: reveal_resolve,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        }),
+                    ],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &target.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+
+                pass.set_pipeline(&self.wboit_accum_pipeline);
+                for surface in surfaces {
+                    if !surface.is_transparent() {
+                        continue;
+                    }
+                    let cm_idx = match surface.active_colormap {
+                        ColormapKind::Viridis => 0,
+                        ColormapKind::Cividis => 1,
+                        ColormapKind::CoolWarm => 2,
+                    };
+                    pass.set_bind_group(0, &self.frame_bind_groups[cm_idx], &[]);
+                    pass.set_bind_group(1, &surface.bind_group, &[]);
+                    pass.set_vertex_buffer(0, surface.geometry_buffer.slice(..));
+                    pass.set_vertex_buffer(1, surface.scalar_buffer.slice(..));
+                    pass.draw(0..surface.vertex_count, 0..1);
+                }
+            }
+
+            // Pass 3: WBOIT composite + wireframe edges + annotations + final MSAA resolve.
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("tetraglass_wboit_composite_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: color_attachment_view,
+                        depth_slice: None,
+                        resolve_target,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &target.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+
+                pass.set_pipeline(&self.wboit_composite_pipeline);
+                pass.set_bind_group(0, &target.wboit_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+
+                self.draw_edges_and_annotations(&mut pass, surfaces, &prepared_annotations);
+            }
         }
 
+        Ok(())
+    }
+
+    fn draw_edges_and_annotations<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        surfaces: &[&'a GpuSurface],
+        prepared_annotations: &'a Option<(wgpu::Buffer, wgpu::BindGroup, u32)>,
+    ) {
         if surfaces
             .iter()
             .any(|s| s.draw_edges && s.edge_vertex_count > 0)
@@ -1501,14 +1944,12 @@ impl Renderer {
             }
         }
 
-        if let Some((ref vbuf, ref bg, vcount)) = prepared_annotations {
+        if let Some((vbuf, bg, vcount)) = prepared_annotations {
             pass.set_pipeline(&self.annotation_pipeline);
             pass.set_bind_group(0, bg, &[]);
             pass.set_vertex_buffer(0, vbuf.slice(..));
-            pass.draw(0..vcount, 0..1);
+            pass.draw(0..*vcount, 0..1);
         }
-
-        Ok(())
     }
 
     /// Records a GPU ID buffer render pass into `encoder`, drawing `surfaces` into `target`
@@ -1573,7 +2014,7 @@ impl Renderer {
 
         pass.set_pipeline(&self.pick_pipeline);
         for surface in surfaces {
-            if !surface.draw_surface || surface.vertex_count == 0 {
+            if !surface.draw_surface || surface.vertex_count == 0 || surface.opacity <= 1e-5 {
                 continue;
             }
             let cm_idx = match surface.active_colormap {

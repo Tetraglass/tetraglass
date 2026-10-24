@@ -315,3 +315,237 @@ fn render_surface_with_edges_and_wireframe_draws_original_element_edges() {
         "unexpected wireframe pixel count {wire_non_white} vs surface {surf_non_white}"
     );
 }
+
+#[test]
+fn weighted_blended_oit_is_order_independent_and_composites_over_opaque_geometry() {
+    use tetraglass_core::{Attributes, SurfaceMesh};
+    use tetraglass_filters::{LinearizeParams, SliceParams, linearize, slice};
+
+    let root = workspace_root();
+    let hex_path = root.join("testdata/vtk/hex_linear.vtu");
+    let grid = read_vtu_from_path(&hex_path).expect("load hex_linear.vtu");
+    let shell_surface = extract_external_surface(&grid).expect("extract shell surface");
+    let tet_view = linearize(&grid, &LinearizeParams::default()).expect("linearize hex_linear");
+    let slice_x = slice(
+        &tet_view,
+        &SliceParams {
+            origin: Some([1.0, 1.0, 1.0]),
+            normal: [1.0, 0.0, 0.0],
+        },
+    )
+    .expect("slice x");
+    let slice_z = slice(
+        &tet_view,
+        &SliceParams {
+            origin: Some([1.0, 1.0, 1.0]),
+            normal: [0.0, 0.0, 1.0],
+        },
+    )
+    .expect("slice z");
+
+    let bounds = shell_surface.bounds().expect("shell bounds");
+    let dataset_center = bounds.center();
+    let camera = Camera::fit_bounds(bounds, 35.0, 24.0);
+    let ctx = HeadlessContext::new().expect("headless context");
+
+    for sample_count in [1u32, 4u32] {
+        let renderer = Renderer::new(
+            ctx.device(),
+            ctx.queue(),
+            DEFAULT_COLOR_FORMAT,
+            sample_count,
+        )
+        .expect("create renderer");
+        let target =
+            OffscreenTarget::new(ctx.device(), 400, 300, DEFAULT_COLOR_FORMAT, sample_count)
+                .expect("create target");
+
+        let render_surfaces = |surfaces: &[&tetraglass_render::GpuSurface]| -> RenderedImage {
+            let mut encoder = ctx
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            renderer
+                .render(
+                    &mut encoder,
+                    ctx.queue(),
+                    &target,
+                    &camera,
+                    [1.0, 1.0, 1.0, 1.0],
+                    surfaces,
+                )
+                .expect("render surfaces");
+            ctx.queue().submit(std::iter::once(encoder.finish()));
+            ctx.readback_target(&target).expect("readback")
+        };
+
+        // 1. Monotonic opacity response on white background: 0.0 -> 0.35 -> 0.70 -> 1.0.
+        let mut mean_luma_by_opacity = Vec::new();
+        for &alpha in &[0.0f32, 0.35, 0.70, 1.0] {
+            let style = SurfaceStyle {
+                color_by: ColorBy::Solid,
+                solid_color_srgb: [0.15, 0.30, 0.85, alpha],
+                ..SurfaceStyle::default()
+            };
+            let gpu_surf = renderer
+                .upload_surface_with_center(ctx.device(), &shell_surface, dataset_center, &style)
+                .expect("upload shell");
+            let img = render_surfaces(&[&gpu_surf]);
+            if alpha == 0.0 {
+                assert!(
+                    img.as_rgba8()
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|&px| px == [255, 255, 255, 255]),
+                    "opacity 0.0 must leave background untouched"
+                );
+            }
+            let sum_r: u64 = img
+                .as_rgba8()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|px| u64::from(px[0]) + u64::from(px[1]) + u64::from(px[2]))
+                .sum();
+            mean_luma_by_opacity.push(sum_r);
+        }
+        assert!(
+            mean_luma_by_opacity[0] > mean_luma_by_opacity[1]
+                && mean_luma_by_opacity[1] > mean_luma_by_opacity[2]
+                && mean_luma_by_opacity[2] > mean_luma_by_opacity[3],
+            "expected monotonic darkening over white background as opacity increases: {mean_luma_by_opacity:?}"
+        );
+
+        // 2. Multi-surface order independence: `[slice_x, slice_z]` vs `[slice_z, slice_x]`.
+        let gpu_slice_x = renderer
+            .upload_surface_with_center(
+                ctx.device(),
+                &slice_x,
+                dataset_center,
+                &SurfaceStyle {
+                    color_by: ColorBy::Solid,
+                    solid_color_srgb: [0.90, 0.20, 0.20, 0.55],
+                    ..SurfaceStyle::default()
+                },
+            )
+            .expect("upload slice_x");
+        let gpu_slice_z = renderer
+            .upload_surface_with_center(
+                ctx.device(),
+                &slice_z,
+                dataset_center,
+                &SurfaceStyle {
+                    color_by: ColorBy::Solid,
+                    solid_color_srgb: [0.15, 0.45, 0.90, 0.55],
+                    ..SurfaceStyle::default()
+                },
+            )
+            .expect("upload slice_z");
+
+        let img_xz = render_surfaces(&[&gpu_slice_x, &gpu_slice_z]);
+        let img_zx = render_surfaces(&[&gpu_slice_z, &gpu_slice_x]);
+        let cmp_order = img_xz
+            .compare(&img_zx, 1, 0.0)
+            .expect("compare [x, z] vs [z, x]");
+        assert_eq!(
+            cmp_order.differing_pixels, 0,
+            "WBOIT must be independent of transparent surface draw order (sample_count={sample_count}, max_diff={})",
+            cmp_order.max_channel_diff
+        );
+
+        // 3. Triangle-order independence inside a closed self-overlapping transparent mesh.
+        let reversed_triangles: Vec<[u32; 3]> =
+            shell_surface.triangles().iter().copied().rev().collect();
+        let num_tris = reversed_triangles.len();
+        let reversed_shell = SurfaceMesh::new(
+            shell_surface.points().to_vec(),
+            reversed_triangles,
+            vec![0u32; num_tris],
+            vec![0u32; num_tris],
+            Attributes::new(shell_surface.num_points()),
+            Attributes::new(num_tris),
+        )
+        .expect("build reversed-triangle shell");
+        let trans_shell_style = SurfaceStyle {
+            color_by: ColorBy::Solid,
+            solid_color_srgb: [0.20, 0.65, 0.50, 0.45],
+            ..SurfaceStyle::default()
+        };
+        let gpu_shell_fwd = renderer
+            .upload_surface_with_center(
+                ctx.device(),
+                &shell_surface,
+                dataset_center,
+                &trans_shell_style,
+            )
+            .expect("upload forward shell");
+        let gpu_shell_rev = renderer
+            .upload_surface_with_center(
+                ctx.device(),
+                &reversed_shell,
+                dataset_center,
+                &trans_shell_style,
+            )
+            .expect("upload reversed shell");
+        let img_fwd = render_surfaces(&[&gpu_shell_fwd]);
+        let img_rev = render_surfaces(&[&gpu_shell_rev]);
+        let cmp_tri_order = img_fwd
+            .compare(&img_rev, 1, 0.0)
+            .expect("compare forward vs reversed triangle order");
+        assert_eq!(
+            cmp_tri_order.differing_pixels, 0,
+            "WBOIT must be independent of internal triangle order (sample_count={sample_count}, max_diff={})",
+            cmp_tri_order.max_channel_diff
+        );
+
+        // 4. Opaque inner slice inside a semi-transparent outer shell:
+        //    `[transparent_shell, opaque_slice]` vs `[opaque_slice, transparent_shell]` must match
+        //    and show the inner slice through the outer shell.
+        let gpu_opaque_slice = renderer
+            .upload_surface_with_center(
+                ctx.device(),
+                &slice_x,
+                dataset_center,
+                &SurfaceStyle {
+                    color_by: ColorBy::point("linear"),
+                    colormap: ColormapKind::Viridis,
+                    solid_color_srgb: [1.0, 1.0, 1.0, 1.0],
+                    ..SurfaceStyle::default()
+                },
+            )
+            .expect("upload opaque slice");
+
+        let img_shell_then_slice = render_surfaces(&[&gpu_shell_fwd, &gpu_opaque_slice]);
+        let img_slice_then_shell = render_surfaces(&[&gpu_opaque_slice, &gpu_shell_fwd]);
+        let cmp_mixed = img_shell_then_slice
+            .compare(&img_slice_then_shell, 0, 0.0)
+            .expect("compare [shell, slice] vs [slice, shell]");
+        assert_eq!(
+            cmp_mixed.differing_pixels, 0,
+            "opaque + transparent draw order must be invariant (sample_count={sample_count})"
+        );
+
+        let img_slice_only = render_surfaces(&[&gpu_opaque_slice]);
+        let cmp_vs_slice_only = img_shell_then_slice
+            .compare(&img_slice_only, 2, 0.0)
+            .expect("compare composite vs slice only");
+        assert!(
+            cmp_vs_slice_only.differing_pixels > 5000,
+            "transparent shell should visibly tint and surround the inner slice"
+        );
+        let cmp_vs_shell_only = img_shell_then_slice
+            .compare(&img_fwd, 2, 0.0)
+            .expect("compare composite vs shell only");
+        assert!(
+            cmp_vs_shell_only.differing_pixels > 2000,
+            "inner opaque slice should be clearly visible through the transparent shell"
+        );
+
+        if sample_count == 4 {
+            let out_dir = root.join("target/render-tests");
+            img_shell_then_slice
+                .save_png(out_dir.join("wboit_shell_and_slice.png"))
+                .expect("save wboit_shell_and_slice.png");
+        }
+    }
+}

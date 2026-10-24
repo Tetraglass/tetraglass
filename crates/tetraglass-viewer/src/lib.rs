@@ -306,6 +306,7 @@ pub struct ViewerDocument {
     use_log_scale: bool,
     show_colorbar: bool,
     show_axes: bool,
+    opacity: f64,
     watcher: Option<SceneFileWatcher>,
     last_reload_error: Option<String>,
     reload_count: usize,
@@ -362,6 +363,7 @@ impl ViewerDocument {
             use_log_scale: false,
             show_colorbar: false,
             show_axes: true,
+            opacity: 1.0,
             watcher,
             last_reload_error: None,
             reload_count: 0,
@@ -396,6 +398,7 @@ impl ViewerDocument {
             use_log_scale: false,
             show_colorbar: false,
             show_axes: true,
+            opacity: 1.0,
             watcher: None,
             last_reload_error: None,
             reload_count: 0,
@@ -478,6 +481,7 @@ impl ViewerDocument {
             use_log_scale: false,
             show_colorbar: false,
             show_axes: true,
+            opacity: 1.0,
             watcher: None,
             last_reload_error: None,
             reload_count: 0,
@@ -540,6 +544,7 @@ impl ViewerDocument {
             use_log_scale: false,
             show_colorbar: false,
             show_axes: true,
+            opacity: 1.0,
             watcher: None,
             last_reload_error: None,
             reload_count: 0,
@@ -610,6 +615,9 @@ impl ViewerDocument {
         }
         if let Some(axes) = overrides.axes {
             self.set_axes_enabled(axes);
+        }
+        if let Some(opacity) = overrides.opacity {
+            self.set_opacity(opacity)?;
         }
         Ok(())
     }
@@ -939,6 +947,32 @@ impl ViewerDocument {
         true
     }
 
+    /// Returns the surface opacity (`0.0..=1.0`) of the primary representation (`M3.3`).
+    #[must_use]
+    pub const fn opacity(&self) -> f64 {
+        self.opacity
+    }
+
+    /// Sets the surface opacity (`0.0..=1.0`) of the primary representation (`M3.3`).
+    pub fn set_opacity(&mut self, opacity: f64) -> Result<bool, ViewerError> {
+        if !opacity.is_finite() || !(0.0..=1.0).contains(&opacity) {
+            return Err(ViewerError::Validation(format!(
+                "opacity `{opacity}` must be finite and in [0.0, 1.0]"
+            )));
+        }
+        if (self.opacity - opacity).abs() <= 1e-6 {
+            return Ok(false);
+        }
+        self.opacity = opacity;
+        if let Some(rep) = self.scene.view.show.first_mut() {
+            rep.opacity = opacity;
+        }
+        self.evaluated = self
+            .evaluator
+            .evaluate_scene_at_time(&self.scene, TimeSelector::step(self.current_step))?;
+        Ok(true)
+    }
+
     /// Returns the most recent hot-reload error message, if the last reload attempt failed.
     #[must_use]
     pub fn last_reload_error(&self) -> Option<&str> {
@@ -1110,6 +1144,7 @@ impl ViewerDocument {
             self.colormap = rep.colormap;
             self.use_log_scale = rep.log_scale;
             self.show_colorbar = rep.colorbar.is_enabled();
+            self.opacity = rep.opacity;
         }
         self.show_axes = self.scene.view.axes;
     }
@@ -1547,6 +1582,7 @@ impl ViewerSession {
                     log_scale: Some(self.doc.use_log_scale()),
                     colorbar: Some(self.doc.colorbar_enabled()),
                     axes: Some(self.doc.axes_enabled()),
+                    opacity: Some(self.doc.opacity()),
                 },
             };
             spec.to_viewer_url(base_viewer_url)
@@ -2231,6 +2267,7 @@ impl ViewerSession {
         let mut log_scale_changed_to: Option<bool> = None;
         let mut colorbar_changed_to: Option<bool> = None;
         let mut axes_changed_to: Option<bool> = None;
+        let mut opacity_changed_to: Option<f64> = None;
         let mut trigger_reload = false;
         let mut trigger_load_url = false;
         let mut trigger_reset_camera = false;
@@ -2413,6 +2450,18 @@ impl ViewerSession {
                 let mut show_axes = self.doc.axes_enabled();
                 if ui.checkbox(&mut show_axes, "Show axes triad").changed() {
                     axes_changed_to = Some(show_axes);
+                }
+
+                let mut opacity_val = self.doc.opacity();
+                if ui
+                    .add(
+                        egui::Slider::new(&mut opacity_val, 0.05..=1.0)
+                            .text("Opacity")
+                            .show_value(true),
+                    )
+                    .changed()
+                {
+                    opacity_changed_to = Some(opacity_val);
                 }
 
                 if let Some([lo, hi]) = self.viewport.effective_range() {
@@ -2641,6 +2690,11 @@ impl ViewerSession {
         }
         if let Some(new_axes) = axes_changed_to
             && self.doc.set_axes_enabled(new_axes)
+        {
+            style_or_annotations_dirty = true;
+        }
+        if let Some(new_opacity) = opacity_changed_to
+            && let Ok(true) = self.doc.set_opacity(new_opacity)
         {
             style_or_annotations_dirty = true;
         }
