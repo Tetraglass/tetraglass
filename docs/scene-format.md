@@ -44,7 +44,8 @@ Every filter has `type` and `input`. Arrays on the input are carried to the outp
 "hull": { "type": "surface", "input": "flow" },
 "cut": { "type": "slice", "input": "flow", "origin": [1.0, 0.5, 0.5], "normal": [1.0, 0.0, 0.0] },
 "iso": { "type": "contour", "input": "flow", "field": "velocity:magnitude", "values": [0.5, 1.0, 1.5] },
-"half": { "type": "clip", "input": "flow", "origin": [1.0, 0.5, 0.5], "normal": [1.0, 0.0, 0.0], "keep": "back", "mode": "exact" }
+"half": { "type": "clip", "input": "flow", "origin": [1.0, 0.5, 0.5], "normal": [1.0, 0.0, 0.0], "keep": "back", "mode": "exact" },
+"band": { "type": "threshold", "input": "flow", "field": "pressure", "min": 100.0, "max": 200.0 }
 ```
 
 | `type` | Milestone | Fields |

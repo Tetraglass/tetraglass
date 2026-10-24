@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "sources": {
+    "mesh": {
+      "file": "../testdata/vtk/hex_linear.vtu"
+    }
+  },
+  "filters": {
+    "thresholded": {
+      "type": "threshold",
+      "input": "mesh",
+      "field": "linear",
+      "min": 0.0,
+      "max": 9.0
+    }
+  },
+  "view": {
+    "show": [
+      {
+        "input": "thresholded",
+        "style": "surface_with_edges",
+        "color_by": "linear",
+        "colormap": "viridis",
+        "range": [0.0, 12.0],
+        "edge_color": "dimgray",
+        "colorbar": {
+          "title": "linear",
+          "position": "right"
+        }
+      },
+      {
+        "input": "mesh",
+        "style": "wireframe",
+        "edge_color": "silver"
+      }
+    ],
+    "camera": {
+      "fit": "all",
+      "azimuth": 35.0,
+      "elevation": 24.0,
+      "zoom": 1.0,
+      "projection": "perspective"
+    },
+    "lights": "default",
+    "background": "white",
+    "axes": true,
+    "title": "Threshold (0 <= linear <= 9)"
+  },
+  "output": {
+    "image": "threshold.png",
+    "size": [800, 600],
+    "time": "first",
+    "msaa": 4,
+    "engine": "raster"
+  }
+}

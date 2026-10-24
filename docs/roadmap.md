@@ -48,7 +48,7 @@ Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 next.**
 - [x] **M2.3b Slice scene integration and gallery scene.** `Filter::Slice` in `tetraglass-scene`, semantic validation (`origin` default, non-zero `normal`), JSON Schema snapshot, `docs/scene-format.md`, and slice gallery scene with baseline (`/author-scene`, `/render-check`).
 - [x] **M2.4 Contour.** Multiple isovalues, all arrays interpolated.
 - [x] **M2.5 Clip.** Exact and crinkle modes.
-- [ ] **M2.6 Threshold.**
+- [x] **M2.6 Threshold.**
 - [ ] **M2.7 Picking.** GPU ID buffer; value probe in the widget and viewer.
 - [ ] **M2.8 Interactive clipping.** Shader clip plane while dragging; exact clip on a worker thread, swapped in when ready.
 - [ ] **M2.9 Performance pass.** Meet the M1.9 target or record what was cut.

@@ -501,3 +501,73 @@ fn validates_clip_filter_normal_volume_input_and_allows_downstream_volume_filter
     // `slice_of_clip` takes `good_clip` (a volume filter) as input and must not report an error.
     assert!(!by_path.contains_key("filters.slice_of_clip.input"));
 }
+
+#[test]
+fn validates_threshold_filter_bounds_field_and_volume_input() {
+    let mut sources = BTreeMap::new();
+    sources.insert("flow".to_string(), flow_grid_with_pressure_and_velocity());
+
+    let scene = Scene::from_json_str(
+        r#"{
+            "version": 1,
+            "sources": {
+                "flow": { "file": "results.vtu" }
+            },
+            "filters": {
+                "hull": { "type": "surface", "input": "flow" },
+                "no_bounds": { "type": "threshold", "input": "flow", "field": "pressure" },
+                "inverted": { "type": "threshold", "input": "flow", "field": "pressure", "min": 200.0, "max": 100.0 },
+                "typo_field": { "type": "threshold", "input": "flow", "field": "presure", "min": 0.0 },
+                "wrong_assoc": { "type": "threshold", "input": "flow", "field": "point:cell_id", "min": 0.0 },
+                "bad_comp": { "type": "threshold", "input": "flow", "field": "pressure:x", "min": 0.0 },
+                "surf_input": { "type": "threshold", "input": "hull", "field": "pressure", "min": 0.0 },
+                "good_cell_thresh": { "type": "threshold", "input": "flow", "field": "cell:cell_id", "min": 0.0, "max": 3.0 },
+                "slice_of_thresh": { "type": "slice", "input": "good_cell_thresh", "normal": [0.0, 0.0, 1.0] }
+            },
+            "view": {
+                "show": [
+                    { "input": "slice_of_thresh" }
+                ]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let report = validate_scene(&scene, &sources).expect_err("must report threshold errors");
+    let by_path: BTreeMap<&str, &ValidationIssue> = report
+        .issues()
+        .iter()
+        .map(|i| (i.path.as_str(), i))
+        .collect();
+
+    assert_eq!(
+        by_path["filters.no_bounds"].message,
+        "threshold filter requires at least one of min or max"
+    );
+    assert_eq!(
+        by_path["filters.inverted"].suggestion.as_deref(),
+        Some("did you mean min: 100, max: 200?")
+    );
+    assert_eq!(
+        by_path["filters.typo_field.field"].suggestion.as_deref(),
+        Some("did you mean \"pressure\"?")
+    );
+    assert_eq!(
+        by_path["filters.wrong_assoc.field"].suggestion.as_deref(),
+        Some("did you mean \"cell:cell_id\"?")
+    );
+    assert!(
+        by_path["filters.bad_comp.field"]
+            .message
+            .contains("component \"x\" is not valid")
+    );
+    assert!(
+        by_path["filters.surf_input.input"]
+            .message
+            .contains("requires a volume dataset input")
+    );
+    // `good_cell_thresh` and `slice_of_thresh` must not report any validation issues.
+    assert!(!by_path.contains_key("filters.good_cell_thresh"));
+    assert!(!by_path.contains_key("filters.good_cell_thresh.field"));
+    assert!(!by_path.contains_key("filters.slice_of_thresh.input"));
+}

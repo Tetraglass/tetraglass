@@ -272,6 +272,24 @@ pub enum Filter {
         #[serde(default = "default_clip_mode")]
         mode: ClipMode,
     },
+
+    /// Keeps cells of the input volume dataset whose attribute value is within `[min, max]` (`"threshold"`).
+    #[serde(rename_all = "snake_case")]
+    Threshold {
+        /// Name of the input source or filter.
+        input: String,
+
+        /// Attribute array reference (`"[point:|cell:]<array>[:<component>]"`) to threshold.
+        field: String,
+
+        /// Optional inclusive lower bound (omit for a one-sided `<= max` threshold).
+        #[serde(default = "default_none_f64")]
+        min: Option<f64>,
+
+        /// Optional inclusive upper bound (omit for a one-sided `>= min` threshold).
+        #[serde(default = "default_none_f64")]
+        max: Option<f64>,
+    },
 }
 
 impl Filter {
@@ -347,6 +365,44 @@ impl Filter {
         }
     }
 
+    /// Creates a two-sided [`Filter::Threshold`] reading from `input` on `field` in `[min, max]`.
+    #[must_use]
+    pub fn threshold(
+        input: impl Into<String>,
+        field: impl Into<String>,
+        min: f64,
+        max: f64,
+    ) -> Self {
+        Self::Threshold {
+            input: input.into(),
+            field: field.into(),
+            min: Some(min),
+            max: Some(max),
+        }
+    }
+
+    /// Creates a one-sided lower [`Filter::Threshold`] (`value >= min`).
+    #[must_use]
+    pub fn threshold_min(input: impl Into<String>, field: impl Into<String>, min: f64) -> Self {
+        Self::Threshold {
+            input: input.into(),
+            field: field.into(),
+            min: Some(min),
+            max: None,
+        }
+    }
+
+    /// Creates a one-sided upper [`Filter::Threshold`] (`value <= max`).
+    #[must_use]
+    pub fn threshold_max(input: impl Into<String>, field: impl Into<String>, max: f64) -> Self {
+        Self::Threshold {
+            input: input.into(),
+            field: field.into(),
+            min: None,
+            max: Some(max),
+        }
+    }
+
     /// Returns the name of the upstream source or filter that feeds this filter.
     #[must_use]
     pub fn input(&self) -> &str {
@@ -354,7 +410,8 @@ impl Filter {
             Self::Surface { input }
             | Self::Slice { input, .. }
             | Self::Contour { input, .. }
-            | Self::Clip { input, .. } => input,
+            | Self::Clip { input, .. }
+            | Self::Threshold { input, .. } => input,
         }
     }
 }

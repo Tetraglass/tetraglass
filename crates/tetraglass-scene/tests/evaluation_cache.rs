@@ -537,3 +537,64 @@ fn clip_filter_evaluates_exact_and_crinkle_modes_caches_and_chains_into_slice_an
     assert_eq!(evaluator.filter_executions(), 2);
     assert!(Arc::ptr_eq(clipped_surf, &eval2.representations[0].surface));
 }
+
+#[test]
+fn threshold_filter_evaluates_point_and_cell_arrays_caches_and_chains_into_slice() {
+    let hex = read_vtu_from_path(testdata_vtu("hex_linear.vtu")).expect("load hex_linear.vtu");
+    let mut evaluator = SceneEvaluator::new();
+    evaluator.insert_source("hex", hex);
+
+    let mut scene = Scene::from_json_str(
+        r#"{
+            "version": 1,
+            "sources": {
+                "hex": { "file": "testdata/vtk/hex_linear.vtu" }
+            },
+            "filters": {
+                "lower_layer": {
+                    "type": "threshold",
+                    "input": "hex",
+                    "field": "cell:cell_id",
+                    "min": 0.0,
+                    "max": 3.0
+                },
+                "cut_of_layer": {
+                    "type": "slice",
+                    "input": "lower_layer",
+                    "origin": [1.0, 1.0, 0.5],
+                    "normal": [0.0, 0.0, 1.0]
+                }
+            },
+            "view": {
+                "show": [
+                    { "input": "lower_layer", "color_by": "linear", "colorbar": true },
+                    { "input": "cut_of_layer", "color_by": "linear" }
+                ]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let eval1 = evaluator
+        .evaluate_scene(&scene)
+        .expect("evaluate threshold + slice scene");
+    assert_eq!(eval1.representations.len(), 2);
+    assert_eq!(evaluator.filter_executions(), 2);
+    assert_eq!(evaluator.cache_hits(), 1);
+
+    // `cell_id` in 0..=3 on hex_linear.vtu is the [0, 2] x [0, 2] x [0, 1] bottom slab (surface area 2*(2*2 + 2*1 + 2*1) = 16.0).
+    let layer_surf = &eval1.representations[0].surface;
+    assert!((layer_surf.total_area() - 16.0).abs() < 1e-11);
+
+    // `cut_of_layer` at z = 0.5 on [0, 2] x [0, 2] has area 4.0.
+    let slice_surf = &eval1.representations[1].surface;
+    assert!((slice_surf.total_area() - 4.0).abs() < 1e-11);
+
+    // Changing view-only properties does not re-execute either filter.
+    scene.view.show[0].colormap = ColormapName::Turbo;
+    let eval2 = evaluator
+        .evaluate_scene(&scene)
+        .expect("re-evaluate threshold + slice scene");
+    assert_eq!(evaluator.filter_executions(), 2);
+    assert!(Arc::ptr_eq(layer_surf, &eval2.representations[0].surface));
+}

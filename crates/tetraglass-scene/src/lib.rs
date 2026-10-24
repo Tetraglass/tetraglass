@@ -642,4 +642,54 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn parses_threshold_filter_two_sided_and_one_sided() {
+        let json = r#"{
+            "version": 1,
+            "sources": {
+                "flow": { "file": "results.vtu" }
+            },
+            "filters": {
+                "band": {
+                    "type": "threshold",
+                    "input": "flow",
+                    "field": "pressure",
+                    "min": 100.0,
+                    "max": 200.0
+                },
+                "lower_only": {
+                    "type": "threshold",
+                    "input": "flow",
+                    "field": "cell:cell_id",
+                    "min": 2.0
+                },
+                "upper_only": {
+                    "type": "threshold",
+                    "input": "flow",
+                    "field": "velocity:magnitude",
+                    "max": 10.0
+                }
+            },
+            "view": {
+                "show": [
+                    { "input": "band" }
+                ]
+            }
+        }"#;
+
+        let scene = Scene::from_json_str(json).expect("threshold scene should parse");
+        assert_eq!(
+            scene.filters["band"],
+            Filter::threshold("flow", "pressure", 100.0, 200.0)
+        );
+        assert_eq!(
+            scene.filters["lower_only"],
+            Filter::threshold_min("flow", "cell:cell_id", 2.0)
+        );
+        assert_eq!(
+            scene.filters["upper_only"],
+            Filter::threshold_max("flow", "velocity:magnitude", 10.0)
+        );
+    }
 }

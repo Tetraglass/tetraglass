@@ -12,3 +12,4 @@ Reproducible scene files rendered in CI and compared against `tests/baselines/`.
 | `slice.json` | Diagonal `slice` plane (`normal: [1.0, -0.8, 0.9]`) through `hex_linear.vtu` colored by `linear` with `surface_with_edges` inside a `silver` outer element wireframe. |
 | `contour.json` | Multi-isovalue `contour` (`values: [2.5, 5.0, 7.5, 10.0]`) of `linear` on `hex_linear.vtu` colored with Turbo inside a `silver` outer element wireframe. |
 | `clip.json` | Exact plane `clip` (`normal: [1.0, -0.8, 0.9]`, `keep: "back"`) of `hex_linear.vtu` colored by `linear` with `surface_with_edges` inside a `silver` outer element wireframe. |
+| `threshold.json` | Whole-cell `threshold` (`field: "linear"`, `min: 0.0`, `max: 9.0`) on `hex_linear.vtu` keeping 5 of 8 hexahedra with `surface_with_edges` inside a `silver` outer element wireframe. |

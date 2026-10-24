@@ -17,8 +17,9 @@ use tetraglass_core::{
 };
 use tetraglass_filters::{
     ClipParams, ContourComponent, ContourParams, DEFAULT_SUBDIVISIONS, LinearizeParams,
-    SliceParams, clip, contour, extract_external_surface_with_subdivisions,
-    extract_tet_view_surface, linearize, slice,
+    SliceParams, ThresholdAssociation, ThresholdComponent, ThresholdParams, clip, contour,
+    extract_external_surface_with_subdivisions, extract_tet_view_surface, linearize, slice,
+    threshold,
 };
 use tetraglass_io::IoError;
 
@@ -262,6 +263,33 @@ fn hash_clip_filter(
         ClipMode::Exact => 0,
         ClipMode::Crinkle => 1,
     });
+    PipelineHash(h.finish())
+}
+
+fn hash_threshold_filter(
+    upstream: PipelineHash,
+    field: &str,
+    min: Option<f64>,
+    max: Option<f64>,
+) -> PipelineHash {
+    let mut h = FnvHasher::new();
+    h.write_str("filter:threshold");
+    h.write_u64(upstream.0);
+    h.write_str(field);
+    match min {
+        Some(lo) => {
+            h.write_u8(1);
+            h.write_f64(lo);
+        }
+        None => h.write_u8(0),
+    }
+    match max {
+        Some(hi) => {
+            h.write_u8(1);
+            h.write_f64(hi);
+        }
+        None => h.write_u8(0),
+    }
     PipelineHash(h.finish())
 }
 
@@ -577,6 +605,26 @@ impl SceneEvaluator {
                     )?;
                     return Ok((clip_hash, EvaluatedDataset::TetVolume(clipped)));
                 }
+                Filter::Threshold {
+                    input,
+                    field,
+                    min,
+                    max,
+                } => {
+                    let (upstream_hash, upstream_data) = self.evaluate_dataset(scene, input)?;
+                    let threshold_hash = hash_threshold_filter(upstream_hash, field, *min, *max);
+                    let subdivisions = resolve_source_subdivisions(scene, input);
+                    let thresholded = self.get_or_threshold_volume(
+                        threshold_hash,
+                        upstream_hash,
+                        upstream_data,
+                        subdivisions,
+                        field,
+                        *min,
+                        *max,
+                    )?;
+                    return Ok((threshold_hash, EvaluatedDataset::TetVolume(thresholded)));
+                }
             }
         }
 
@@ -708,6 +756,84 @@ impl SceneEvaluator {
         let clipped = Arc::new(clip(&tet_view, params)?);
         self.tet_view_cache.insert(clip_hash, Arc::clone(&clipped));
         Ok(clipped)
+    }
+
+    #[allow(clippy::too_many_arguments)] // Reason: passes hash, upstream data, subdivisions, and threshold parameters together
+    fn get_or_threshold_volume(
+        &mut self,
+        threshold_hash: PipelineHash,
+        upstream_hash: PipelineHash,
+        upstream_data: EvaluatedDataset,
+        subdivisions: u8,
+        raw_field: &str,
+        min: Option<f64>,
+        max: Option<f64>,
+    ) -> Result<Arc<TetView>, SceneError> {
+        if let Some(cached) = self.tet_view_cache.get(&threshold_hash) {
+            self.cache_hits += 1;
+            return Ok(Arc::clone(cached));
+        }
+
+        let tet_view =
+            self.resolve_volume_tet_view(upstream_hash, upstream_data, subdivisions, "threshold")?;
+
+        let parsed = ParsedArrayRef::parse(raw_field)?;
+        let (assoc, arr) = match parsed.association {
+            Some(ArrayAssociation::Point) => {
+                let arr = tet_view.point_data().get(&parsed.name).ok_or_else(|| {
+                    SceneError::InvalidArrayRef {
+                        reference: raw_field.to_string(),
+                        reason: format!("missing point array `{}`", parsed.name),
+                    }
+                })?;
+                (ThresholdAssociation::Point, arr)
+            }
+            Some(ArrayAssociation::Cell) => {
+                let arr = tet_view.cell_data().get(&parsed.name).ok_or_else(|| {
+                    SceneError::InvalidArrayRef {
+                        reference: raw_field.to_string(),
+                        reason: format!("missing cell array `{}`", parsed.name),
+                    }
+                })?;
+                (ThresholdAssociation::Cell, arr)
+            }
+            None => {
+                if let Some(arr) = tet_view.point_data().get(&parsed.name) {
+                    (ThresholdAssociation::Point, arr)
+                } else if let Some(arr) = tet_view.cell_data().get(&parsed.name) {
+                    (ThresholdAssociation::Cell, arr)
+                } else {
+                    return Err(SceneError::InvalidArrayRef {
+                        reference: raw_field.to_string(),
+                        reason: format!("missing point or cell array `{}`", parsed.name),
+                    });
+                }
+            }
+        };
+
+        let resolved_comp = parsed.resolve_component(arr.components()).ok_or_else(|| {
+            SceneError::InvalidArrayRef {
+                reference: raw_field.to_string(),
+                reason: format!(
+                    "incompatible component selector for {}-component array `{}`",
+                    arr.components().as_usize(),
+                    parsed.name
+                ),
+            }
+        })?;
+        let threshold_comp = match resolved_comp {
+            ResolvedComponent::Component(idx) => ThresholdComponent::Component(idx),
+            ResolvedComponent::Magnitude => ThresholdComponent::Magnitude,
+        };
+        let params = ThresholdParams::new(parsed.name, min, max)
+            .with_association(assoc)
+            .with_component(threshold_comp);
+
+        self.filter_executions += 1;
+        let thresholded = Arc::new(threshold(&tet_view, &params)?);
+        self.tet_view_cache
+            .insert(threshold_hash, Arc::clone(&thresholded));
+        Ok(thresholded)
     }
 
     fn get_or_slice_surface(

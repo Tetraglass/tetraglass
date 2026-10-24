@@ -578,12 +578,30 @@ pub fn clip_crinkle_tets_with_chunk_size(
         }
     }
 
+    filter_tets_by_source_cell_with_chunk_size(view, &keep_source_cell, chunk_size)
+}
+
+/// Extracts and compacts all tetrahedra of `view` whose originating source cell index `src_cell`
+/// satisfies `keep_source_cell[src_cell as usize] == true`, using deterministic parallel chunks (`M2.5`, `M2.6`).
+pub fn filter_tets_by_source_cell_with_chunk_size(
+    view: &TetView,
+    keep_source_cell: &[bool],
+    chunk_size: usize,
+) -> Result<TetView, FilterError> {
+    let chunk_size = chunk_size.max(1);
+    let tets = view.tets();
+    let tet_source_cells = view.tet_source_cells();
+
+    if tets.is_empty() {
+        return empty_tet_view_like(view);
+    }
+
     let num_tets = tets.len();
     let num_chunks = num_tets.div_ceil(chunk_size);
     let chunk_outputs = run_crinkle_clip_chunks(
         tets,
         tet_source_cells,
-        &keep_source_cell,
+        keep_source_cell,
         chunk_size,
         num_chunks,
     );

@@ -486,6 +486,48 @@
             "input",
             "normal"
           ]
+        },
+        {
+          "description": "Keeps cells of the input volume dataset whose attribute value is within `[min, max]` (`\"threshold\"`).",
+          "type": "object",
+          "properties": {
+            "field": {
+              "description": "Attribute array reference (`\"[point:|cell:]<array>[:<component>]\"`) to threshold.",
+              "type": "string"
+            },
+            "input": {
+              "description": "Name of the input source or filter.",
+              "type": "string"
+            },
+            "max": {
+              "description": "Optional inclusive upper bound (omit for a one-sided `>= min` threshold).",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "default": null
+            },
+            "min": {
+              "description": "Optional inclusive lower bound (omit for a one-sided `<= max` threshold).",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "threshold"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "input",
+            "field"
+          ]
         }
       ]
     },

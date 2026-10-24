@@ -249,3 +249,10 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-004, D-005, and D-006).
 - Dependencies added: none.
 - Follow-ups: M2.6 Threshold.
+
+## 2026-10-24 — M2.6 Threshold
+
+- Added `crates/tetraglass-filters/src/threshold.rs` implementing `ThresholdAssociation` (`Auto`, `Point`, `Cell`), `ThresholdComponent` (`Component(usize)`, `Magnitude`), `ThresholdParams`, `threshold`, `threshold_with_chunk_size`, and `threshold_grid` on `TetView` (`D-005`), grouping by `tet_source_cells` so whole original cells are kept when their cell scalar or all vertex scalars lie within `[min, max]` (supporting two-sided and one-sided bounds).
+- Extended `tetraglass-scene` (`Filter::Threshold` in `types.rs`, semantic validation in `validate.rs`, and cached `EvaluatedDataset::TetVolume` evaluation in `eval.rs`), updated `crates/tetraglass-cli/tests/snapshots/scene-v1.schema.json` and `docs/scene-format.md`.
+- Added `gallery/threshold.json` and `tests/baselines/threshold.png`, updated `gallery/README.md`, and registered `"threshold"` in `crates/tetraglass-cli/tests/cli.rs`.
+- Follow-ups: M2.7 Picking.

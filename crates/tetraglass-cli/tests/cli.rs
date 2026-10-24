@@ -481,6 +481,7 @@ fn gallery_scenes_and_author_scene_skill_example_validate_and_match_baselines() 
         "slice",
         "contour",
         "clip",
+        "threshold",
     ];
 
     for name in gallery_names {

@@ -70,6 +70,29 @@ pub enum FilterError {
         /// Non-finite isovalue.
         value: f64,
     },
+
+    /// Requested cell attribute array was not found on the dataset.
+    #[error("cell array `{name}` was not found on the dataset")]
+    MissingCellArray {
+        /// Name of the missing cell array.
+        name: String,
+    },
+
+    /// Requested point or cell attribute array was not found on the dataset.
+    #[error("attribute array `{name}` was not found on the dataset")]
+    MissingAttributeArray {
+        /// Name of the missing attribute array.
+        name: String,
+    },
+
+    /// Threshold bounds are invalid (both `min` and `max` omitted, non-finite, or `min > max`).
+    #[error("invalid threshold bounds: min = {min:?}, max = {max:?}")]
+    InvalidThresholdBounds {
+        /// Lower bound (`None` if omitted).
+        min: Option<f64>,
+        /// Upper bound (`None` if omitted).
+        max: Option<f64>,
+    },
 }
 
 /// Canonical order-independent face key used to match shared faces between adjacent cells.

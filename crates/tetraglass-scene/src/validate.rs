@@ -360,7 +360,10 @@ fn validate_impl(
             ));
         } else if matches!(
             filter,
-            Filter::Slice { .. } | Filter::Contour { .. } | Filter::Clip { .. }
+            Filter::Slice { .. }
+                | Filter::Contour { .. }
+                | Filter::Clip { .. }
+                | Filter::Threshold { .. }
         ) && matches!(
             scene.filters.get(input),
             Some(Filter::Surface { .. } | Filter::Slice { .. } | Filter::Contour { .. })
@@ -368,6 +371,7 @@ fn validate_impl(
             let kind = match filter {
                 Filter::Contour { .. } => "contour",
                 Filter::Clip { .. } => "clip",
+                Filter::Threshold { .. } => "threshold",
                 _ => "slice",
             };
             let suggestion = resolve_root_source(name, &scene.sources, &scene.filters)
@@ -433,6 +437,44 @@ fn validate_impl(
                     ));
                 }
             }
+            Filter::Threshold { min, max, .. } => {
+                if min.is_none() && max.is_none() {
+                    issues.push(ValidationIssue::new(
+                        &filter_path,
+                        "threshold filter requires at least one of min or max",
+                        Some("specify min, max, or both".to_string()),
+                    ));
+                }
+                if let Some(lo) = min
+                    && !lo.is_finite()
+                {
+                    issues.push(ValidationIssue::new(
+                        format!("filters.{name}.min"),
+                        "threshold min must be a finite number",
+                        None,
+                    ));
+                }
+                if let Some(hi) = max
+                    && !hi.is_finite()
+                {
+                    issues.push(ValidationIssue::new(
+                        format!("filters.{name}.max"),
+                        "threshold max must be a finite number",
+                        None,
+                    ));
+                }
+                if let (Some(lo), Some(hi)) = (*min, *max)
+                    && lo.is_finite()
+                    && hi.is_finite()
+                    && lo > hi
+                {
+                    issues.push(ValidationIssue::new(
+                        &filter_path,
+                        format!("threshold min ({lo}) must not exceed max ({hi})"),
+                        Some(format!("did you mean min: {hi}, max: {lo}?")),
+                    ));
+                }
+            }
         }
     }
 
@@ -459,13 +501,22 @@ fn validate_impl(
             map
         });
 
-    // Validate filter field references (such as `contour.field`) against resolved dataset metadata.
+    // Validate filter field references (such as `contour.field` and `threshold.field`) against resolved dataset metadata.
     for (name, filter) in &scene.filters {
-        if let Filter::Contour { input, field, .. } = filter {
-            let dataset_meta = resolved_datasets
-                .as_ref()
-                .and_then(|map| map.get(input.as_str()).copied());
-            validate_contour_field(name, field, input, dataset_meta, &mut issues);
+        match filter {
+            Filter::Contour { input, field, .. } => {
+                let dataset_meta = resolved_datasets
+                    .as_ref()
+                    .and_then(|map| map.get(input.as_str()).copied());
+                validate_contour_field(name, field, input, dataset_meta, &mut issues);
+            }
+            Filter::Threshold { input, field, .. } => {
+                let dataset_meta = resolved_datasets
+                    .as_ref()
+                    .and_then(|map| map.get(input.as_str()).copied());
+                validate_threshold_field(name, field, input, dataset_meta, &mut issues);
+            }
+            _ => {}
         }
     }
 
@@ -845,6 +896,132 @@ fn validate_contour_field(
                 suggest_array_name(&parsed.name, &point_candidates),
             ));
         }
+        return;
+    };
+
+    if parsed.resolve_component(array_meta.components).is_none() {
+        let comp_str = parsed.component.map_or_else(String::new, |c| c.to_string());
+        let suggestion = match array_meta.components {
+            ComponentCount::Scalar => Some(format!(
+                "\"{}\" is a scalar array (1 component); use \"{}\" without \":{comp_str}\"",
+                parsed.name, parsed.name
+            )),
+            ComponentCount::Vector3 => Some(
+                "valid components for a 3-component vector are \"x\", \"y\", \"z\", \"magnitude\", or 0..2"
+                    .to_string(),
+            ),
+            ComponentCount::SymmetricTensor6 => Some(
+                "valid components for a 6-component symmetric tensor are \"xx\"..\"zz\", \"magnitude\", or 0..5"
+                    .to_string(),
+            ),
+            ComponentCount::Tensor9 => Some(
+                "valid components for a 9-component tensor are \"xx\"..\"zz\", \"magnitude\", or 0..8"
+                    .to_string(),
+            ),
+        };
+        issues.push(ValidationIssue::new(
+            &field_path,
+            format!(
+                "component \"{comp_str}\" is not valid for {}-component array \"{}\" on \"{input_name}\"",
+                array_meta.components.as_usize(),
+                parsed.name
+            ),
+            suggestion,
+        ));
+    }
+}
+
+fn validate_threshold_field(
+    filter_name: &str,
+    raw: &str,
+    input_name: &str,
+    dataset_meta: Option<&DatasetMetadata>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let field_path = format!("filters.{filter_name}.field");
+
+    let parsed = match ParsedArrayRef::parse(raw) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            let suggestion = suggest_component_for_malformed_ref(raw);
+            issues.push(ValidationIssue::new(
+                &field_path,
+                format!("invalid array reference \"{raw}\""),
+                suggestion,
+            ));
+            return;
+        }
+    };
+
+    let Some(meta) = dataset_meta else {
+        return;
+    };
+
+    let found_array: Option<(ArrayAssociation, &ArrayMetadata)> = match parsed.association {
+        Some(ArrayAssociation::Point) => meta
+            .point_arrays
+            .get(&parsed.name)
+            .map(|a| (ArrayAssociation::Point, a)),
+        Some(ArrayAssociation::Cell) => meta
+            .cell_arrays
+            .get(&parsed.name)
+            .map(|a| (ArrayAssociation::Cell, a)),
+        None => meta
+            .point_arrays
+            .get(&parsed.name)
+            .map(|a| (ArrayAssociation::Point, a))
+            .or_else(|| {
+                meta.cell_arrays
+                    .get(&parsed.name)
+                    .map(|a| (ArrayAssociation::Cell, a))
+            }),
+    };
+
+    let Some((_assoc, array_meta)) = found_array else {
+        if parsed.association == Some(ArrayAssociation::Point)
+            && meta.cell_arrays.contains_key(&parsed.name)
+        {
+            let fixed = ParsedArrayRef {
+                association: Some(ArrayAssociation::Cell),
+                name: parsed.name.clone(),
+                component: parsed.component,
+            };
+            issues.push(ValidationIssue::new(
+                &field_path,
+                format!(
+                    "no point array \"{}\" on \"{input_name}\" (exists as a cell array)",
+                    parsed.name
+                ),
+                Some(format!("did you mean \"{fixed}\"?")),
+            ));
+            return;
+        }
+        if parsed.association == Some(ArrayAssociation::Cell)
+            && meta.point_arrays.contains_key(&parsed.name)
+        {
+            let fixed = ParsedArrayRef {
+                association: Some(ArrayAssociation::Point),
+                name: parsed.name.clone(),
+                component: parsed.component,
+            };
+            issues.push(ValidationIssue::new(
+                &field_path,
+                format!(
+                    "no cell array \"{}\" on \"{input_name}\" (exists as a point array)",
+                    parsed.name
+                ),
+                Some(format!("did you mean \"{fixed}\"?")),
+            ));
+            return;
+        }
+
+        let candidates = meta.all_array_names();
+        let suggestion = suggest_array_name(&parsed.name, &candidates);
+        issues.push(ValidationIssue::new(
+            &field_path,
+            format!("no array \"{}\" on \"{input_name}\"", parsed.name),
+            suggestion,
+        ));
         return;
     };
 
