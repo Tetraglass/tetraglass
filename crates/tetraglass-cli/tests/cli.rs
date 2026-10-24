@@ -440,3 +440,25 @@ fn render_command_writes_png_and_prints_json_summary() {
     );
     assert!(pvd_png_path.exists());
 }
+
+#[test]
+fn view_command_supports_help_and_validates_scene_before_opening_window() {
+    let help_out = tetraglass_bin()
+        .arg("view")
+        .arg("--help")
+        .output()
+        .expect("run `tetraglass view --help`");
+    assert!(help_out.status.success());
+    let stdout = String::from_utf8_lossy(&help_out.stdout);
+    assert!(stdout.contains("Usage: tetraglass view <scene.json|mesh>"));
+
+    // Passing a nonexistent scene file fails cleanly before creating a window.
+    let missing_out = tetraglass_bin()
+        .arg("view")
+        .arg("nonexistent_scene.json")
+        .output()
+        .expect("run `tetraglass view nonexistent_scene.json`");
+    assert!(!missing_out.status.success());
+    let stderr = String::from_utf8_lossy(&missing_out.stderr);
+    assert!(stderr.contains("tetraglass:"));
+}

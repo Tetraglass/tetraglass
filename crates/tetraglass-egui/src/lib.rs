@@ -206,6 +206,27 @@ impl ViewportState {
         Ok(())
     }
 
+    /// Uploads a [`SurfaceMesh`] to the viewport using an [`egui_wgpu::RenderState`].
+    pub fn set_surface_with_render_state(
+        &mut self,
+        render_state: &egui_wgpu::RenderState,
+        surface: &SurfaceMesh,
+        style: SurfaceStyle,
+        fit_camera: bool,
+    ) -> Result<(), RenderError> {
+        self.set_surface(&render_state.device, surface, style, fit_camera)
+    }
+
+    /// Updates the [`SurfaceStyle`] on the active surface using an [`egui_wgpu::RenderState`].
+    pub fn update_style_with_render_state(
+        &mut self,
+        render_state: &egui_wgpu::RenderState,
+        surface: &SurfaceMesh,
+        style: SurfaceStyle,
+    ) -> Result<(), RenderError> {
+        self.update_style(&render_state.queue, surface, style)
+    }
+
     /// Updates the [`SurfaceStyle`] (field coloring, colormap, range, or log scale) on the active surface.
     pub fn update_style(
         &mut self,
@@ -346,6 +367,12 @@ impl ViewportState {
     /// Frees the registered texture from `egui_renderer`.
     pub fn destroy(&self, egui_renderer: &mut egui_wgpu::Renderer) {
         egui_renderer.free_texture(&self.texture_id);
+    }
+
+    /// Frees the registered texture using an [`egui_wgpu::RenderState`].
+    pub fn destroy_with_render_state(&self, render_state: &egui_wgpu::RenderState) {
+        let mut renderer = render_state.renderer.write();
+        self.destroy(&mut renderer);
     }
 }
 

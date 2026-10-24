@@ -24,4 +24,5 @@ tetraglass-filters.workspace = true
 tetraglass-io.workspace = true
 tetraglass-render.workspace = true
 tetraglass-scene.workspace = true
+tetraglass-viewer.workspace = true
 thiserror.workspace = true

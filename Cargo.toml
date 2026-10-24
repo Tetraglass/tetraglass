@@ -21,6 +21,7 @@ tetraglass-filters = { path = "crates/tetraglass-filters", version = "0.0.0" }
 tetraglass-scene = { path = "crates/tetraglass-scene", version = "0.0.0" }
 tetraglass-render = { path = "crates/tetraglass-render", version = "0.0.0" }
 tetraglass-egui = { path = "crates/tetraglass-egui", version = "0.0.0" }
+tetraglass-viewer = { path = "crates/tetraglass-viewer", version = "0.0.0" }
 
 # External crates: add each version once here, then use `name.workspace = true`.
 base64 = "0.22"

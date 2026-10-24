@@ -2150,6 +2150,7 @@ dependencies = [
  "tetraglass-io",
  "tetraglass-render",
  "tetraglass-scene",
+ "tetraglass-viewer",
  "thiserror 2.0.21",
 ]
 
@@ -2222,6 +2223,23 @@ dependencies = [
  "tetraglass-core",
  "tetraglass-filters",
  "tetraglass-io",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "tetraglass-viewer"
+version = "0.0.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "egui-wgpu",
+ "log",
+ "serde_json",
+ "tetraglass-core",
+ "tetraglass-egui",
+ "tetraglass-io",
+ "tetraglass-render",
+ "tetraglass-scene",
  "thiserror 2.0.21",
 ]
 

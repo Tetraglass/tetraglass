@@ -149,3 +149,13 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-004, `docs/scene-format.md`, and `.agents/skills/add-reader/SKILL.md`).
 - Dependencies added: none.
 - Follow-ups: M1.8 Viewer v0 (eframe desktop app: open a scene, hot reload on file change, time slider, field and colormap pickers).
+
+## 2026-10-24: M1.8 Viewer v0
+- Done: created the `tetraglass-viewer` crate (`ViewerDocument`, `SceneFileWatcher`, `HotReloadOutcome`, `ViewerSession`, `ViewerApp`, `ViewerOptions`, `run_viewer`) and wired `tetraglass view <scene.json|mesh> [--frames <n>]` into `tetraglass-cli`:
+  - Opens `.json` scene files as well as raw `.vtu`, `.pvd`, and `.msh` mesh files (synthesizing a default v1 `Scene`).
+  - Hot-reloads when the scene file or its referenced source files change on disk (`SceneFileWatcher` combining filesystem metadata and 64-bit FNV-1a content hashing), reusing the `SceneEvaluator` cache when only view/coloring properties change and keeping the last valid render alive with an error banner when an edit introduces a syntax or validation error.
+  - Provides interactive time-series controls (slider, first/prev/play-pause/next/last buttons) backed by lazy `TimeSeries` step loading, field and colormap `ComboBox` pickers, logarithmic scale/colorbar/axes triad toggles, and camera reset.
+- Tests: integration test suite in `crates/tetraglass-viewer/tests/viewer_document.rs` covering raw mesh and scene loading, field and colormap picker switching without filter re-execution, lazy time-slider stepping on `testdata/vtk/series.pvd`, hot-reload detection and error recovery, and offscreen `egui_wgpu` rendering (`target/render-tests/viewer_v0_series.png`); plus CLI `view` argument/help tests in `crates/tetraglass-cli/tests/cli.rs`.
+- Decisions: none (implemented per D-003, D-004, and `.agents/rules/rendering.md`).
+- Dependencies added: none (reused workspace `eframe`, `egui`, `egui-wgpu`, `serde_json`, `thiserror`, `log`, and wrote `SceneFileWatcher` in-house).
+- Follow-ups: M1.9 Performance target (define the interactive target for M2: mesh size, frame time, filter latency, and a synthetic benchmark mesh generated in code; record it as a decision).

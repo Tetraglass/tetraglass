@@ -1,0 +1,29 @@
+[package]
+name = "tetraglass-viewer"
+description = "eframe desktop and web viewer application for Tetraglass scenes and meshes."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "tetraglass-viewer"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+eframe.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+log.workspace = true
+serde_json.workspace = true
+tetraglass-core.workspace = true
+tetraglass-egui.workspace = true
+tetraglass-io.workspace = true
+tetraglass-render.workspace = true
+tetraglass-scene.workspace = true
+thiserror.workspace = true

@@ -27,6 +27,7 @@ use tetraglass_scene::{
     EvaluatedScene, RenderEngine, RepresentationStyle, ResolvedComponent, Scene, SceneEvaluator,
     ValidationIssue, ValidationReport, scene_json_schema_string, validate_scene_with_metadata,
 };
+use tetraglass_viewer::{ViewerOptions, run_viewer};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -80,6 +81,7 @@ fn run_cli(args: &[String]) -> Result<String, CliFailure> {
         "inspect" => cmd_inspect(rest),
         "validate" => cmd_validate(rest),
         "render" => cmd_render(rest),
+        "view" => cmd_view(rest),
         other => Err(CliFailure::Message(format!(
             "unknown command `{other}`; run `tetraglass --help` for usage"
         ))),
@@ -93,9 +95,62 @@ fn help_text() -> String {
          tetraglass inspect <file> [--json]\n  \
          tetraglass render <scene.json> [-o <out.png>] [--engine <raster|cycles>]\n  \
          tetraglass validate <scene.json> [--json]\n  \
+         tetraglass view <scene.json|mesh> [--frames <n>]\n  \
          tetraglass schema",
         env!("CARGO_PKG_VERSION")
     )
+}
+
+fn cmd_view(args: &[String]) -> Result<String, CliFailure> {
+    let mut path_arg: Option<&str> = None;
+    let mut max_frames: Option<u64> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--help" | "-h" => {
+                return Ok("Usage: tetraglass view <scene.json|mesh> [--frames <n>]".to_string());
+            }
+            "--frames" => {
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    return Err(CliFailure::Message(
+                        "missing value for `--frames <n>`".to_string(),
+                    ));
+                };
+                let parsed = val.parse::<u64>().map_err(|_| {
+                    CliFailure::Message(format!("invalid `--frames` count `{val}`"))
+                })?;
+                max_frames = Some(parsed);
+            }
+            other if other.starts_with('-') => {
+                return Err(CliFailure::Message(format!(
+                    "unknown option `{other}` for `view`"
+                )));
+            }
+            arg => {
+                if path_arg.is_some() {
+                    return Err(CliFailure::Message(
+                        "`view` accepts a single <scene.json|mesh> argument".to_string(),
+                    ));
+                }
+                path_arg = Some(arg);
+            }
+        }
+        i += 1;
+    }
+
+    let Some(path_str) = path_arg else {
+        return Err(CliFailure::Message(
+            "missing <scene.json|mesh> argument; usage: `tetraglass view <scene.json|mesh>`"
+                .to_string(),
+        ));
+    };
+
+    let mut options = ViewerOptions::new(PathBuf::from(path_str));
+    options.max_frames = max_frames;
+    run_viewer(options).map_err(|e| CliFailure::Message(e.to_string()))?;
+    Ok(String::new())
 }
 
 fn cmd_schema(args: &[String]) -> Result<String, CliFailure> {
