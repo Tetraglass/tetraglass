@@ -19,6 +19,7 @@ pub mod camera;
 pub mod colormap;
 pub mod error;
 pub mod headless;
+pub mod pick;
 pub mod pipeline;
 pub mod png;
 pub mod text;
@@ -33,6 +34,9 @@ pub use error::{FieldAssociation, RenderError};
 pub use headless::{
     DEFAULT_CHANNEL_TOLERANCE, DEFAULT_MAX_DIFF_FRACTION, HeadlessContext, HeadlessRenderOptions,
     ImageComparison, RenderedImage,
+};
+pub use pick::{
+    PICK_FORMAT, PickProbeValue, PickTarget, RawPickHit, SurfacePickResult, probe_surface_triangle,
 };
 pub use pipeline::{
     ColorBy, DEFAULT_COLOR_FORMAT, DEPTH_FORMAT, GpuSurface, OffscreenTarget, Renderer,

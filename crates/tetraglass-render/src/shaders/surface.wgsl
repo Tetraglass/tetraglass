@@ -65,6 +65,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(shaded_rgb, base_color.a);
 }
 
+@fragment
+fn fs_pick(in: VertexOutput) -> @location(0) vec4<u32> {
+    var raw_scalar = in.scalar;
+    if (surface.coloring_mode == 2u) {
+        raw_scalar = cell_scalars[in.cell_index];
+    }
+    return vec4<u32>(
+        surface.pick_info.x,
+        in.cell_index,
+        bitcast<u32>(in.clip_position.z),
+        bitcast<u32>(raw_scalar),
+    );
+}
+
 struct EdgeVertexInput {
     @location(0) position: vec3<f32>,
 };

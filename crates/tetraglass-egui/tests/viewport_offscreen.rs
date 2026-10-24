@@ -220,6 +220,23 @@ fn viewport_widget_resizes_and_runs_prepare_callback_in_egui_wgpu() {
         "expected rendered 3D mesh pixels inside egui viewport region, got {viewport_mesh_pixels}"
     );
 
+    // Probe the center of the viewport via GPU ID buffer picking.
+    let pick = viewport
+        .pick_at(headless.device(), headless.queue(), vp_w / 2, vp_h / 2)
+        .expect("pick_at succeeds")
+        .expect("center pixel hits mixed_linear surface");
+    assert_eq!(pick.representation_index, 0);
+    let [wx, wy, wz] = pick.world_position;
+    let expected_linear = wx + 2.0 * wy + 3.0 * wz;
+    let actual_linear = pick.active_scalar.expect("active_scalar present");
+    assert!(
+        (actual_linear - expected_linear).abs() < 1e-4,
+        "picked active_scalar {actual_linear} vs expected {expected_linear}"
+    );
+    assert_eq!(viewport.last_pick(), Some(pick));
+    viewport.clear_pick();
+    assert!(viewport.last_pick().is_none());
+
     // Switch style to vector magnitude and verify range updates.
     let vec_style = ViewportSurfaceStyle {
         color_by: ViewportColorBy::Point {

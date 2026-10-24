@@ -14,6 +14,7 @@ use tetraglass_core::{BoundingBox, SurfaceMesh};
 use crate::annotations::Annotations;
 use crate::camera::Camera;
 use crate::error::RenderError;
+use crate::pick::{PickTarget, SurfacePickResult, probe_surface_triangle};
 use crate::pipeline::{DEFAULT_COLOR_FORMAT, OffscreenTarget, Renderer, SurfaceStyle};
 use crate::png::{decode_rgba8_png, encode_rgba8_png};
 
@@ -382,6 +383,56 @@ impl HeadlessContext {
         self.queue.submit(std::iter::once(encoder.finish()));
 
         self.readback_target(&target)
+    }
+
+    /// Renders `surface` into a GPU ID buffer and probes pixel `(x, y)` (`(0, 0)` top-left).
+    pub fn pick_surface(
+        &self,
+        surface: &SurfaceMesh,
+        options: &HeadlessRenderOptions,
+        x: u32,
+        y: u32,
+    ) -> Result<Option<SurfacePickResult>, RenderError> {
+        let renderer = Renderer::new(
+            &self.device,
+            &self.queue,
+            DEFAULT_COLOR_FORMAT,
+            options.sample_count,
+        )?;
+        let pick_target = PickTarget::new(&self.device, options.width, options.height)?;
+        let gpu_surface = renderer.upload_surface(&self.device, surface, &options.style)?;
+
+        let camera = options.camera.clone().unwrap_or_else(|| {
+            let bounds = surface.bounds().unwrap_or(BoundingBox {
+                min: [-1.0, -1.0, -1.0],
+                max: [1.0, 1.0, 1.0],
+            });
+            Camera::fit_bounds(bounds, 30.0, 20.0)
+        });
+
+        let Some(raw) = renderer.pick_pixel(
+            &self.device,
+            &self.queue,
+            &pick_target,
+            &camera,
+            &[&gpu_surface],
+            x,
+            y,
+        )?
+        else {
+            return Ok(None);
+        };
+
+        Ok(probe_surface_triangle(
+            surface,
+            raw.representation_index,
+            [x, y],
+            [options.width, options.height],
+            &camera,
+            gpu_surface.dataset_center(),
+            raw,
+            &options.style.color_by,
+        ))
     }
 
     /// Copies the resolved color attachment of `target` to a CPU [`RenderedImage`].

@@ -256,3 +256,11 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Extended `tetraglass-scene` (`Filter::Threshold` in `types.rs`, semantic validation in `validate.rs`, and cached `EvaluatedDataset::TetVolume` evaluation in `eval.rs`), updated `crates/tetraglass-cli/tests/snapshots/scene-v1.schema.json` and `docs/scene-format.md`.
 - Added `gallery/threshold.json` and `tests/baselines/threshold.png`, updated `gallery/README.md`, and registered `"threshold"` in `crates/tetraglass-cli/tests/cli.rs`.
 - Follow-ups: M2.7 Picking.
+
+## 2026-10-24 — M2.7 Picking
+
+- Done: implemented GPU ID buffer picking (`PickTarget` with `PICK_FORMAT = Rgba32Uint`, `RawPickHit`, `@fragment fn fs_pick` in `surface.wgsl`, `Renderer::render_pick`, `Renderer::pick_pixel`, and `HeadlessContext::pick_surface`) and CPU value probing (`SurfacePickResult`, `PickProbeValue`, `probe_surface_triangle`, `Camera::pixel_ray_f64`, and `Camera::unproject_pixel_depth_f64`) in `tetraglass-render`; wired synchronous and click-triggered picking plus on-canvas crosshair/badge overlay and multi-surface rendering into `tetraglass-egui` (`ViewportState::pick_at`, `ViewportState::request_pick_at`, `ViewportState::last_pick`, `ViewportState::clear_pick`, `ViewportState::set_shared_surface`, `ViewportState::set_additional_surfaces`, and `ViewportWidget::show_probe_overlay`); added `ViewerSession::pick_at_pixel`, `ViewerSession::last_pick`, `ViewerSession::clear_pick`, `ViewerSession::picked_representation_name`, and the left-panel Value probe section in `tetraglass-viewer`.
+- Tests: `crates/tetraglass-render/tests/picking.rs` (single-surface and multi-representation depth-occluded picking, background misses, out-of-bounds pixels, barycentric coordinates, world positions, source cell IDs, and interpolated scalar/vector point and cell values), `crates/tetraglass-render/src/camera.rs` (`pixel_ray_and_unproject_roundtrip_focal_point`), `crates/tetraglass-egui/tests/viewport_offscreen.rs`, and `crates/tetraglass-viewer/tests/viewer_document.rs`.
+- Decisions: none (implemented per D-002 and D-003; `PickTarget` is single-sampled `Rgba32Uint` and only rendered when a pick is requested, keeping normal color rendering untouched).
+- Dependencies added: none.
+- Follow-ups: M2.8 Interactive clipping.

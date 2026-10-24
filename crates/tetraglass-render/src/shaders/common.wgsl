@@ -14,6 +14,7 @@ struct SurfaceUniforms {
     use_log_scale: u32,
     solid_color: vec4<f32>,
     edge_color: vec4<f32>,
+    pick_info: vec4<u32>,
 };
 
 fn normalize_scalar_to_lut_u(

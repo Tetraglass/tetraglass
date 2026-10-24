@@ -456,5 +456,37 @@ fn viewer_session_renders_full_gui_and_viewport_offscreen() {
         "expected > 10,000 non-white mesh & annotation pixels in viewer viewport, got {non_white_pixels}"
     );
 
+    // Probe the center of the viewport via GPU ID buffer picking and verify the Value probe state.
+    let (vp_w, vp_h) = session.viewport().target_size_px();
+    let pick = session
+        .pick_at_pixel(headless.device(), headless.queue(), vp_w / 2, vp_h / 2)
+        .expect("pick_at_pixel succeeds")
+        .expect("center pixel hits transient cube");
+    assert_eq!(pick.representation_index, 0);
+    assert_eq!(session.picked_representation_name(), Some("series"));
+    let [wx, wy, wz] = pick.world_position;
+    let expected_transient = (wx + 2.0 * wy + 3.0 * wz) + 1.0; // step 2 => t = 1.0
+    let actual_transient = pick.active_scalar.expect("active_scalar present");
+    assert!(
+        (actual_transient - expected_transient).abs() < 1e-4,
+        "picked transient {actual_transient} vs expected {expected_transient}"
+    );
+
+    // Run one more UI frame with the active pick to exercise the Value probe panel and overlay.
+    let raw_input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(900.0, 560.0),
+        )),
+        ..Default::default()
+    };
+    let mut out = ctx.run_ui(raw_input, |ui| {
+        session.show_ui(ui, headless.device(), headless.queue(), &mut egui_renderer);
+    });
+    out.textures_delta.clear();
+
+    session.clear_pick();
+    assert!(session.last_pick().is_none());
+
     session.destroy(&mut egui_renderer);
 }

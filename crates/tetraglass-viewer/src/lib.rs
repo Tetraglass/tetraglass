@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui;
@@ -24,7 +25,8 @@ use tetraglass_io::{
     read_pvd_series_with_loader, read_vtu_series,
 };
 use tetraglass_render::{
-    Annotations, ColorbarAnnotation, ColorbarPlacement, DEFAULT_COLORBAR_TICKS, RenderError,
+    Annotations, ColorbarAnnotation, ColorbarPlacement, DEFAULT_COLORBAR_TICKS, PickProbeValue,
+    RenderError, SurfacePickResult,
 };
 use tetraglass_scene::{
     ArrayAssociation, BackgroundSpec, CameraConfig, ColorSpec, ColorbarSpec, ColormapName,
@@ -837,7 +839,7 @@ impl std::fmt::Debug for ViewerSession {
 }
 
 impl ViewerSession {
-    /// Creates a new [`ViewerSession`] and uploads the initial surface, camera, background, and annotations.
+    /// Creates a new [`ViewerSession`] and uploads the initial surface(s), camera, background, and annotations.
     pub fn new(
         doc: ViewerDocument,
         mut viewport: ViewportState,
@@ -846,9 +848,21 @@ impl ViewerSession {
         let camera = doc.camera_from_scene();
         let bg = doc.background_srgb();
         let annotations = doc.annotations();
-        let style = doc.active_surface_style();
-        if let Some(surface) = doc.active_surface() {
-            viewport.set_surface(device, surface, style, true)?;
+        if let Some(first_rep) = doc.evaluated().representations.first() {
+            viewport.set_shared_surface(
+                device,
+                Arc::clone(&first_rep.surface),
+                build_surface_style(first_rep),
+                true,
+            )?;
+            let extra: Vec<(Arc<SurfaceMesh>, ViewportSurfaceStyle)> = doc
+                .evaluated()
+                .representations
+                .iter()
+                .skip(1)
+                .map(|r| (Arc::clone(&r.surface), build_surface_style(r)))
+                .collect();
+            viewport.set_additional_surfaces(device, extra)?;
         }
         viewport.set_camera(camera);
         viewport.set_background_srgb(bg);
@@ -896,6 +910,39 @@ impl ViewerSession {
         &mut self.viewport
     }
 
+    /// Synchronously probes the surface at physical viewport pixel `(x_px, y_px)` using the GPU ID buffer.
+    pub fn pick_at_pixel(
+        &mut self,
+        device: &egui_wgpu::wgpu::Device,
+        queue: &egui_wgpu::wgpu::Queue,
+        x_px: u32,
+        y_px: u32,
+    ) -> Result<Option<SurfacePickResult>, ViewerError> {
+        Ok(self.viewport.pick_at(device, queue, x_px, y_px)?)
+    }
+
+    /// Returns the most recent value-probe result (`Some` after clicking a surface or calling [`Self::pick_at_pixel`]).
+    #[must_use]
+    pub fn last_pick(&self) -> Option<SurfacePickResult> {
+        self.viewport.last_pick()
+    }
+
+    /// Clears the active value-probe result.
+    pub fn clear_pick(&mut self) {
+        self.viewport.clear_pick();
+    }
+
+    /// Returns the `input` name of the representation hit by `last_pick()`, if any.
+    #[must_use]
+    pub fn picked_representation_name(&self) -> Option<&str> {
+        let pick = self.viewport.last_pick()?;
+        self.doc
+            .evaluated()
+            .representations
+            .get(pick.representation_index)
+            .map(|r| r.input.as_str())
+    }
+
     /// Polls for file changes on disk and synchronizes the GPU [`ViewportState`] if anything changed.
     pub fn poll_hot_reload(
         &mut self,
@@ -920,12 +967,27 @@ impl ViewerSession {
         geometry_changed: bool,
         camera_changed: bool,
     ) -> Result<(), ViewerError> {
-        let style = self.doc.active_surface_style();
-        if let Some(surface) = self.doc.active_surface() {
+        if let Some(first_rep) = self.doc.evaluated().representations.first() {
+            let style = build_surface_style(first_rep);
             if geometry_changed {
-                self.viewport.set_surface(device, surface, style, false)?;
+                self.viewport.set_shared_surface(
+                    device,
+                    Arc::clone(&first_rep.surface),
+                    style,
+                    false,
+                )?;
+                let extra: Vec<(Arc<SurfaceMesh>, ViewportSurfaceStyle)> = self
+                    .doc
+                    .evaluated()
+                    .representations
+                    .iter()
+                    .skip(1)
+                    .map(|r| (Arc::clone(&r.surface), build_surface_style(r)))
+                    .collect();
+                self.viewport.set_additional_surfaces(device, extra)?;
             } else {
-                self.viewport.update_style(queue, surface, style)?;
+                self.viewport
+                    .update_style(queue, &first_rep.surface, style)?;
             }
         }
         if camera_changed {
@@ -993,6 +1055,7 @@ impl ViewerSession {
         let mut axes_changed_to: Option<bool> = None;
         let mut trigger_reload = false;
         let mut trigger_reset_camera = false;
+        let mut trigger_clear_pick = false;
 
         egui::Panel::left("tetraglass_viewer_panel")
             .resizable(true)
@@ -1148,9 +1211,46 @@ impl ViewerSession {
                     trigger_reset_camera = true;
                 }
 
+                // --- Value probe section ---
                 ui.separator();
-                ui.small("Left drag: orbit | Shift/Right drag: pan");
-                ui.small("Scroll: zoom | Double-click: reset camera");
+                ui.label("Value probe:");
+                if let Some(pick) = self.viewport.last_pick() {
+                    let rep_name = self
+                        .doc
+                        .evaluated()
+                        .representations
+                        .get(pick.representation_index)
+                        .map_or("surface", |r| r.input.as_str());
+                    let cell_label = pick
+                        .source_cell_id
+                        .map_or_else(|| "n/a".to_string(), |c| format!("#{c}"));
+                    ui.monospace(format!(
+                        "Input: {rep_name} | Cell {cell_label} (tri #{}, pt #{})",
+                        pick.triangle_index, pick.point_index
+                    ));
+                    let [wx, wy, wz] = pick.world_position;
+                    ui.monospace(format!("Pos: [{wx:.4}, {wy:.4}, {wz:.4}]"));
+                    if let Some(val) = pick.active_scalar
+                        && val.is_finite()
+                    {
+                        ui.monospace(format!("Active scalar: {val:.5}"));
+                    }
+                    for pv in &pick.point_values {
+                        ui.monospace(format!("pt.{}: {}", pv.name, format_probe_value(pv)));
+                    }
+                    for cv in &pick.cell_values {
+                        ui.monospace(format!("cell.{}: {}", cv.name, format_probe_value(cv)));
+                    }
+                    if ui.small_button("Clear probe").clicked() {
+                        trigger_clear_pick = true;
+                    }
+                } else {
+                    ui.small("Click on mesh in viewport to probe values.");
+                }
+
+                ui.separator();
+                ui.small("Click: probe value | Left drag: orbit");
+                ui.small("Shift/Right drag: pan | Scroll: zoom | Double-click: reset");
             });
 
         if trigger_reload
@@ -1207,6 +1307,9 @@ impl ViewerSession {
 
         if trigger_reset_camera {
             self.viewport.set_camera(self.doc.camera_from_scene());
+        }
+        if trigger_clear_pick {
+            self.viewport.clear_pick();
         }
 
         egui::CentralPanel::default()
@@ -1699,3 +1802,25 @@ pub fn resolve_background_srgb(bg: &BackgroundSpec) -> [f32; 4] {
         }
     }
 }
+
+fn format_probe_value(pv: &PickProbeValue) -> String {
+    match pv.values.as_slice() {
+        [] => "[]".to_string(),
+        [s] => format!("{s:.5}"),
+        comps => {
+            let joined = comps
+                .iter()
+                .map(|c| format!("{c:.4}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if let Some(mag) = pv.magnitude {
+                format!("[{joined}] (|v|={mag:.4})")
+            } else {
+                format!("[{joined}]")
+            }
+        }
+    }
+}
+
+/// Re-exported pick result types for value probing (`M2.7`).
+pub use tetraglass_egui::{ViewportPickProbeValue, ViewportPickResult};

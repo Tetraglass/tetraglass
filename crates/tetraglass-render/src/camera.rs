@@ -166,6 +166,66 @@ impl Camera {
         )
     }
 
+    /// Computes a world-space ray `(origin, unit_direction)` in dataset-center-relative `f64`
+    /// coordinates passing through pixel center `(x + 0.5, y + 0.5)` in a `width x height` viewport.
+    #[must_use]
+    pub fn pixel_ray_f64(&self, x: f64, y: f64, width: f64, height: f64) -> ([f64; 3], [f64; 3]) {
+        let w = width.max(1.0);
+        let h = height.max(1.0);
+        let ndc_x = ((x + 0.5) / w) * 2.0 - 1.0;
+        let ndc_y = 1.0 - ((y + 0.5) / h) * 2.0;
+        let aspect = (w / h).max(1e-4);
+        let tan_half_fov = (0.5 * self.view_angle_deg.clamp(1.0, 170.0).to_radians()).tan();
+        let cam_x = ndc_x * aspect * tan_half_fov;
+        let cam_y = ndc_y * tan_half_fov;
+
+        let eye = self.eye_position_f64();
+        let (right, up, back) = self.basis_f64();
+        let dir = normalize3([
+            cam_x * right[0] + cam_y * up[0] - back[0],
+            cam_x * right[1] + cam_y * up[1] - back[1],
+            cam_x * right[2] + cam_y * up[2] - back[2],
+        ]);
+        (eye, dir)
+    }
+
+    /// Unprojects a pixel center `(x + 0.5, y + 0.5)` and WebGPU normalized depth `ndc_z in [0, 1]`
+    /// into dataset-center-relative `f64` coordinates.
+    #[must_use]
+    pub fn unproject_pixel_depth_f64(
+        &self,
+        x: f64,
+        y: f64,
+        ndc_z: f64,
+        width: f64,
+        height: f64,
+    ) -> [f64; 3] {
+        let w = width.max(1.0);
+        let h = height.max(1.0);
+        let ndc_x = ((x + 0.5) / w) * 2.0 - 1.0;
+        let ndc_y = 1.0 - ((y + 0.5) / h) * 2.0;
+        let aspect = (w / h).max(1e-4);
+        let tan_half_fov = (0.5 * self.view_angle_deg.clamp(1.0, 170.0).to_radians()).tan();
+        let cam_x = ndc_x * aspect * tan_half_fov;
+        let cam_y = ndc_y * tan_half_fov;
+
+        let dist = self.effective_distance();
+        let radius = self.scene_radius.max(1e-3);
+        let near = (dist - radius * 2.5).max(dist * 0.01).max(1e-4);
+        let far = (dist + radius * 3.5).max(near + 1.0);
+        let z_clamped = ndc_z.clamp(0.0, 1.0);
+        let denom = (far - z_clamped * (far - near)).max(1e-12);
+        let forward_depth = (near * far) / denom;
+
+        let eye = self.eye_position_f64();
+        let (right, up, back) = self.basis_f64();
+        [
+            eye[0] + forward_depth * (cam_x * right[0] + cam_y * up[0] - back[0]),
+            eye[1] + forward_depth * (cam_x * right[1] + cam_y * up[1] - back[1]),
+            eye[2] + forward_depth * (cam_x * right[2] + cam_y * up[2] - back[2]),
+        ]
+    }
+
     fn eye_position_f64(&self) -> [f64; 3] {
         let dist = self.effective_distance();
         let az = self.azimuth_deg.to_radians();
@@ -262,5 +322,11 @@ mod tests {
         assert!((clip_y / clip_w).abs() < 1e-5);
         let ndc_z = clip_z / clip_w;
         assert!(ndc_z > 0.0 && ndc_z < 1.0, "ndc_z={ndc_z}");
+
+        // Unproject the center pixel at `ndc_z` and verify it recovers the origin `[0, 0, 0]`.
+        let recovered = cam.unproject_pixel_depth_f64(399.5, 299.5, f64::from(ndc_z), 800.0, 600.0);
+        for c in recovered {
+            assert!(c.abs() < 1e-4, "recovered={recovered:?}");
+        }
     }
 }

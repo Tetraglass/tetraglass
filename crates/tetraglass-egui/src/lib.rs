@@ -12,12 +12,15 @@
 
 use std::sync::{Arc, Mutex};
 
-use egui::{Color32, Pos2, Rect, Response, Sense, TextureId, Ui, Vec2, pos2};
+use egui::{
+    Color32, CornerRadius, FontId, Pos2, Rect, Response, Sense, Stroke, TextureId, Ui, Vec2, pos2,
+};
 use egui_wgpu::wgpu;
 use tetraglass_core::{BoundingBox, SurfaceMesh};
 use tetraglass_render::{
-    Annotations, Camera, ColorBy, DEFAULT_COLOR_FORMAT, GpuSurface, OffscreenTarget, RenderError,
-    Renderer, ScalarComponent, SurfaceStyle,
+    Annotations, Camera, ColorBy, DEFAULT_COLOR_FORMAT, GpuSurface, OffscreenTarget, PickTarget,
+    RenderError, Renderer, ScalarComponent, SurfacePickResult, SurfaceStyle,
+    probe_surface_triangle,
 };
 
 /// A selectable coloring option for a [`SurfaceMesh`] in a UI field picker.
@@ -108,12 +111,90 @@ fn append_array_options(
 struct ViewportGpuInner {
     renderer: Renderer,
     target: OffscreenTarget,
+    pick_target: PickTarget,
+    cpu_surface: Option<Arc<SurfaceMesh>>,
     gpu_surface: Option<GpuSurface>,
+    extra_surfaces: Vec<(Arc<SurfaceMesh>, GpuSurface, SurfaceStyle)>,
     camera: Camera,
     default_bounds: Option<BoundingBox>,
     background_srgb: [f32; 4],
     style: SurfaceStyle,
     annotations: Annotations,
+    pending_pick_px: Option<[u32; 2]>,
+    last_pick: Option<SurfacePickResult>,
+}
+
+impl ViewportGpuInner {
+    fn execute_pick(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        x_px: u32,
+        y_px: u32,
+    ) -> Result<Option<SurfacePickResult>, RenderError> {
+        let mut gpu_surfaces: Vec<&GpuSurface> = Vec::with_capacity(1 + self.extra_surfaces.len());
+        if let Some(primary) = &self.gpu_surface {
+            gpu_surfaces.push(primary);
+        }
+        for (_, extra_gpu, _) in &self.extra_surfaces {
+            gpu_surfaces.push(extra_gpu);
+        }
+        if gpu_surfaces.is_empty() {
+            self.last_pick = None;
+            return Ok(None);
+        }
+
+        let Some(raw) = self.renderer.pick_pixel(
+            device,
+            queue,
+            &self.pick_target,
+            &self.camera,
+            &gpu_surfaces,
+            x_px,
+            y_px,
+        )?
+        else {
+            self.last_pick = None;
+            return Ok(None);
+        };
+
+        let viewport_size = [self.pick_target.width(), self.pick_target.height()];
+        let probed = if raw.representation_index == 0 {
+            if let (Some(cpu_surf), Some(gpu_surf)) = (&self.cpu_surface, &self.gpu_surface) {
+                probe_surface_triangle(
+                    cpu_surf,
+                    0,
+                    [x_px, y_px],
+                    viewport_size,
+                    &self.camera,
+                    gpu_surf.dataset_center(),
+                    raw,
+                    &self.style.color_by,
+                )
+            } else {
+                None
+            }
+        } else {
+            let extra_idx = raw.representation_index - 1;
+            self.extra_surfaces
+                .get(extra_idx)
+                .and_then(|(cpu_surf, gpu_surf, style)| {
+                    probe_surface_triangle(
+                        cpu_surf,
+                        raw.representation_index,
+                        [x_px, y_px],
+                        viewport_size,
+                        &self.camera,
+                        gpu_surf.dataset_center(),
+                        raw,
+                        &style.color_by,
+                    )
+                })
+        };
+
+        self.last_pick = probed.clone();
+        Ok(probed)
+    }
 }
 
 /// Persistent GPU and camera state for an embeddable 3D [`ViewportWidget`].
@@ -148,6 +229,7 @@ impl ViewportState {
             DEFAULT_COLOR_FORMAT,
             sample_count,
         )?;
+        let pick_target = PickTarget::new(device, initial_width, initial_height)?;
         let texture_id = egui_renderer.register_native_texture(
             device,
             target.egui_texture_view(),
@@ -157,12 +239,17 @@ impl ViewportState {
         let inner = ViewportGpuInner {
             renderer,
             target,
+            pick_target,
+            cpu_surface: None,
             gpu_surface: None,
+            extra_surfaces: Vec::new(),
             camera: Camera::default(),
             default_bounds: None,
             background_srgb: [1.0, 1.0, 1.0, 1.0],
             style: SurfaceStyle::default(),
             annotations: Annotations::default(),
+            pending_pick_px: None,
+            last_pick: None,
         };
 
         Ok(Self {
@@ -193,15 +280,54 @@ impl ViewportState {
         style: SurfaceStyle,
         fit_camera: bool,
     ) -> Result<(), RenderError> {
+        self.set_shared_surface(device, Arc::new(surface.clone()), style, fit_camera)
+    }
+
+    /// Uploads a shared [`Arc<SurfaceMesh>`] to the viewport and fits the camera if `fit_camera` is `true`.
+    pub fn set_shared_surface(
+        &mut self,
+        device: &wgpu::Device,
+        surface: Arc<SurfaceMesh>,
+        style: SurfaceStyle,
+        fit_camera: bool,
+    ) -> Result<(), RenderError> {
         if let Ok(mut guard) = self.inner.lock() {
-            let gpu_surface = guard.renderer.upload_surface(device, surface, &style)?;
+            let gpu_surface = guard.renderer.upload_surface(device, &surface, &style)?;
             let bounds = surface.bounds();
             guard.default_bounds = bounds;
             if fit_camera && let Some(b) = bounds {
                 guard.camera = Camera::fit_bounds(b, 30.0, 20.0);
             }
             guard.style = style;
+            guard.cpu_surface = Some(surface);
             guard.gpu_surface = Some(gpu_surface);
+            guard.extra_surfaces.clear();
+            guard.last_pick = None;
+            guard.pending_pick_px = None;
+        }
+        Ok(())
+    }
+
+    /// Uploads additional secondary [`SurfaceMesh`] representations (aligned to the primary surface's
+    /// dataset center) for multi-representation scenes.
+    pub fn set_additional_surfaces(
+        &mut self,
+        device: &wgpu::Device,
+        surfaces: Vec<(Arc<SurfaceMesh>, SurfaceStyle)>,
+    ) -> Result<(), RenderError> {
+        if let Ok(mut guard) = self.inner.lock() {
+            let center = guard
+                .gpu_surface
+                .as_ref()
+                .map_or([0.0, 0.0, 0.0], GpuSurface::dataset_center);
+            let mut uploaded = Vec::with_capacity(surfaces.len());
+            for (surf, style) in surfaces {
+                let gpu_surf = guard
+                    .renderer
+                    .upload_surface_with_center(device, &surf, center, &style)?;
+                uploaded.push((surf, gpu_surf, style));
+            }
+            guard.extra_surfaces = uploaded;
         }
         Ok(())
     }
@@ -342,6 +468,7 @@ impl ViewportState {
         let height_px = height_px.max(1);
         if let Ok(mut guard) = self.inner.lock() {
             let resized = guard.target.resize(device, width_px, height_px)?;
+            let _ = guard.pick_target.resize(device, width_px, height_px)?;
             if resized {
                 egui_renderer.update_egui_texture_from_wgpu_texture(
                     device,
@@ -353,6 +480,53 @@ impl ViewportState {
             return Ok(resized);
         }
         Ok(false)
+    }
+
+    /// Synchronously renders the GPU ID buffer and probes the surface at physical pixel `(x_px, y_px)`
+    /// (`(0, 0)` at top-left of the viewport), updating [`Self::last_pick`].
+    pub fn pick_at(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        x_px: u32,
+        y_px: u32,
+    ) -> Result<Option<SurfacePickResult>, RenderError> {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.pending_pick_px = None;
+            return guard.execute_pick(device, queue, x_px, y_px);
+        }
+        Ok(None)
+    }
+
+    /// Synchronously probes the surface at physical pixel `(x_px, y_px)` using an [`egui_wgpu::RenderState`].
+    pub fn pick_at_with_render_state(
+        &mut self,
+        render_state: &egui_wgpu::RenderState,
+        x_px: u32,
+        y_px: u32,
+    ) -> Result<Option<SurfacePickResult>, RenderError> {
+        self.pick_at(&render_state.device, &render_state.queue, x_px, y_px)
+    }
+
+    /// Schedules a pick at physical pixel `(x_px, y_px)` to execute during the next `egui_wgpu` `prepare` step.
+    pub fn request_pick_at(&mut self, x_px: u32, y_px: u32) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.pending_pick_px = Some([x_px, y_px]);
+        }
+    }
+
+    /// Returns the most recent [`SurfacePickResult`] from clicking or calling [`Self::pick_at`].
+    #[must_use]
+    pub fn last_pick(&self) -> Option<SurfacePickResult> {
+        self.inner.lock().ok().and_then(|g| g.last_pick.clone())
+    }
+
+    /// Clears the active value-probe result.
+    pub fn clear_pick(&mut self) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.last_pick = None;
+            guard.pending_pick_px = None;
+        }
     }
 
     /// Returns an `egui_wgpu` [`CallbackTrait`](egui_wgpu::CallbackTrait) instance that renders
@@ -389,8 +563,17 @@ impl egui_wgpu::CallbackTrait for ViewportPrepareCallback {
         egui_encoder: &mut wgpu::CommandEncoder,
         _callback_resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        if let Ok(guard) = self.inner.lock() {
-            let surfaces: Vec<&GpuSurface> = guard.gpu_surface.iter().collect();
+        if let Ok(mut guard) = self.inner.lock() {
+            if let Some([x_px, y_px]) = guard.pending_pick_px.take()
+                && let Err(err) = guard.execute_pick(device, queue, x_px, y_px)
+            {
+                log::error!("tetraglass-egui pick failed: {err}");
+            }
+            let surfaces: Vec<&GpuSurface> = guard
+                .gpu_surface
+                .iter()
+                .chain(guard.extra_surfaces.iter().map(|(_, g, _)| g))
+                .collect();
             if let Err(err) = guard.renderer.render_with_annotations(
                 device,
                 egui_encoder,
@@ -426,6 +609,8 @@ pub struct ViewportResponse {
     pub camera_changed: bool,
     /// Whether the offscreen target was resized this frame.
     pub resized: bool,
+    /// The active surface pick result (updated when the user clicks in the viewport or calls [`ViewportState::pick_at`]).
+    pub picked: Option<SurfacePickResult>,
 }
 
 /// Interactive 3D viewport widget that renders in `egui_wgpu`'s `prepare` step and displays the
@@ -433,6 +618,7 @@ pub struct ViewportResponse {
 pub struct ViewportWidget<'a> {
     state: &'a mut ViewportState,
     desired_size: Option<Vec2>,
+    show_probe_overlay: bool,
 }
 
 impl<'a> ViewportWidget<'a> {
@@ -442,6 +628,7 @@ impl<'a> ViewportWidget<'a> {
         Self {
             state,
             desired_size: None,
+            show_probe_overlay: true,
         }
     }
 
@@ -449,6 +636,13 @@ impl<'a> ViewportWidget<'a> {
     #[must_use]
     pub fn desired_size(mut self, size: Vec2) -> Self {
         self.desired_size = Some(size);
+        self
+    }
+
+    /// Controls whether an on-canvas value-probe overlay badge and crosshair are drawn when a pick is active.
+    #[must_use]
+    pub fn show_probe_overlay(mut self, show: bool) -> Self {
+        self.show_probe_overlay = show;
         self
     }
 
@@ -484,6 +678,19 @@ impl<'a> ViewportWidget<'a> {
 
         let camera_changed = handle_camera_input(ui, &response, rect, self.state);
 
+        if response.clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let rel_x = ((pos.x - rect.min.x) * ppp)
+                .round()
+                .clamp(0.0, (width_px.saturating_sub(1)) as f32) as u32;
+            let rel_y = ((pos.y - rect.min.y) * ppp)
+                .round()
+                .clamp(0.0, (height_px.saturating_sub(1)) as f32) as u32;
+            self.state.request_pick_at(rel_x, rel_y);
+            ui.ctx().request_repaint();
+        }
+
         // 1. Schedule offscreen render pass in `egui_wgpu::CallbackTrait::prepare`.
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
@@ -495,12 +702,80 @@ impl<'a> ViewportWidget<'a> {
         ui.painter()
             .image(self.state.texture_id(), rect, uv, Color32::WHITE);
 
+        let picked = self.state.last_pick();
+        if self.show_probe_overlay
+            && let Some(ref pick) = picked
+        {
+            draw_probe_overlay(ui, rect, ppp, pick);
+        }
+
         Ok(ViewportResponse {
             response,
             camera_changed,
             resized,
+            picked,
         })
     }
+}
+
+fn draw_probe_overlay(ui: &Ui, rect: Rect, ppp: f32, pick: &SurfacePickResult) {
+    let painter = ui.painter_at(rect);
+    let px_pos = pos2(
+        rect.min.x + (pick.pixel[0] as f32 + 0.5) / ppp,
+        rect.min.y + (pick.pixel[1] as f32 + 0.5) / ppp,
+    );
+    if rect.contains(px_pos) {
+        let stroke = Stroke::new(1.5, Color32::from_rgb(255, 220, 60));
+        painter.circle_stroke(px_pos, 5.0, stroke);
+        painter.line_segment(
+            [
+                pos2(px_pos.x - 8.0, px_pos.y),
+                pos2(px_pos.x + 8.0, px_pos.y),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                pos2(px_pos.x, px_pos.y - 8.0),
+                pos2(px_pos.x, px_pos.y + 8.0),
+            ],
+            stroke,
+        );
+    }
+
+    let [wx, wy, wz] = pick.world_position;
+    let cell_label = pick
+        .source_cell_id
+        .map_or_else(|| "n/a".to_string(), |c| format!("#{c}"));
+    let mut text = format!(
+        "Cell {cell_label} (tri #{}, pt #{})\nx={wx:.4}, y={wy:.4}, z={wz:.4}",
+        pick.triangle_index, pick.point_index
+    );
+    if let Some(val) = pick.active_scalar
+        && val.is_finite()
+    {
+        text.push_str(&format!("\nvalue: {val:.5}"));
+    }
+
+    let badge_pos = pos2(rect.min.x + 8.0, rect.min.y + 8.0);
+    let galley = painter.layout_no_wrap(text, FontId::monospace(11.0), Color32::from_gray(240));
+    let badge_rect = Rect::from_min_size(badge_pos, galley.size() + Vec2::new(12.0, 8.0));
+    painter.rect_filled(
+        badge_rect,
+        CornerRadius::same(4),
+        Color32::from_rgba_unmultiplied(20, 24, 30, 210),
+    );
+    painter.rect_stroke(
+        badge_rect,
+        CornerRadius::same(4),
+        Stroke::new(1.0, Color32::from_gray(90)),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(
+        pos2(badge_pos.x + 6.0, badge_pos.y + 4.0),
+        galley,
+        Color32::from_gray(240),
+    );
 }
 
 fn handle_camera_input(
@@ -553,8 +828,9 @@ fn handle_camera_input(
     changed
 }
 
-/// Re-exported colormap and style types for convenience when configuring [`ViewportState`].
+/// Re-exported colormap, style, and pick types for convenience when configuring [`ViewportState`].
 pub use tetraglass_render::{
     Camera as ViewportCamera, ColorBy as ViewportColorBy, ColormapKind as ViewportColormap,
-    ScalarComponent as ViewportScalarComponent, SurfaceStyle as ViewportSurfaceStyle,
+    PickProbeValue as ViewportPickProbeValue, ScalarComponent as ViewportScalarComponent,
+    SurfacePickResult as ViewportPickResult, SurfaceStyle as ViewportSurfaceStyle,
 };

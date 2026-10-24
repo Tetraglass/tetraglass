@@ -1,5 +1,7 @@
 //! `wgpu` surface rendering pipeline, offscreen targets, and GPU surface buffers.
 
+use std::sync::{Arc, Mutex};
+
 use bytemuck::{Pod, Zeroable};
 use tetraglass_core::{BoundingBox, DataArray, SurfaceMesh, ValueRange};
 use wgpu::util::DeviceExt;
@@ -10,6 +12,7 @@ use crate::annotations::{
 use crate::camera::Camera;
 use crate::colormap::ColormapKind;
 use crate::error::{FieldAssociation, RenderError};
+use crate::pick::{PICK_FORMAT, PickTarget, RawPickHit};
 
 /// Default offscreen color texture format (sRGB 8-bit RGBA).
 pub const DEFAULT_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -366,6 +369,7 @@ struct SurfaceUniforms {
     use_log_scale: u32,
     solid_color: [f32; 4],
     edge_color: [f32; 4],
+    pick_info: [u32; 4],
 }
 
 /// Uploaded GPU buffers and bind group for a [`SurfaceMesh`].
@@ -453,6 +457,7 @@ pub struct Renderer {
     frame_bind_groups: [wgpu::BindGroup; 3],
     surface_bind_group_layout: wgpu::BindGroupLayout,
     surface_pipeline: wgpu::RenderPipeline,
+    pick_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
     annotation_uniform_buffer: wgpu::Buffer,
     annotation_sampler: wgpu::Sampler,
@@ -693,6 +698,50 @@ impl Renderer {
             cache: None,
         });
 
+        let pick_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("tetraglass_pick_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &vertex_buffers,
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_pick"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: PICK_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let edge_vertex_buffers = [Some(wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<[f32; 3]>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -893,6 +942,7 @@ impl Renderer {
             frame_bind_groups,
             surface_bind_group_layout,
             surface_pipeline,
+            pick_pipeline,
             edge_pipeline,
             annotation_uniform_buffer,
             annotation_sampler,
@@ -1350,6 +1400,164 @@ impl Renderer {
 
         Ok(())
     }
+
+    /// Records a GPU ID buffer render pass into `encoder`, drawing `surfaces` into `target`
+    /// with 1-based representation IDs (`idx + 1`) and 0-based triangle IDs (`0..num_triangles`).
+    pub fn render_pick(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        target: &PickTarget,
+        camera: &Camera,
+        surfaces: &[&GpuSurface],
+    ) -> Result<(), RenderError> {
+        let aspect = (target.width() as f32) / (target.height().max(1) as f32);
+        let view_proj = camera.view_proj_matrix(aspect);
+        let eye = camera.eye_position();
+        let (key_dir, fill_dir) = camera.light_directions();
+        let frame_uniforms = FrameUniforms {
+            view_proj,
+            eye_pos: [eye[0], eye[1], eye[2], 1.0],
+            key_dir: [key_dir[0], key_dir[1], key_dir[2], 0.0],
+            fill_dir: [fill_dir[0], fill_dir[1], fill_dir[2], 0.0],
+        };
+        queue.write_buffer(
+            &self.frame_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&frame_uniforms),
+        );
+
+        let pick_info_offset = std::mem::offset_of!(SurfaceUniforms, pick_info) as u64;
+        for (rep_idx, surface) in surfaces.iter().enumerate() {
+            let pick_info: [u32; 4] = [(rep_idx as u32) + 1, 0, 0, 0];
+            queue.write_buffer(
+                &surface.uniform_buffer,
+                pick_info_offset,
+                bytemuck::bytes_of(&pick_info),
+            );
+        }
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("tetraglass_pick_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target.id_view(),
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: target.depth_view(),
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        pass.set_pipeline(&self.pick_pipeline);
+        for surface in surfaces {
+            if !surface.draw_surface || surface.vertex_count == 0 {
+                continue;
+            }
+            let cm_idx = match surface.active_colormap {
+                ColormapKind::Viridis => 0,
+                ColormapKind::Cividis => 1,
+                ColormapKind::CoolWarm => 2,
+            };
+            pass.set_bind_group(0, &self.frame_bind_groups[cm_idx], &[]);
+            pass.set_bind_group(1, &surface.bind_group, &[]);
+            pass.set_vertex_buffer(0, surface.geometry_buffer.slice(..));
+            pass.set_vertex_buffer(1, surface.scalar_buffer.slice(..));
+            pass.draw(0..surface.vertex_count, 0..1);
+        }
+
+        Ok(())
+    }
+
+    /// Renders `surfaces` into `target` and synchronously reads back the [`RawPickHit`] at pixel `(x, y)`.
+    #[allow(clippy::too_many_arguments)] // Reason: combines device, queue, target, camera, surfaces, and pixel coordinates
+    pub fn pick_pixel(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &PickTarget,
+        camera: &Camera,
+        surfaces: &[&GpuSurface],
+        x: u32,
+        y: u32,
+    ) -> Result<Option<RawPickHit>, RenderError> {
+        if x >= target.width() || y >= target.height() {
+            return Ok(None);
+        }
+
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tetraglass_pick_pixel_staging"),
+            size: u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("tetraglass_pick_pixel_encoder"),
+        });
+        self.render_pick(&mut encoder, queue, target, camera, surfaces)?;
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: target.id_texture(),
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let map_result: Arc<Mutex<Option<Result<(), wgpu::BufferAsyncError>>>> =
+            Arc::new(Mutex::new(None));
+        let map_result_clone = Arc::clone(&map_result);
+        staging_buffer
+            .slice(..16)
+            .map_async(wgpu::MapMode::Read, move |res| {
+                if let Ok(mut slot) = map_result_clone.lock() {
+                    *slot = Some(res);
+                }
+            });
+
+        device.poll(wgpu::PollType::wait_indefinitely())?;
+
+        let status = map_result
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+            .unwrap_or(Ok(()));
+        status?;
+
+        let mapped = staging_buffer.get_mapped_range(..16)?;
+        let texel: [u32; 4] = *bytemuck::from_bytes(&mapped[..16]);
+        drop(mapped);
+        staging_buffer.unmap();
+
+        Ok(RawPickHit::from_rgba_u32(texel))
+    }
 }
 
 fn build_surface_uniforms(
@@ -1376,6 +1584,7 @@ fn build_surface_uniforms(
             srgb_channel_to_linear(edge_color_srgb[2]),
             edge_color_srgb[3],
         ],
+        pick_info: [1, 0, 0, 0],
     }
 }
 
