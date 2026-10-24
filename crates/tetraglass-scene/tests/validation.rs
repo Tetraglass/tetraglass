@@ -457,3 +457,47 @@ fn validates_contour_filter_field_values_and_volume_input() {
             .contains("requires a volume dataset input")
     );
 }
+
+#[test]
+fn validates_clip_filter_normal_volume_input_and_allows_downstream_volume_filters() {
+    let scene = Scene::from_json_str(
+        r#"{
+            "version": 1,
+            "sources": {
+                "flow": { "file": "results.vtu" }
+            },
+            "filters": {
+                "hull": { "type": "surface", "input": "flow" },
+                "bad_clip": { "type": "clip", "input": "flow", "normal": [0.0, 0.0, 0.0] },
+                "surf_clip": { "type": "clip", "input": "hull", "normal": [1.0, 0.0, 0.0] },
+                "good_clip": { "type": "clip", "input": "flow", "normal": [1.0, 0.0, 0.0], "keep": "back", "mode": "crinkle" },
+                "slice_of_clip": { "type": "slice", "input": "good_clip", "normal": [0.0, 0.0, 1.0] }
+            },
+            "view": {
+                "show": [
+                    { "input": "slice_of_clip" }
+                ]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let report = validate_scene_structure(&scene).expect_err("must report clip validation errors");
+    let by_path: BTreeMap<&str, &ValidationIssue> = report
+        .issues()
+        .iter()
+        .map(|i| (i.path.as_str(), i))
+        .collect();
+
+    assert_eq!(
+        by_path["filters.bad_clip.normal"].message,
+        "must not be [0, 0, 0]"
+    );
+    assert!(
+        by_path["filters.surf_clip.input"]
+            .message
+            .contains("requires a volume dataset input")
+    );
+    // `slice_of_clip` takes `good_clip` (a volume filter) as input and must not report an error.
+    assert!(!by_path.contains_key("filters.slice_of_clip.input"));
+}

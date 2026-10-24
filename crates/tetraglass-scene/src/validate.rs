@@ -358,14 +358,16 @@ fn validate_impl(
                 format!("unknown dataset \"{input}\""),
                 suggest_dataset_or_list(input, &defined_datasets, Some(name)),
             ));
-        } else if matches!(filter, Filter::Slice { .. } | Filter::Contour { .. })
-            && matches!(
-                scene.filters.get(input),
-                Some(Filter::Surface { .. } | Filter::Slice { .. } | Filter::Contour { .. })
-            )
-        {
+        } else if matches!(
+            filter,
+            Filter::Slice { .. } | Filter::Contour { .. } | Filter::Clip { .. }
+        ) && matches!(
+            scene.filters.get(input),
+            Some(Filter::Surface { .. } | Filter::Slice { .. } | Filter::Contour { .. })
+        ) {
             let kind = match filter {
                 Filter::Contour { .. } => "contour",
+                Filter::Clip { .. } => "clip",
                 _ => "slice",
             };
             let suggestion = resolve_root_source(name, &scene.sources, &scene.filters)
@@ -381,13 +383,18 @@ fn validate_impl(
 
         match filter {
             Filter::Surface { .. } => {}
-            Filter::Slice { origin, normal, .. } => {
+            Filter::Slice { origin, normal, .. } | Filter::Clip { origin, normal, .. } => {
+                let kind = if matches!(filter, Filter::Clip { .. }) {
+                    "clip"
+                } else {
+                    "slice"
+                };
                 if let Some(orig) = origin
                     && !orig.iter().all(|v| v.is_finite())
                 {
                     issues.push(ValidationIssue::new(
                         format!("filters.{name}.origin"),
-                        "slice plane origin coordinates must be finite numbers",
+                        format!("{kind} plane origin coordinates must be finite numbers"),
                         None,
                     ));
                 }
@@ -395,7 +402,7 @@ fn validate_impl(
                 if !normal.iter().all(|v| v.is_finite()) {
                     issues.push(ValidationIssue::new(
                         format!("filters.{name}.normal"),
-                        "slice plane normal coordinates must be finite numbers",
+                        format!("{kind} plane normal coordinates must be finite numbers"),
                         None,
                     ));
                 } else if normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]

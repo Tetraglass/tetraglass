@@ -170,6 +170,36 @@
       },
       "additionalProperties": false
     },
+    "ClipKeep": {
+      "description": "Which half-space to keep relative to a clip plane's outward normal (`filters.<name>.keep`).",
+      "oneOf": [
+        {
+          "description": "Keep the half-space in the direction of the plane normal (`(p - origin) · normal >= 0`).",
+          "type": "string",
+          "const": "front"
+        },
+        {
+          "description": "Keep the half-space opposite to the plane normal (`(p - origin) · normal <= 0`).",
+          "type": "string",
+          "const": "back"
+        }
+      ]
+    },
+    "ClipMode": {
+      "description": "Clipping algorithm mode (`filters.<name>.mode`).",
+      "oneOf": [
+        {
+          "description": "Cut tetrahedra along the clip plane via the shared marching-tetrahedra kernel (`D-006`).",
+          "type": "string",
+          "const": "exact"
+        },
+        {
+          "description": "Keep whole original source cells that overlap the kept half-space.",
+          "type": "string",
+          "const": "crinkle"
+        }
+      ]
+    },
     "ColorSpec": {
       "description": "A color specification: either a CSS color name (such as `\"white\"` or `\"lightgray\"`)\nor a linear `[r, g, b]` triple with components in `0.0..=1.0`.",
       "anyOf": [
@@ -401,6 +431,60 @@
             "input",
             "field",
             "values"
+          ]
+        },
+        {
+          "description": "Clips the input volume dataset with a plane, keeping one side in `\"exact\"` or `\"crinkle\"` mode (`\"clip\"`).",
+          "type": "object",
+          "properties": {
+            "input": {
+              "description": "Name of the input source or filter.",
+              "type": "string"
+            },
+            "keep": {
+              "description": "Which half-space to keep relative to `normal` (default: `\"front\"`).",
+              "$ref": "#/$defs/ClipKeep",
+              "default": "front"
+            },
+            "mode": {
+              "description": "Clipping mode: `\"exact\"` (default) or `\"crinkle\"` (keeps whole original cells).",
+              "$ref": "#/$defs/ClipMode",
+              "default": "exact"
+            },
+            "normal": {
+              "description": "Outward plane normal `[nx, ny, nz]` (must be non-zero; normalized automatically).",
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "origin": {
+              "description": "Optional point `[x, y, z]` on the clip plane. Defaults to the center of the input dataset bounds when omitted.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "default": null,
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "type": {
+              "type": "string",
+              "const": "clip"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "input",
+            "normal"
           ]
         }
       ]

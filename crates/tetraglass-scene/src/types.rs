@@ -170,6 +170,46 @@ impl From<MeshFormat> for SourceFormat {
     }
 }
 
+/// Which half-space to keep relative to a clip plane's outward normal (`filters.<name>.keep`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipKeep {
+    /// Keep the half-space in the direction of the plane normal (`(p - origin) · normal >= 0`).
+    #[default]
+    Front,
+    /// Keep the half-space opposite to the plane normal (`(p - origin) · normal <= 0`).
+    Back,
+}
+
+impl From<ClipKeep> for tetraglass_filters::ClipKeep {
+    fn from(keep: ClipKeep) -> Self {
+        match keep {
+            ClipKeep::Front => Self::Front,
+            ClipKeep::Back => Self::Back,
+        }
+    }
+}
+
+/// Clipping algorithm mode (`filters.<name>.mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipMode {
+    /// Cut tetrahedra along the clip plane via the shared marching-tetrahedra kernel (`D-006`).
+    #[default]
+    Exact,
+    /// Keep whole original source cells that overlap the kept half-space.
+    Crinkle,
+}
+
+impl From<ClipMode> for tetraglass_filters::ClipMode {
+    fn from(mode: ClipMode) -> Self {
+        match mode {
+            ClipMode::Exact => Self::Exact,
+            ClipMode::Crinkle => Self::Crinkle,
+        }
+    }
+}
+
 /// Visualization filter definition (`filters.<name>`).
 ///
 /// Internally tagged by `"type"`. Milestone M1 implements `"surface"`, M2 adds `"slice"`,
@@ -209,6 +249,28 @@ pub enum Filter {
 
         /// Non-empty list of finite isovalues to extract.
         values: Vec<f64>,
+    },
+
+    /// Clips the input volume dataset with a plane, keeping one side in `"exact"` or `"crinkle"` mode (`"clip"`).
+    #[serde(rename_all = "snake_case")]
+    Clip {
+        /// Name of the input source or filter.
+        input: String,
+
+        /// Optional point `[x, y, z]` on the clip plane. Defaults to the center of the input dataset bounds when omitted.
+        #[serde(default = "default_none_vec3")]
+        origin: Option<[f64; 3]>,
+
+        /// Outward plane normal `[nx, ny, nz]` (must be non-zero; normalized automatically).
+        normal: [f64; 3],
+
+        /// Which half-space to keep relative to `normal` (default: `"front"`).
+        #[serde(default = "default_clip_keep")]
+        keep: ClipKeep,
+
+        /// Clipping mode: `"exact"` (default) or `"crinkle"` (keeps whole original cells).
+        #[serde(default = "default_clip_mode")]
+        mode: ClipMode,
     },
 }
 
@@ -253,13 +315,46 @@ impl Filter {
         }
     }
 
+    /// Creates a plane-clip [`Filter::Clip`] reading from `input` through the input bounds center
+    /// (`origin: None`) with outward plane `normal`, keeping `"front"` in `"exact"` mode.
+    #[must_use]
+    pub fn clip(input: impl Into<String>, normal: [f64; 3]) -> Self {
+        Self::Clip {
+            input: input.into(),
+            origin: None,
+            normal,
+            keep: default_clip_keep(),
+            mode: default_clip_mode(),
+        }
+    }
+
+    /// Creates a plane-clip [`Filter::Clip`] reading from `input` at an explicit `origin`
+    /// with outward plane `normal`, `keep` side, and `mode`.
+    #[must_use]
+    pub fn clip_at(
+        input: impl Into<String>,
+        origin: [f64; 3],
+        normal: [f64; 3],
+        keep: ClipKeep,
+        mode: ClipMode,
+    ) -> Self {
+        Self::Clip {
+            input: input.into(),
+            origin: Some(origin),
+            normal,
+            keep,
+            mode,
+        }
+    }
+
     /// Returns the name of the upstream source or filter that feeds this filter.
     #[must_use]
     pub fn input(&self) -> &str {
         match self {
-            Self::Surface { input } | Self::Slice { input, .. } | Self::Contour { input, .. } => {
-                input
-            }
+            Self::Surface { input }
+            | Self::Slice { input, .. }
+            | Self::Contour { input, .. }
+            | Self::Clip { input, .. } => input,
         }
     }
 }
@@ -975,6 +1070,14 @@ const fn default_none_f64() -> Option<f64> {
 
 const fn default_none_vec3() -> Option<[f64; 3]> {
     None
+}
+
+const fn default_clip_keep() -> ClipKeep {
+    ClipKeep::Front
+}
+
+const fn default_clip_mode() -> ClipMode {
+    ClipMode::Exact
 }
 
 const fn default_representation_style() -> RepresentationStyle {

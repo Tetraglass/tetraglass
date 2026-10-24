@@ -473,3 +473,67 @@ fn contour_filter_evaluates_multiple_isovalues_and_caches_results() {
     assert_eq!(evaluator.cache_hits(), 1);
     assert!(Arc::ptr_eq(iso_surf, &eval2.representations[0].surface));
 }
+
+#[test]
+fn clip_filter_evaluates_exact_and_crinkle_modes_caches_and_chains_into_slice_and_contour() {
+    let hex = read_vtu_from_path(testdata_vtu("hex_linear.vtu")).expect("load hex_linear.vtu");
+    let mut evaluator = SceneEvaluator::new();
+    evaluator.insert_source("hex", hex);
+
+    let mut scene = Scene::from_json_str(
+        r#"{
+            "version": 1,
+            "sources": {
+                "hex": { "file": "testdata/vtk/hex_linear.vtu" }
+            },
+            "filters": {
+                "clipped": {
+                    "type": "clip",
+                    "input": "hex",
+                    "origin": [1.0, 1.0, 1.0],
+                    "normal": [1.0, 0.0, 0.0],
+                    "keep": "front",
+                    "mode": "exact"
+                },
+                "cut_of_clipped": {
+                    "type": "slice",
+                    "input": "clipped",
+                    "origin": [1.5, 1.0, 1.0],
+                    "normal": [0.0, 0.0, 1.0]
+                }
+            },
+            "view": {
+                "show": [
+                    { "input": "clipped", "color_by": "linear", "colorbar": true },
+                    { "input": "cut_of_clipped", "color_by": "linear" }
+                ]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let eval1 = evaluator
+        .evaluate_scene(&scene)
+        .expect("evaluate clip + slice scene");
+    assert_eq!(eval1.representations.len(), 2);
+    // `clipped` executed once (+1) and `cut_of_clipped` executed once (+1) = 2 filter executions;
+    // the second reference to `clipped` inside `cut_of_clipped` hit `tet_view_cache` (+1 hit).
+    assert_eq!(evaluator.filter_executions(), 2);
+    assert_eq!(evaluator.cache_hits(), 1);
+
+    // `hex` on [0, 2]^3 clipped to `x >= 1.0` is the [1, 2] x [0, 2] x [0, 2] block (volume 4.0, surface area 2*(1*2 + 1*2 + 2*2) = 16.0).
+    let clipped_surf = &eval1.representations[0].surface;
+    assert!((clipped_surf.total_area() - 16.0).abs() < 1e-11);
+
+    // `cut_of_clipped` at z = 1.0 on [1, 2] x [0, 2] has area 1 * 2 = 2.0.
+    let slice_surf = &eval1.representations[1].surface;
+    assert!((slice_surf.total_area() - 2.0).abs() < 1e-11);
+
+    // Changing view-only properties does not re-execute either filter.
+    scene.view.show[0].colormap = ColormapName::Cividis;
+    let eval2 = evaluator
+        .evaluate_scene(&scene)
+        .expect("re-evaluate clip + slice scene");
+    assert_eq!(evaluator.filter_executions(), 2);
+    assert!(Arc::ptr_eq(clipped_surf, &eval2.representations[0].surface));
+}

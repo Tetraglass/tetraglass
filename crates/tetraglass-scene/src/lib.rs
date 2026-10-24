@@ -52,12 +52,12 @@ pub use eval::{
     SceneEvaluator, hash_unstructured_grid,
 };
 pub use types::{
-    BackgroundGradient, BackgroundSpec, CameraConfig, ColorSpec, ColorbarOptions, ColorbarPosition,
-    ColorbarSpec, ColormapName, CyclesConfig, DEFAULT_CYCLES_SAMPLES, DEFAULT_LINEARIZE_LEVEL,
-    DEFAULT_MSAA_SAMPLES, DEFAULT_OUTPUT_SIZE, DEFAULT_POINT_SIZE, DEFAULT_VIEW_ANGLE_DEGREES,
-    Filter, FramesConfig, LightingPreset, Output, ProjectionKind, RangePreset, RangeSpec,
-    RenderEngine, Representation, RepresentationStyle, SCENE_VERSION, Scene, Source, SourceFormat,
-    TimePreset, TimeSelector, TimeStepIndex, View,
+    BackgroundGradient, BackgroundSpec, CameraConfig, ClipKeep, ClipMode, ColorSpec,
+    ColorbarOptions, ColorbarPosition, ColorbarSpec, ColormapName, CyclesConfig,
+    DEFAULT_CYCLES_SAMPLES, DEFAULT_LINEARIZE_LEVEL, DEFAULT_MSAA_SAMPLES, DEFAULT_OUTPUT_SIZE,
+    DEFAULT_POINT_SIZE, DEFAULT_VIEW_ANGLE_DEGREES, Filter, FramesConfig, LightingPreset, Output,
+    ProjectionKind, RangePreset, RangeSpec, RenderEngine, Representation, RepresentationStyle,
+    SCENE_VERSION, Scene, Source, SourceFormat, TimePreset, TimeSelector, TimeStepIndex, View,
 };
 pub use validate::{
     ArrayMetadata, DatasetMetadata, ValidationIssue, ValidationReport, closest_match,
@@ -594,6 +594,52 @@ mod tests {
         assert_eq!(
             obj.get("additionalProperties").and_then(|v| v.as_bool()),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn parses_clip_filter_defaults_and_explicit_options() {
+        let json = r#"{
+            "version": 1,
+            "sources": {
+                "flow": { "file": "results.vtu" }
+            },
+            "filters": {
+                "clip_default": {
+                    "type": "clip",
+                    "input": "flow",
+                    "normal": [1.0, 0.0, 0.0]
+                },
+                "clip_crinkle": {
+                    "type": "clip",
+                    "input": "flow",
+                    "origin": [0.5, 0.5, 0.5],
+                    "normal": [0.0, 0.0, 1.0],
+                    "keep": "back",
+                    "mode": "crinkle"
+                }
+            },
+            "view": {
+                "show": [
+                    { "input": "clip_default" }
+                ]
+            }
+        }"#;
+
+        let scene = Scene::from_json_str(json).expect("clip scene should parse");
+        assert_eq!(
+            scene.filters["clip_default"],
+            Filter::clip("flow", [1.0, 0.0, 0.0])
+        );
+        assert_eq!(
+            scene.filters["clip_crinkle"],
+            Filter::clip_at(
+                "flow",
+                [0.5, 0.5, 0.5],
+                [0.0, 0.0, 1.0],
+                ClipKeep::Back,
+                ClipMode::Crinkle
+            )
         );
     }
 }

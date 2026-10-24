@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tetraglass_core::{
-    ArrayBuffer, Attributes, CellType, CoreError, DataArray, SurfaceMesh, UnstructuredGrid,
-    try_u32_from_usize,
+    ArrayBuffer, Attributes, CellType, CoreError, DataArray, SurfaceMesh, TetView,
+    UnstructuredGrid, try_u32_from_usize,
 };
 
 use crate::basis::{corner_reference_rst, evaluate_cell_basis};
@@ -484,6 +484,152 @@ pub fn extract_external_surface_with_subdivisions(
         triangle_source_cells,
         face_source_cells,
         point_data,
+        cell_data,
+    )?
+    .with_wireframe_edges(wireframe_edges)?;
+    Ok(surface)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TetCandidateFace {
+    source_cell: u32,
+    tet_idx: u32,
+    verts: [u32; 3],
+    owner_count: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TetBoundaryEdgeState {
+    Once { src_cell: u32, normal: [f64; 3] },
+    TwiceSameCellCoplanar,
+    Keep,
+}
+
+fn triangle_unit_normal(p0: [f64; 3], p1: [f64; 3], p2: [f64; 3]) -> [f64; 3] {
+    let u = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+    let v = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+    let nx = u[1] * v[2] - u[2] * v[1];
+    let ny = u[2] * v[0] - u[0] * v[2];
+    let nz = u[0] * v[1] - u[1] * v[0];
+    let len = (nx * nx + ny * ny + nz * nz).sqrt();
+    if len > 1e-24 {
+        [nx / len, ny / len, nz / len]
+    } else {
+        [0.0, 0.0, 0.0]
+    }
+}
+
+/// Extracts the external boundary surface of a [`TetView`] (`M2.5`), preserving the
+/// originating source cell index (`tet_source_cells`) on every boundary triangle and
+/// omitting internal coplanar same-cell decomposition diagonals from [`SurfaceMesh::wireframe_edges`].
+pub fn extract_tet_view_surface(view: &TetView) -> Result<SurfaceMesh, FilterError> {
+    let tets = view.tets();
+    let tet_source_cells = view.tet_source_cells();
+    let mut candidates: Vec<TetCandidateFace> = Vec::with_capacity(tets.len() * 2);
+    let mut first_seen: HashMap<FaceKey, usize> = HashMap::with_capacity(tets.len() * 2);
+
+    for (tet_idx_usize, &conn) in tets.iter().enumerate() {
+        let tet_idx = try_u32_from_usize(tet_idx_usize)?;
+        let source_cell = tet_source_cells[tet_idx_usize];
+        for [s0, s1, s2] in [[0usize, 1, 3], [1, 2, 3], [2, 0, 3], [0, 2, 1]] {
+            let verts = [conn[s0], conn[s1], conn[s2]];
+            let key = FaceKey::from_tri(verts);
+            if let Some(&idx) = first_seen.get(&key) {
+                candidates[idx].owner_count += 1;
+            } else {
+                let idx = candidates.len();
+                candidates.push(TetCandidateFace {
+                    source_cell,
+                    tet_idx,
+                    verts,
+                    owner_count: 1,
+                });
+                first_seen.insert(key, idx);
+            }
+        }
+    }
+
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut triangle_source_cells: Vec<u32> = Vec::new();
+    let mut triangle_tet_indices: Vec<u32> = Vec::new();
+    let mut face_source_cells: Vec<u32> = Vec::new();
+    let mut edge_states: HashMap<[u32; 2], TetBoundaryEdgeState> = HashMap::new();
+    let points = view.points();
+
+    for cand in candidates {
+        if cand.owner_count != 1 {
+            continue;
+        }
+        let [v0, v1, v2] = cand.verts;
+        triangles.push([v0, v1, v2]);
+        triangle_source_cells.push(cand.source_cell);
+        triangle_tet_indices.push(cand.tet_idx);
+        face_source_cells.push(cand.source_cell);
+
+        let normal = triangle_unit_normal(
+            points[v0 as usize],
+            points[v1 as usize],
+            points[v2 as usize],
+        );
+        for [a, b] in [[v0, v1], [v1, v2], [v2, v0]] {
+            if a == b {
+                continue;
+            }
+            let edge = if a < b { [a, b] } else { [b, a] };
+            match edge_states.get_mut(&edge) {
+                None => {
+                    edge_states.insert(
+                        edge,
+                        TetBoundaryEdgeState::Once {
+                            src_cell: cand.source_cell,
+                            normal,
+                        },
+                    );
+                }
+                Some(state) => {
+                    *state = match *state {
+                        TetBoundaryEdgeState::Once {
+                            src_cell,
+                            normal: prev_n,
+                        } => {
+                            let dot = prev_n[0] * normal[0]
+                                + prev_n[1] * normal[1]
+                                + prev_n[2] * normal[2];
+                            if src_cell == cand.source_cell && dot > 1.0 - 1e-6 {
+                                TetBoundaryEdgeState::TwiceSameCellCoplanar
+                            } else {
+                                TetBoundaryEdgeState::Keep
+                            }
+                        }
+                        TetBoundaryEdgeState::TwiceSameCellCoplanar
+                        | TetBoundaryEdgeState::Keep => TetBoundaryEdgeState::Keep,
+                    };
+                }
+            }
+        }
+    }
+
+    let mut wireframe_edges: Vec<[u32; 2]> = edge_states
+        .into_iter()
+        .filter_map(|(edge, state)| match state {
+            TetBoundaryEdgeState::Once { .. } | TetBoundaryEdgeState::Keep => Some(edge),
+            TetBoundaryEdgeState::TwiceSameCellCoplanar => None,
+        })
+        .collect();
+    wireframe_edges.sort_unstable();
+
+    let mut cell_data = Attributes::new(triangles.len());
+    for (name, arr) in view.cell_data().iter() {
+        let mapped = map_cell_array(arr, &triangle_tet_indices)?;
+        cell_data.insert(name, mapped)?;
+    }
+
+    let surface = SurfaceMesh::new(
+        view.points_arc(),
+        triangles,
+        triangle_source_cells,
+        face_source_cells,
+        view.point_data().clone(),
         cell_data,
     )?
     .with_wireframe_edges(wireframe_edges)?;

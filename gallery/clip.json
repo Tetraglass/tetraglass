@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "sources": {
+    "mesh": {
+      "file": "../testdata/vtk/hex_linear.vtu"
+    }
+  },
+  "filters": {
+    "clipped": {
+      "type": "clip",
+      "input": "mesh",
+      "origin": [1.0, 1.0, 1.0],
+      "normal": [1.0, -0.8, 0.9],
+      "keep": "back",
+      "mode": "exact"
+    }
+  },
+  "view": {
+    "show": [
+      {
+        "input": "clipped",
+        "style": "surface_with_edges",
+        "color_by": "linear",
+        "colormap": "viridis",
+        "range": [0.0, 12.0],
+        "edge_color": "dimgray",
+        "colorbar": {
+          "title": "linear",
+          "position": "right"
+        }
+      },
+      {
+        "input": "mesh",
+        "style": "wireframe",
+        "edge_color": "silver"
+      }
+    ],
+    "camera": {
+      "fit": "all",
+      "azimuth": 35.0,
+      "elevation": 24.0,
+      "zoom": 1.0,
+      "projection": "perspective"
+    },
+    "lights": "default",
+    "background": "white",
+    "axes": true,
+    "title": "Exact Plane Clip (linear)"
+  },
+  "output": {
+    "image": "clip.png",
+    "size": [800, 600],
+    "time": "first",
+    "msaa": 4,
+    "engine": "raster"
+  }
+}

@@ -16,15 +16,17 @@ use tetraglass_core::{
     ValueRange,
 };
 use tetraglass_filters::{
-    ContourComponent, ContourParams, DEFAULT_SUBDIVISIONS, LinearizeParams, SliceParams, contour,
-    extract_external_surface_with_subdivisions, linearize, slice,
+    ClipParams, ContourComponent, ContourParams, DEFAULT_SUBDIVISIONS, LinearizeParams,
+    SliceParams, clip, contour, extract_external_surface_with_subdivisions,
+    extract_tet_view_surface, linearize, slice,
 };
 use tetraglass_io::IoError;
 
 use crate::{
-    ArrayAssociation, ColorbarSpec, ColormapName, DatasetMetadata, Filter, ParsedArrayRef,
-    RangePreset, RangeSpec, Representation, RepresentationStyle, ResolvedComponent, Scene,
-    SceneError, TimeSelector, ValidationIssue, ValidationReport, validate_scene_with_metadata,
+    ArrayAssociation, ClipKeep, ClipMode, ColorbarSpec, ColormapName, DatasetMetadata, Filter,
+    ParsedArrayRef, RangePreset, RangeSpec, Representation, RepresentationStyle, ResolvedComponent,
+    Scene, SceneError, TimeSelector, ValidationIssue, ValidationReport,
+    validate_scene_with_metadata,
 };
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
@@ -228,11 +230,48 @@ fn hash_contour_filter(upstream: PipelineHash, field: &str, values: &[f64]) -> P
     PipelineHash(h.finish())
 }
 
+fn hash_clip_filter(
+    upstream: PipelineHash,
+    origin: Option<[f64; 3]>,
+    normal: [f64; 3],
+    keep: ClipKeep,
+    mode: ClipMode,
+) -> PipelineHash {
+    let mut h = FnvHasher::new();
+    h.write_str("filter:clip");
+    h.write_u64(upstream.0);
+    match origin {
+        Some([ox, oy, oz]) => {
+            h.write_u8(1);
+            h.write_f64(ox);
+            h.write_f64(oy);
+            h.write_f64(oz);
+        }
+        None => {
+            h.write_u8(0);
+        }
+    }
+    h.write_f64(normal[0]);
+    h.write_f64(normal[1]);
+    h.write_f64(normal[2]);
+    h.write_u8(match keep {
+        ClipKeep::Front => 0,
+        ClipKeep::Back => 1,
+    });
+    h.write_u8(match mode {
+        ClipMode::Exact => 0,
+        ClipMode::Crinkle => 1,
+    });
+    PipelineHash(h.finish())
+}
+
 /// Output of evaluating a source or filter node in the scene pipeline.
 #[derive(Debug, Clone)]
 pub enum EvaluatedDataset {
     /// Volume or general unstructured grid dataset.
     Grid(Arc<UnstructuredGrid>),
+    /// Linearized or clipped tetrahedral volume dataset (`M2.5`).
+    TetVolume(Arc<TetView>),
     /// Extracted or generated triangulated surface mesh.
     Surface(Arc<SurfaceMesh>),
 }
@@ -243,6 +282,7 @@ impl EvaluatedDataset {
     pub fn bounds(&self) -> Option<BoundingBox> {
         match self {
             Self::Grid(grid) => grid.bounds(),
+            Self::TetVolume(view) => view.bounds(),
             Self::Surface(surface) => surface.bounds(),
         }
     }
@@ -513,6 +553,30 @@ impl SceneEvaluator {
                     )?;
                     return Ok((contour_hash, EvaluatedDataset::Surface(surface)));
                 }
+                Filter::Clip {
+                    input,
+                    origin,
+                    normal,
+                    keep,
+                    mode,
+                } => {
+                    let (upstream_hash, upstream_data) = self.evaluate_dataset(scene, input)?;
+                    let clip_hash = hash_clip_filter(upstream_hash, *origin, *normal, *keep, *mode);
+                    let subdivisions = resolve_source_subdivisions(scene, input);
+                    let mut params = match origin {
+                        Some(orig) => ClipParams::with_origin(*orig, *normal),
+                        None => ClipParams::new(*normal),
+                    };
+                    params = params.keep((*keep).into()).mode((*mode).into());
+                    let clipped = self.get_or_clip_volume(
+                        clip_hash,
+                        upstream_hash,
+                        upstream_data,
+                        subdivisions,
+                        &params,
+                    )?;
+                    return Ok((clip_hash, EvaluatedDataset::TetVolume(clipped)));
+                }
             }
         }
 
@@ -523,9 +587,9 @@ impl SceneEvaluator {
 
     /// Evaluates the displayable [`SurfaceMesh`] for a named source or filter in `scene`.
     ///
-    /// Per `docs/scene-format.md`, showing a volume mesh source directly implies external
-    /// surface extraction, which is cached under the same input hash as an explicit
-    /// `Filter::Surface`.
+    /// Per `docs/scene-format.md`, showing a volume mesh source or volume filter directly
+    /// implies external surface extraction, which is cached under the same input hash as an
+    /// explicit `Filter::Surface`.
     pub fn evaluate_surface(
         &mut self,
         scene: &Scene,
@@ -540,7 +604,26 @@ impl SceneEvaluator {
                 let surface = self.get_or_extract_surface(surface_hash, other, subdivisions)?;
                 Ok((surface_hash, surface))
             }
+            EvaluatedDataset::TetVolume(tet_view) => {
+                let surface_hash = hash_surface_extraction(node_hash);
+                let surface = self.get_or_extract_tet_surface_implicit(surface_hash, &tet_view)?;
+                Ok((surface_hash, surface))
+            }
         }
+    }
+
+    fn get_or_extract_tet_surface_implicit(
+        &mut self,
+        surface_hash: PipelineHash,
+        tet_view: &TetView,
+    ) -> Result<Arc<SurfaceMesh>, SceneError> {
+        if let Some(cached) = self.surface_cache.get(&surface_hash) {
+            return Ok(Arc::clone(cached));
+        }
+        let surface = Arc::new(extract_tet_view_surface(tet_view)?);
+        self.surface_cache
+            .insert(surface_hash, Arc::clone(&surface));
+        Ok(surface)
     }
 
     fn get_or_extract_surface(
@@ -560,6 +643,7 @@ impl SceneEvaluator {
                 &grid,
                 subdivisions,
             )?),
+            EvaluatedDataset::TetVolume(tet_view) => Arc::new(extract_tet_view_surface(&tet_view)?),
             EvaluatedDataset::Surface(surf) => surf,
         };
         self.surface_cache
@@ -582,6 +666,50 @@ impl SceneEvaluator {
         Ok(view)
     }
 
+    fn resolve_volume_tet_view(
+        &mut self,
+        upstream_hash: PipelineHash,
+        upstream_data: EvaluatedDataset,
+        subdivisions: u8,
+        filter_kind: &str,
+    ) -> Result<Arc<TetView>, SceneError> {
+        match upstream_data {
+            EvaluatedDataset::Grid(grid) => {
+                self.get_or_linearize_tet_view(upstream_hash, &grid, subdivisions)
+            }
+            EvaluatedDataset::TetVolume(tet_view) => Ok(tet_view),
+            EvaluatedDataset::Surface(_) => Err(SceneError::Validation(ValidationReport {
+                issues: vec![ValidationIssue::new(
+                    "filters",
+                    format!("{filter_kind} filter requires a volume dataset input, not a surface"),
+                    None,
+                )],
+            })),
+        }
+    }
+
+    fn get_or_clip_volume(
+        &mut self,
+        clip_hash: PipelineHash,
+        upstream_hash: PipelineHash,
+        upstream_data: EvaluatedDataset,
+        subdivisions: u8,
+        params: &ClipParams,
+    ) -> Result<Arc<TetView>, SceneError> {
+        if let Some(cached) = self.tet_view_cache.get(&clip_hash) {
+            self.cache_hits += 1;
+            return Ok(Arc::clone(cached));
+        }
+
+        let tet_view =
+            self.resolve_volume_tet_view(upstream_hash, upstream_data, subdivisions, "clip")?;
+
+        self.filter_executions += 1;
+        let clipped = Arc::new(clip(&tet_view, params)?);
+        self.tet_view_cache.insert(clip_hash, Arc::clone(&clipped));
+        Ok(clipped)
+    }
+
     fn get_or_slice_surface(
         &mut self,
         slice_hash: PipelineHash,
@@ -595,20 +723,8 @@ impl SceneEvaluator {
             return Ok(Arc::clone(cached));
         }
 
-        let tet_view = match upstream_data {
-            EvaluatedDataset::Grid(grid) => {
-                self.get_or_linearize_tet_view(upstream_hash, &grid, subdivisions)?
-            }
-            EvaluatedDataset::Surface(_) => {
-                return Err(SceneError::Validation(ValidationReport {
-                    issues: vec![ValidationIssue::new(
-                        "filters",
-                        "slice filter requires a volume dataset input, not a surface",
-                        None,
-                    )],
-                }));
-            }
-        };
+        let tet_view =
+            self.resolve_volume_tet_view(upstream_hash, upstream_data, subdivisions, "slice")?;
 
         self.filter_executions += 1;
         let surface = Arc::new(slice(&tet_view, params)?);
@@ -630,20 +746,8 @@ impl SceneEvaluator {
             return Ok(Arc::clone(cached));
         }
 
-        let tet_view = match upstream_data {
-            EvaluatedDataset::Grid(grid) => {
-                self.get_or_linearize_tet_view(upstream_hash, &grid, subdivisions)?
-            }
-            EvaluatedDataset::Surface(_) => {
-                return Err(SceneError::Validation(ValidationReport {
-                    issues: vec![ValidationIssue::new(
-                        "filters",
-                        "contour filter requires a volume dataset input, not a surface",
-                        None,
-                    )],
-                }));
-            }
-        };
+        let tet_view =
+            self.resolve_volume_tet_view(upstream_hash, upstream_data, subdivisions, "contour")?;
 
         let parsed = ParsedArrayRef::parse(raw_field)?;
         if parsed.association == Some(ArrayAssociation::Cell) {

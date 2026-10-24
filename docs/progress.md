@@ -241,3 +241,11 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-004, D-005, and D-006).
 - Dependencies added: none.
 - Follow-ups: M2.5 Clip (exact and crinkle modes).
+
+## 2026-10-24 — M2.5 Clip
+
+- Done: implemented plane `clip` filter (`ClipKeep`, `ClipMode`, `ClipParams`, `clip`, `clip_with_chunk_size`, `clip_grid`) and `extract_tet_view_surface` in `tetraglass-filters` using the shared marching-tetrahedra kernel (`clip_tets_with_chunk_size` for exact conformal prism decomposition and `clip_crinkle_tets_with_chunk_size` for whole-source-cell crinkle clipping on `TetView`, `D-005`, `D-006`); added `Filter::Clip { input, origin, normal, keep, mode }` (`Filter::clip`, `Filter::clip_at`) and `EvaluatedDataset::TetVolume` to `tetraglass-scene` with semantic validation, cached volume evaluation, and downstream volume-filter chaining (`clip -> slice`, `clip -> contour`, `clip -> clip`); updated `crates/tetraglass-cli/tests/snapshots/scene-v1.schema.json` and `docs/scene-format.md`; authored `gallery/clip.json` and `tests/baselines/clip.png`.
+- Tests: `crates/tetraglass-filters/tests/clip.rs` (analytic volumes and `Front` + `Back` partition of unity across all 6 cell families in `testdata/vtk/*.vtu`, closed manifold watertightness on clipped boundary surfaces, exact vs. crinkle mode comparisons, degenerate vertex-passing planes, empty/full clips, linear field reproduction, source-cell provenance, and chunk-size determinism), plus scene validation, evaluation cache, schema snapshot, and gallery baseline tests.
+- Decisions: none (implemented per D-004, D-005, and D-006).
+- Dependencies added: none.
+- Follow-ups: M2.6 Threshold.
