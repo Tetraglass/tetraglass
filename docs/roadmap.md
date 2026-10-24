@@ -44,7 +44,8 @@ Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 next.**
 - [x] **M2.1a Linearize linear and polyhedral cells.** `TetView` in `tetraglass-core`; `linearize` in `tetraglass-filters` with face-consistent diagonal decomposition of linear 3D cells (`Tetra`, `Hexahedron`, `Wedge`, `Pyramid`), centroid decomposition of `Polyhedron` cells, source-cell map, and stopgap corner decomposition for higher-order cells; volume, watertightness, and linear-field tests on `testdata/vtk/*.vtu` and synthetic meshes.
 - [x] **M2.1b Linearize higher-order cells and property tests.** Reference-space subdivision at a configurable level (`LinearizeParams`) with Lagrange and serendipity basis evaluation for positions and point fields (`Quadratic*`, `Lagrange*`); property tests verifying volume preservation, exact linear field interpolation, and source-cell mapping across all cell families.
 - [x] **M2.2 Curved surfaces.** External surface of higher-order cells with tessellated faces; wireframe from original element edges.
-- [ ] **M2.3 Tet kernel and slice.** Marching tetrahedra kernel (`/add-filter`), slice filter, scene integration, gallery scene.
+- [x] **M2.3a Marching tetrahedra kernel and slice filter.** Shared marching-tetrahedra isosurface kernel (`D-006`) and plane `slice` filter on `TetView` (`D-005`) in `tetraglass-filters`; analytic area, all-cell-family, degenerate vertex-plane, linear-field interpolation, and chunk-determinism tests (`/add-filter`).
+- [ ] **M2.3b Slice scene integration and gallery scene.** `Filter::Slice` in `tetraglass-scene`, semantic validation (`origin` default, non-zero `normal`), JSON Schema snapshot, `docs/scene-format.md`, and slice gallery scene with baseline (`/author-scene`, `/render-check`).
 - [ ] **M2.4 Contour.** Multiple isovalues, all arrays interpolated.
 - [ ] **M2.5 Clip.** Exact and crinkle modes.
 - [ ] **M2.6 Threshold.**

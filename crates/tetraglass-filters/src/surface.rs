@@ -13,7 +13,7 @@ use crate::basis::{corner_reference_rst, evaluate_cell_basis};
 use crate::linearize::DEFAULT_SUBDIVISIONS;
 
 /// Errors returned by filters in `tetraglass-filters`.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum FilterError {
     /// Underlying core grid or array error.
     #[error(transparent)]
@@ -24,6 +24,20 @@ pub enum FilterError {
     InvalidSubdivisionLevel {
         /// Requested subdivision level.
         subdivisions: u8,
+    },
+
+    /// Plane normal vector is zero or non-finite.
+    #[error("plane normal must be finite and non-zero, got {normal:?}")]
+    InvalidPlaneNormal {
+        /// Provided plane normal `[nx, ny, nz]`.
+        normal: [f64; 3],
+    },
+
+    /// Plane origin contains non-finite coordinates.
+    #[error("plane origin must be finite, got {origin:?}")]
+    InvalidPlaneOrigin {
+        /// Provided plane origin `[ox, oy, oz]`.
+        origin: [f64; 3],
     },
 }
 
@@ -446,7 +460,7 @@ pub fn extract_external_surface_with_subdivisions(
 }
 
 #[inline]
-fn push_canonical_edge(edges: &mut Vec<[u32; 2]>, a: u32, b: u32) {
+pub(crate) fn push_canonical_edge(edges: &mut Vec<[u32; 2]>, a: u32, b: u32) {
     if a != b {
         edges.push(if a < b { [a, b] } else { [b, a] });
     }

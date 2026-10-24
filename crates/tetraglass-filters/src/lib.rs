@@ -7,9 +7,15 @@
 
 mod basis;
 mod linearize;
+mod marching_tets;
+mod slice;
 mod surface;
 
 pub use linearize::{DEFAULT_SUBDIVISIONS, LinearizeParams, linearize, linearize_default};
+pub use marching_tets::{
+    DEFAULT_TET_CHUNK_SIZE, EdgeKey, extract_isosurface, extract_isosurfaces_with_chunk_size,
+};
+pub use slice::{SliceParams, slice, slice_grid, slice_with_chunk_size};
 pub use surface::{
     FilterError, extract_external_surface, extract_external_surface_with_subdivisions,
 };
