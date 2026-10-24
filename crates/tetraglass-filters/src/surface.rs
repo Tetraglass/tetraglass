@@ -13,6 +13,13 @@ pub enum FilterError {
     /// Underlying core grid or array error.
     #[error(transparent)]
     Core(#[from] CoreError),
+
+    /// Subdivision level for higher-order cell linearization must be at least 1.
+    #[error("linearize subdivision level must be >= 1, got {subdivisions}")]
+    InvalidSubdivisionLevel {
+        /// Requested subdivision level.
+        subdivisions: u8,
+    },
 }
 
 /// Canonical order-independent face key used to match shared faces between adjacent cells.
@@ -277,7 +284,10 @@ pub fn extract_external_surface(grid: &UnstructuredGrid) -> Result<SurfaceMesh, 
     Ok(surface)
 }
 
-fn map_cell_array(source: &DataArray, source_cells: &[u32]) -> Result<DataArray, CoreError> {
+pub(crate) fn map_cell_array(
+    source: &DataArray,
+    source_cells: &[u32],
+) -> Result<DataArray, CoreError> {
     let comp = source.components();
     let ncomp = comp.as_usize();
     let out_len = source_cells.len() * ncomp;

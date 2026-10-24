@@ -12,6 +12,7 @@ mod grid;
 mod series;
 mod surface;
 mod synthetic;
+mod tet_view;
 
 pub use array::{ArrayBuffer, Attributes, ComponentCount, DataArray, ScalarType, ValueRange};
 pub use cell::{CellType, PolyhedronFaceIter, PolyhedronFaces};
@@ -23,6 +24,7 @@ pub use synthetic::{
     M2_PERFORMANCE_TARGET, PerformanceTarget, SyntheticCellLayout, SyntheticGridSpec,
     generate_synthetic_grid, m2_benchmark_hex_spec, m2_benchmark_tet_spec,
 };
+pub use tet_view::{TetView, signed_tet_volume};
 
 #[cfg(test)]
 mod tests {
@@ -497,6 +499,81 @@ mod tests {
             Some(ValueRange {
                 min: 0.0,
                 max: 59.0
+            })
+        );
+    }
+
+    #[test]
+    fn tet_view_validates_inputs_and_computes_volumes() {
+        let pts = sample_tet_points();
+        let mut point_data = Attributes::new(4);
+        point_data
+            .insert(
+                "linear",
+                DataArray::from_f64(ComponentCount::Scalar, vec![0.0, 1.0, 2.0, 4.0]).unwrap(),
+            )
+            .unwrap();
+        let mut cell_data = Attributes::new(1);
+        cell_data
+            .insert(
+                "cell_id",
+                DataArray::from_i32(ComponentCount::Scalar, vec![0]).unwrap(),
+            )
+            .unwrap();
+
+        let view = TetView::new(
+            pts.clone(),
+            vec![[0, 1, 2, 3]],
+            vec![0],
+            point_data,
+            cell_data,
+        )
+        .expect("valid tet view");
+        assert_eq!(view.num_points(), 4);
+        assert_eq!(view.num_tets(), 1);
+        assert_eq!(view.tets(), &[[0, 1, 2, 3]]);
+        assert_eq!(view.tet_source_cells(), &[0]);
+        // Volume of tet with edges (1,0,0), (0,2,0), (0,0,4) is (1 * 2 * 4) / 6 = 4 / 3
+        let expected_vol = 4.0 / 3.0;
+        assert!((view.tet_signed_volume(0).unwrap() - expected_vol).abs() < 1e-12);
+        assert!((view.tet_volume(0).unwrap() - expected_vol).abs() < 1e-12);
+        assert!((view.total_volume() - expected_vol).abs() < 1e-12);
+
+        let grid = view
+            .to_unstructured_grid()
+            .expect("convert TetView to grid");
+        assert_eq!(grid.num_points(), 4);
+        assert_eq!(grid.num_cells(), 1);
+        assert_eq!(grid.cell_types(), &[CellType::Tetra]);
+
+        // Reject mismatched tet_source_cells length
+        assert_eq!(
+            TetView::new(
+                pts.clone(),
+                vec![[0, 1, 2, 3]],
+                vec![0, 1],
+                Attributes::new(4),
+                Attributes::new(1),
+            ),
+            Err(CoreError::CellCountMismatch {
+                cell_types: 1,
+                offsets: 2,
+            })
+        );
+
+        // Reject out-of-bounds vertex index
+        assert_eq!(
+            TetView::new(
+                pts,
+                vec![[0, 1, 2, 9]],
+                vec![0],
+                Attributes::new(4),
+                Attributes::new(1),
+            ),
+            Err(CoreError::PointIndexOutOfBounds {
+                cell_index: 0,
+                point_index: 9,
+                num_points: 4,
             })
         );
     }

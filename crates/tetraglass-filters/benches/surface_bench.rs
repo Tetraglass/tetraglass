@@ -12,7 +12,7 @@ use tetraglass_core::{
     M2_PERFORMANCE_TARGET, SyntheticCellLayout, SyntheticGridSpec, m2_benchmark_hex_spec,
     m2_benchmark_tet_spec,
 };
-use tetraglass_filters::extract_external_surface;
+use tetraglass_filters::{extract_external_surface, linearize_default};
 
 fn main() {
     let is_full_bench = env::args().any(|a| a == "--bench");
@@ -23,6 +23,8 @@ fn main() {
         let grid = small.generate().expect("generate small synthetic mesh");
         let surf = extract_external_surface(&grid).expect("extract external surface");
         assert_eq!(surf.num_faces(), small.expected_boundary_faces());
+        let view = linearize_default(&grid).expect("linearize small synthetic mesh");
+        assert_eq!(view.num_tets(), small.num_cells());
         return;
     }
 
@@ -54,8 +56,14 @@ fn main() {
     let hex_surf_ms = t1.elapsed().as_secs_f64() * 1000.0;
     assert_eq!(hex_surf.num_faces(), hex_spec.expected_boundary_faces());
 
+    let t1_lin = Instant::now();
+    let hex_lin = linearize_default(&hex_grid).expect("linearize 100k hexes");
+    let hex_lin_ms = t1_lin.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(hex_lin.num_tets(), hex_spec.num_cells() * 6);
+
     println!(
-        "[Hexahedra 100k] generate: {hex_gen_ms:.2} ms | extract_external_surface: {hex_surf_ms:.2} ms ({} boundary faces)",
+        "[Hexahedra 100k] generate: {hex_gen_ms:.2} ms | linearize: {hex_lin_ms:.2} ms ({} tets) | extract_external_surface: {hex_surf_ms:.2} ms ({} boundary faces)",
+        hex_lin.num_tets(),
         hex_surf.num_faces()
     );
 
@@ -69,8 +77,14 @@ fn main() {
     let tet_surf_ms = t3.elapsed().as_secs_f64() * 1000.0;
     assert_eq!(tet_surf.num_faces(), tet_spec.expected_boundary_faces());
 
+    let t3_lin = Instant::now();
+    let tet_lin = linearize_default(&tet_grid).expect("linearize 600k tets");
+    let tet_lin_ms = t3_lin.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(tet_lin.num_tets(), tet_spec.num_cells());
+
     println!(
-        "[Tetrahedra 600k] generate: {tet_gen_ms:.2} ms | extract_external_surface: {tet_surf_ms:.2} ms ({} boundary tris)",
+        "[Tetrahedra 600k] generate: {tet_gen_ms:.2} ms | linearize: {tet_lin_ms:.2} ms ({} tets) | extract_external_surface: {tet_surf_ms:.2} ms ({} boundary tris)",
+        tet_lin.num_tets(),
         tet_surf.num_triangles()
     );
 }

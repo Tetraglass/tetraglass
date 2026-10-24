@@ -191,3 +191,10 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none.
 - Dependencies added: none.
 - Follow-ups: M2.1 Linearize (first task of Milestone M2 — await user's go-ahead to start M2).
+
+## 2026-10-24: M2.1a Linearize linear and polyhedral cells
+- Done: split `M2.1` into `M2.1a` (linear + polyhedral cell decomposition) and `M2.1b` (Lagrange/quadratic higher-order subdivision + property tests) per the M1.11 retrospective; implemented `TetView` and `signed_tet_volume` in `tetraglass-core` and `linearize` / `linearize_default` (`LinearizeParams`, `DEFAULT_SUBDIVISIONS`) in `tetraglass-filters` with Dompierre et al. minimum-global-vertex face-consistent diagonal tetrahedralization of linear 3D cells (`Tetra`, `Hexahedron`, `Wedge`, `Pyramid`), centroid + minimum-vertex face-fan tetrahedralization of `Polyhedron` cells with equal-weight point attribute averaging, `Arc` point/attribute buffer sharing when no new points are added, and per-tet source-cell mapping (`tet_source_cells`); added `linearize` timing to `surface_bench` (`8.1 ms` on `100k` hexes -> `600k` tets).
+- Tests: unit test `tet_view_validates_inputs_and_computes_volumes` in `tetraglass-core` and integration tests in `crates/tetraglass-filters/tests/linearize.rs` covering `tet_linear.vtu`, `hex_linear.vtu`, `mixed_linear.vtu`, `polyhedra.vtu`, and synthetic hex grids (verifying exact cell/total volumes, watertight internal shared faces across hex/wedge/pyramid/tet/polyhedron cells, `Arc` buffer sharing, and exact linear scalar/vector field reproduction at polyhedron centroids).
+- Decisions: none (implemented per D-005 and D-019).
+- Dependencies added: none.
+- Follow-ups: M2.1b Linearize higher-order cells and property tests (reference-space subdivision at configurable level with Lagrange and serendipity basis evaluation for positions and point fields, plus property tests).

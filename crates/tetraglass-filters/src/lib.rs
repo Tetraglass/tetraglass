@@ -5,7 +5,9 @@
 //!
 //! See `docs/design-plan.md` in the repository for how this crate fits the architecture.
 
+mod linearize;
 mod surface;
 
+pub use linearize::{DEFAULT_SUBDIVISIONS, LinearizeParams, linearize, linearize_default};
 pub use surface::{FilterError, extract_external_surface};
-pub use tetraglass_core::SurfaceMesh;
+pub use tetraglass_core::{SurfaceMesh, TetView};

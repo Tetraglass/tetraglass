@@ -41,7 +41,8 @@ Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 next.**
 
 **Gate:** release 0.1 on crates.io with docs and a gallery.
 
-- [ ] **M2.1 Linearize.** Tet decomposition of linear cells with face-consistent diagonals; Lagrange subdivision at a configurable level with basis evaluation for positions and fields; polyhedron centroid decomposition; source-cell map. Property tests (volume preserved, linear fields exact).
+- [x] **M2.1a Linearize linear and polyhedral cells.** `TetView` in `tetraglass-core`; `linearize` in `tetraglass-filters` with face-consistent diagonal decomposition of linear 3D cells (`Tetra`, `Hexahedron`, `Wedge`, `Pyramid`), centroid decomposition of `Polyhedron` cells, source-cell map, and stopgap corner decomposition for higher-order cells; volume, watertightness, and linear-field tests on `testdata/vtk/*.vtu` and synthetic meshes.
+- [ ] **M2.1b Linearize higher-order cells and property tests.** Reference-space subdivision at a configurable level (`LinearizeParams`) with Lagrange and serendipity basis evaluation for positions and point fields (`Quadratic*`, `Lagrange*`); property tests verifying volume preservation, exact linear field interpolation, and source-cell mapping across all cell families.
 - [ ] **M2.2 Curved surfaces.** External surface of higher-order cells with tessellated faces; wireframe from original element edges.
 - [ ] **M2.3 Tet kernel and slice.** Marching tetrahedra kernel (`/add-filter`), slice filter, scene integration, gallery scene.
 - [ ] **M2.4 Contour.** Multiple isovalues, all arrays interpolated.
