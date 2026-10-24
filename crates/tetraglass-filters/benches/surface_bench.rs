@@ -12,7 +12,10 @@ use tetraglass_core::{
     M2_PERFORMANCE_TARGET, SyntheticCellLayout, SyntheticGridSpec, m2_benchmark_hex_spec,
     m2_benchmark_tet_spec,
 };
-use tetraglass_filters::{extract_external_surface, linearize_default};
+use tetraglass_filters::{
+    ClipKeep, ClipMode, ClipParams, ContourParams, SliceParams, ThresholdParams, clip, contour,
+    extract_external_surface, extract_tet_view_surface, linearize_default, slice, threshold,
+};
 
 fn main() {
     let is_full_bench = env::args().any(|a| a == "--bench");
@@ -25,6 +28,8 @@ fn main() {
         assert_eq!(surf.num_faces(), small.expected_boundary_faces());
         let view = linearize_default(&grid).expect("linearize small synthetic mesh");
         assert_eq!(view.num_tets(), small.num_cells());
+        let cut = slice(&view, &SliceParams::new([0.0, 0.0, 1.0])).expect("slice small mesh");
+        assert!(cut.num_triangles() > 0);
         return;
     }
 
@@ -87,4 +92,108 @@ fn main() {
         tet_lin.num_tets(),
         tet_surf.num_triangles()
     );
+
+    // Interactive plane slice on 600k tets
+    let t_slice = Instant::now();
+    let slice_surf =
+        slice(&tet_lin, &SliceParams::new([0.6, -0.48, 0.64])).expect("slice 600k tets");
+    let slice_ms = t_slice.elapsed().as_secs_f64() * 1000.0;
+
+    // Interactive single-isovalue contour on 600k tets
+    let t_contour = Instant::now();
+    let contour_surf =
+        contour(&tet_lin, &ContourParams::new("radius", vec![0.42])).expect("contour 600k tets");
+    let contour_ms = t_contour.elapsed().as_secs_f64() * 1000.0;
+
+    println!(
+        "[Interactive <= {:.1} ms] slice: {slice_ms:.2} ms ({} tris) | contour: {contour_ms:.2} ms ({} tris)",
+        M2_PERFORMANCE_TARGET.max_slice_contour_ms,
+        slice_surf.num_triangles(),
+        contour_surf.num_triangles()
+    );
+
+    // Exact plane clip + surface extraction on 600k tets (oblique plane cutting tets into prisms)
+    let t_clip_exact = Instant::now();
+    let clipped_exact = clip(
+        &tet_lin,
+        &ClipParams::new([0.6, -0.48, 0.64])
+            .keep(ClipKeep::Back)
+            .mode(ClipMode::Exact),
+    )
+    .expect("exact clip 600k tets");
+    let clip_exact_vol_ms = t_clip_exact.elapsed().as_secs_f64() * 1000.0;
+    let t_clip_exact_surf = Instant::now();
+    let clipped_exact_surf =
+        extract_tet_view_surface(&clipped_exact).expect("extract exact clipped surface");
+    let clip_exact_surf_ms = t_clip_exact_surf.elapsed().as_secs_f64() * 1000.0;
+    let clip_exact_total_ms = clip_exact_vol_ms + clip_exact_surf_ms;
+
+    // Crinkle plane clip + surface extraction on 600k tets
+    let t_clip_crinkle = Instant::now();
+    let clipped_crinkle = clip(
+        &tet_lin,
+        &ClipParams::new([0.6, -0.48, 0.64])
+            .keep(ClipKeep::Back)
+            .mode(ClipMode::Crinkle),
+    )
+    .expect("crinkle clip 600k tets");
+    let clip_crinkle_vol_ms = t_clip_crinkle.elapsed().as_secs_f64() * 1000.0;
+    let t_clip_crinkle_surf = Instant::now();
+    let clipped_crinkle_surf =
+        extract_tet_view_surface(&clipped_crinkle).expect("extract crinkle clipped surface");
+    let clip_crinkle_surf_ms = t_clip_crinkle_surf.elapsed().as_secs_f64() * 1000.0;
+    let clip_crinkle_total_ms = clip_crinkle_vol_ms + clip_crinkle_surf_ms;
+
+    // Threshold + surface extraction on 600k tets
+    let t_thresh = Instant::now();
+    let threshed = threshold(
+        &tet_lin,
+        &ThresholdParams::new("linear", Some(0.0), Some(3.0)),
+    )
+    .expect("threshold 600k tets");
+    let thresh_vol_ms = t_thresh.elapsed().as_secs_f64() * 1000.0;
+    let t_thresh_surf = Instant::now();
+    let threshed_surf = extract_tet_view_surface(&threshed).expect("extract thresholded surface");
+    let thresh_surf_ms = t_thresh_surf.elapsed().as_secs_f64() * 1000.0;
+    let thresh_total_ms = thresh_vol_ms + thresh_surf_ms;
+
+    println!(
+        "[Volume <= {:.1} ms]\n  \
+         clip (exact):   {clip_exact_vol_ms:.2} ms vol + {clip_exact_surf_ms:.2} ms surf = {clip_exact_total_ms:.2} ms ({} tets -> {} tris)\n  \
+         clip (crinkle): {clip_crinkle_vol_ms:.2} ms vol + {clip_crinkle_surf_ms:.2} ms surf = {clip_crinkle_total_ms:.2} ms ({} tets -> {} tris)\n  \
+         threshold:      {thresh_vol_ms:.2} ms vol + {thresh_surf_ms:.2} ms surf = {thresh_total_ms:.2} ms ({} tets -> {} tris)",
+        M2_PERFORMANCE_TARGET.max_volume_filter_ms,
+        clipped_exact.num_tets(),
+        clipped_exact_surf.num_triangles(),
+        clipped_crinkle.num_tets(),
+        clipped_crinkle_surf.num_triangles(),
+        threshed.num_tets(),
+        threshed_surf.num_triangles(),
+    );
+
+    assert!(
+        slice_ms <= M2_PERFORMANCE_TARGET.max_slice_contour_ms,
+        "slice latency {slice_ms:.2} ms exceeded target {:.1} ms",
+        M2_PERFORMANCE_TARGET.max_slice_contour_ms
+    );
+    assert!(
+        contour_ms <= M2_PERFORMANCE_TARGET.max_slice_contour_ms,
+        "contour latency {contour_ms:.2} ms exceeded target {:.1} ms",
+        M2_PERFORMANCE_TARGET.max_slice_contour_ms
+    );
+    for (label, ms) in [
+        ("hex linearize", hex_lin_ms),
+        ("hex extract_external_surface", hex_surf_ms),
+        ("tet linearize", tet_lin_ms),
+        ("tet extract_external_surface", tet_surf_ms),
+        ("clip (exact) + surface", clip_exact_total_ms),
+        ("clip (crinkle) + surface", clip_crinkle_total_ms),
+        ("threshold + surface", thresh_total_ms),
+    ] {
+        assert!(
+            ms <= M2_PERFORMANCE_TARGET.max_volume_filter_ms,
+            "{label} latency {ms:.2} ms exceeded target {:.1} ms",
+            M2_PERFORMANCE_TARGET.max_volume_filter_ms
+        );
+    }
 }

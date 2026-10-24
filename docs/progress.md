@@ -272,3 +272,21 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-002, D-003, D-014, and D-019).
 - Dependencies added: `tetraglass-filters` added to `tetraglass-viewer` (`Cargo.toml` workspace dependency).
 - Follow-ups: M2.9 Performance pass.
+
+## 2026-10-24 — M2.9 Performance pass
+
+- Done: optimized `extract_external_surface_with_subdivisions` and `extract_tet_view_surface` in `crates/tetraglass-filters/src/surface.rs` by replacing `SipHash` `HashMap<FaceKey, usize>` and heap-bearing `FaceKey::Poly(Vec<u32>)` / `OrientedFace::Poly(Vec<u32>)` variants with `Copy` structs (`FaceRegistry`, `CandidateFace`, `TetCandidateFace`, `TetBoundaryEdgeEntry`), inline 3/4-element sorting networks (`sort3`, `sort4`), and flat vertex-bucketed linked lists (`tri_heads`, `quad_heads`, `edge_heads`) indexed by minimum vertex ID (`0..num_points`); optimized `crates/tetraglass-filters/src/marching_tets.rs` with a deterministic multiplicative `FxHasher` for chunk-local edge maps, an early `num_above == 4` fast path in `process_exact_clip_chunk`, and a flat `vertex_to_vid` lookup table for original mesh vertices (`edge_key.0 == edge_key.1`) in `merge_clip_chunks`; expanded `crates/tetraglass-filters/benches/surface_bench.rs` and added `crates/tetraglass-render/benches/render_bench.rs` to measure and assert every `D-019` (`M2_PERFORMANCE_TARGET`) latency and frame-time budget on the `100,000`-hex / `600,000`-tet synthetic benchmark mesh (`106,641` points).
+- Benchmarks (`--release`, Apple M3 Max, `50 × 50 × 40` synthetic mesh = `100,000` hexes / `600,000` tets):
+  - `linearize` (`100k` hexes -> `600k` tets): `11.81 ms` (`<= 150.0 ms` target)
+  - `extract_external_surface` (`100k` hexes -> `13,000` boundary quads): `16.91 ms` (down from `47.29 ms`, `2.8x` faster; `<= 150.0 ms` target)
+  - `linearize` (`600k` tets): `7.70 ms` (`<= 150.0 ms` target)
+  - `extract_external_surface` (`600k` tets -> `26,000` boundary tris): `29.02 ms` (down from `120.39 ms`, `4.1x` faster; `<= 150.0 ms` target)
+  - `slice` (`600k` tets, oblique plane -> `22,856` tris): `5.32 ms` (`<= 50.0 ms` target)
+  - `contour` (`600k` tets, single isovalue -> `42,568` tris): `8.99 ms` (`<= 50.0 ms` target)
+  - `clip` (`Exact`, oblique plane) + `extract_tet_view_surface` (`600k` -> `331,578` tets -> `36,228` tris): `8.04 ms` vol + `16.66 ms` surf = `24.71 ms` (`<= 150.0 ms` target)
+  - `clip` (`Crinkle`, oblique plane) + `extract_tet_view_surface` (`600k` -> `309,352` tets -> `20,470` tris): `8.72 ms` vol + `12.04 ms` surf = `20.76 ms` (`<= 150.0 ms` target)
+  - `threshold` + `extract_tet_view_surface` (`600k` -> `286,818` tets -> `21,548` tris): `7.74 ms` vol + `10.37 ms` surf = `18.11 ms` (`<= 150.0 ms` target)
+  - GPU viewport rendering at `1200 × 800` with `4x` MSAA (`48,856` tris + wireframe edges + colorbar + axes triad + title, synchronous GPU poll): `1.53 ms/frame` (`652.8 FPS`) for camera orbit/pan/zoom, `1.22 ms/frame` (`816.6 FPS`) for colormap/range uniform updates, and `0.88 ms/frame` (`1133.8 FPS`) for interactive shader clip-plane dragging (`<= 16.6 ms` / `60 FPS` target).
+- Decisions: all M1.9 / D-019 performance targets met with wide headroom; nothing cut.
+- Dependencies added: none.
+- Follow-ups: M2.10 Documentation.

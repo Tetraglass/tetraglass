@@ -26,3 +26,7 @@ wgpu.workspace = true
 [dev-dependencies]
 tetraglass-filters.workspace = true
 tetraglass-io.workspace = true
+
+[[bench]]
+name = "render_bench"
+harness = false

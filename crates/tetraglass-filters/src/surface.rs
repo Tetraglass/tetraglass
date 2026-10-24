@@ -95,41 +95,64 @@ pub enum FilterError {
     },
 }
 
-/// Canonical order-independent face key used to match shared faces between adjacent cells.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum FaceKey {
-    Tri([u32; 3]),
-    Quad([u32; 4]),
-    Poly(Vec<u32>),
-}
-
-impl FaceKey {
-    #[inline]
-    fn from_tri(mut v: [u32; 3]) -> Self {
-        v.sort_unstable();
-        Self::Tri(v)
+#[inline]
+const fn sort3(mut a: u32, mut b: u32, mut c: u32) -> (u32, u64) {
+    if a > b {
+        let t = a;
+        a = b;
+        b = t;
     }
-
-    #[inline]
-    fn from_quad(mut v: [u32; 4]) -> Self {
-        v.sort_unstable();
-        Self::Quad(v)
-    }
-
-    fn from_slice(verts: &[u32]) -> Self {
-        match verts {
-            &[a, b, c] => Self::from_tri([a, b, c]),
-            &[a, b, c, d] => Self::from_quad([a, b, c, d]),
-            other => {
-                let mut sorted = other.to_vec();
-                sorted.sort_unstable();
-                Self::Poly(sorted)
-            }
+    if b > c {
+        let t = b;
+        b = c;
+        c = t;
+        if a > b {
+            let t2 = a;
+            a = b;
+            b = t2;
         }
     }
+    (a, ((b as u64) << 32) | (c as u64))
 }
 
-#[derive(Debug, Clone)]
+#[inline]
+const fn sort4(mut a: u32, mut b: u32, mut c: u32, mut d: u32) -> (u32, [u32; 3]) {
+    if a > b {
+        let t = a;
+        a = b;
+        b = t;
+    }
+    if c > d {
+        let t = c;
+        c = d;
+        d = t;
+    }
+    if a > c {
+        let t = a;
+        a = c;
+        c = t;
+    }
+    if b > d {
+        let t = b;
+        b = d;
+        d = t;
+    }
+    if b > c {
+        let t = b;
+        b = c;
+        c = t;
+    }
+    (a, [b, c, d])
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FaceMatchKey {
+    Tri(u64),
+    Quad([u32; 3]),
+    Poly,
+}
+
+#[derive(Debug, Clone, Copy)]
 enum OrientedFace {
     Tri {
         verts: [u32; 3],
@@ -139,14 +162,124 @@ enum OrientedFace {
         verts: [u32; 4],
         corner_slots: [u8; 4],
     },
-    Poly(Vec<u32>),
+    Poly(u32),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct CandidateFace {
+    match_key: FaceMatchKey,
+    next: u32,
     source_cell: u32,
     face: OrientedFace,
     owner_count: u32,
+}
+
+struct FaceRegistry {
+    candidates: Vec<CandidateFace>,
+    tri_heads: Vec<u32>,
+    quad_heads: Vec<u32>,
+    poly_faces: Vec<Vec<u32>>,
+    poly_first_seen: HashMap<Vec<u32>, usize>,
+}
+
+impl FaceRegistry {
+    fn new(num_points: usize, num_cells: usize) -> Self {
+        Self {
+            candidates: Vec::with_capacity(num_cells * 3),
+            tri_heads: vec![u32::MAX; num_points],
+            quad_heads: Vec::new(),
+            poly_faces: Vec::new(),
+            poly_first_seen: HashMap::new(),
+        }
+    }
+
+    #[inline]
+    fn register_tri(&mut self, source_cell: u32, verts: [u32; 3], face: OrientedFace) {
+        let (min_v, rest_packed) = sort3(verts[0], verts[1], verts[2]);
+        let head_slot = &mut self.tri_heads[min_v as usize];
+        let mut cur = *head_slot;
+        while cur != u32::MAX {
+            let cand = &mut self.candidates[cur as usize];
+            if let FaceMatchKey::Tri(r) = cand.match_key
+                && r == rest_packed
+            {
+                cand.owner_count += 1;
+                return;
+            }
+            cur = cand.next;
+        }
+        let idx = self.candidates.len() as u32;
+        self.candidates.push(CandidateFace {
+            match_key: FaceMatchKey::Tri(rest_packed),
+            next: *head_slot,
+            source_cell,
+            face,
+            owner_count: 1,
+        });
+        *head_slot = idx;
+    }
+
+    #[inline]
+    fn register_quad(
+        &mut self,
+        num_points: usize,
+        source_cell: u32,
+        verts: [u32; 4],
+        face: OrientedFace,
+    ) {
+        if self.quad_heads.is_empty() {
+            self.quad_heads.resize(num_points, u32::MAX);
+        }
+        let (min_v, rest) = sort4(verts[0], verts[1], verts[2], verts[3]);
+        let head_slot = &mut self.quad_heads[min_v as usize];
+        let mut cur = *head_slot;
+        while cur != u32::MAX {
+            let cand = &mut self.candidates[cur as usize];
+            if let FaceMatchKey::Quad(r) = cand.match_key
+                && r == rest
+            {
+                cand.owner_count += 1;
+                return;
+            }
+            cur = cand.next;
+        }
+        let idx = self.candidates.len() as u32;
+        self.candidates.push(CandidateFace {
+            match_key: FaceMatchKey::Quad(rest),
+            next: *head_slot,
+            source_cell,
+            face,
+            owner_count: 1,
+        });
+        *head_slot = idx;
+    }
+
+    fn register_poly(&mut self, num_points: usize, source_cell: u32, face_verts: &[u32]) {
+        let poly_idx = self.poly_faces.len() as u32;
+        self.poly_faces.push(face_verts.to_vec());
+        let face = OrientedFace::Poly(poly_idx);
+        match face_verts {
+            &[a, b, c] => self.register_tri(source_cell, [a, b, c], face),
+            &[a, b, c, d] => self.register_quad(num_points, source_cell, [a, b, c, d], face),
+            other => {
+                let mut sorted = other.to_vec();
+                sorted.sort_unstable();
+                if let Some(&idx) = self.poly_first_seen.get(&sorted) {
+                    self.candidates[idx].owner_count += 1;
+                } else {
+                    let idx = self.candidates.len();
+                    self.candidates.push(CandidateFace {
+                        match_key: FaceMatchKey::Poly,
+                        next: u32::MAX,
+                        source_cell,
+                        face,
+                        owner_count: 1,
+                    });
+                    self.poly_first_seen.insert(sorted, idx);
+                }
+            }
+        }
+    }
 }
 
 /// Extracts the external boundary surface of an [`UnstructuredGrid`] using the default
@@ -210,22 +343,8 @@ pub fn extract_external_surface_with_subdivisions(
     }
 
     let num_cells = grid.num_cells();
-    let mut candidates: Vec<CandidateFace> = Vec::with_capacity(num_cells * 4);
-    let mut first_seen: HashMap<FaceKey, usize> = HashMap::with_capacity(num_cells * 4);
-
-    let mut register_face = |source_cell: u32, key: FaceKey, face: OrientedFace| {
-        if let Some(&idx) = first_seen.get(&key) {
-            candidates[idx].owner_count += 1;
-        } else {
-            let idx = candidates.len();
-            candidates.push(CandidateFace {
-                source_cell,
-                face,
-                owner_count: 1,
-            });
-            first_seen.insert(key, idx);
-        }
-    };
+    let num_points = grid.num_points();
+    let mut registry = FaceRegistry::new(num_points, num_cells);
 
     for cell_idx in 0..num_cells {
         let source_cell = try_u32_from_usize(cell_idx)?;
@@ -246,9 +365,9 @@ pub fn extract_external_surface_with_subdivisions(
             | CellType::QuadraticTriangle
             | CellType::LagrangeTriangle { .. } => {
                 let verts = [conn[0], conn[1], conn[2]];
-                register_face(
+                registry.register_tri(
                     source_cell,
-                    FaceKey::from_tri(verts),
+                    verts,
                     OrientedFace::Tri {
                         verts,
                         corner_slots: [0, 1, 2],
@@ -259,9 +378,10 @@ pub fn extract_external_surface_with_subdivisions(
             // 2D quad family (corners 0, 1, 2, 3).
             CellType::Quad | CellType::QuadraticQuad | CellType::LagrangeQuadrilateral { .. } => {
                 let verts = [conn[0], conn[1], conn[2], conn[3]];
-                register_face(
+                registry.register_quad(
+                    num_points,
                     source_cell,
-                    FaceKey::from_quad(verts),
+                    verts,
                     OrientedFace::Quad {
                         verts,
                         corner_slots: [0, 1, 2, 3],
@@ -277,9 +397,9 @@ pub fn extract_external_surface_with_subdivisions(
                         conn[corner_slots[1] as usize],
                         conn[corner_slots[2] as usize],
                     ];
-                    register_face(
+                    registry.register_tri(
                         source_cell,
-                        FaceKey::from_tri(verts),
+                        verts,
                         OrientedFace::Tri {
                             verts,
                             corner_slots,
@@ -306,9 +426,10 @@ pub fn extract_external_surface_with_subdivisions(
                         conn[corner_slots[2] as usize],
                         conn[corner_slots[3] as usize],
                     ];
-                    register_face(
+                    registry.register_quad(
+                        num_points,
                         source_cell,
-                        FaceKey::from_quad(verts),
+                        verts,
                         OrientedFace::Quad {
                             verts,
                             corner_slots,
@@ -325,9 +446,9 @@ pub fn extract_external_surface_with_subdivisions(
                         conn[corner_slots[1] as usize],
                         conn[corner_slots[2] as usize],
                     ];
-                    register_face(
+                    registry.register_tri(
                         source_cell,
-                        FaceKey::from_tri(verts),
+                        verts,
                         OrientedFace::Tri {
                             verts,
                             corner_slots,
@@ -341,9 +462,10 @@ pub fn extract_external_surface_with_subdivisions(
                         conn[corner_slots[2] as usize],
                         conn[corner_slots[3] as usize],
                     ];
-                    register_face(
+                    registry.register_quad(
+                        num_points,
                         source_cell,
-                        FaceKey::from_quad(verts),
+                        verts,
                         OrientedFace::Quad {
                             verts,
                             corner_slots,
@@ -356,9 +478,10 @@ pub fn extract_external_surface_with_subdivisions(
             CellType::Pyramid | CellType::QuadraticPyramid => {
                 let base_slots = [0u8, 3, 2, 1];
                 let base_verts = [conn[0], conn[3], conn[2], conn[1]];
-                register_face(
+                registry.register_quad(
+                    num_points,
                     source_cell,
-                    FaceKey::from_quad(base_verts),
+                    base_verts,
                     OrientedFace::Quad {
                         verts: base_verts,
                         corner_slots: base_slots,
@@ -370,9 +493,9 @@ pub fn extract_external_surface_with_subdivisions(
                         conn[corner_slots[1] as usize],
                         conn[corner_slots[2] as usize],
                     ];
-                    register_face(
+                    registry.register_tri(
                         source_cell,
-                        FaceKey::from_tri(verts),
+                        verts,
                         OrientedFace::Tri {
                             verts,
                             corner_slots,
@@ -385,9 +508,7 @@ pub fn extract_external_surface_with_subdivisions(
             CellType::Polyhedron => {
                 if let Some(face_iter) = grid.polyhedron_cell_faces(cell_idx) {
                     for face_verts in face_iter {
-                        let key = FaceKey::from_slice(face_verts);
-                        let oriented = OrientedFace::Poly(face_verts.to_vec());
-                        register_face(source_cell, key, oriented);
+                        registry.register_poly(num_points, source_cell, face_verts);
                     }
                 }
             }
@@ -405,7 +526,7 @@ pub fn extract_external_surface_with_subdivisions(
         None
     };
 
-    for cand in candidates {
+    for cand in registry.candidates {
         if cand.owner_count != 1 {
             continue;
         }
@@ -472,7 +593,8 @@ pub fn extract_external_surface_with_subdivisions(
                     push_canonical_edge(&mut wireframe_edges, v3, v0);
                 }
             }
-            OrientedFace::Poly(verts) => {
+            OrientedFace::Poly(poly_idx) => {
+                let verts = &registry.poly_faces[poly_idx as usize];
                 if let Some((&v0, rest)) = verts.split_first() {
                     for win in rest.windows(2) {
                         triangles.push([v0, win[0], win[1]]);
@@ -515,6 +637,8 @@ pub fn extract_external_surface_with_subdivisions(
 
 #[derive(Debug, Clone, Copy)]
 struct TetCandidateFace {
+    rest_packed: u64,
+    next: u32,
     source_cell: u32,
     tet_idx: u32,
     verts: [u32; 3],
@@ -526,6 +650,13 @@ enum TetBoundaryEdgeState {
     Once { src_cell: u32, normal: [f64; 3] },
     TwiceSameCellCoplanar,
     Keep,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TetBoundaryEdgeEntry {
+    edge: [u32; 2],
+    next: u32,
+    state: TetBoundaryEdgeState,
 }
 
 fn triangle_unit_normal(p0: [f64; 3], p1: [f64; 3], p2: [f64; 3]) -> [f64; 3] {
@@ -548,26 +679,39 @@ fn triangle_unit_normal(p0: [f64; 3], p1: [f64; 3], p2: [f64; 3]) -> [f64; 3] {
 pub fn extract_tet_view_surface(view: &TetView) -> Result<SurfaceMesh, FilterError> {
     let tets = view.tets();
     let tet_source_cells = view.tet_source_cells();
+    let num_points = view.num_points();
     let mut candidates: Vec<TetCandidateFace> = Vec::with_capacity(tets.len() * 2);
-    let mut first_seen: HashMap<FaceKey, usize> = HashMap::with_capacity(tets.len() * 2);
+    let mut tri_heads: Vec<u32> = vec![u32::MAX; num_points];
 
     for (tet_idx_usize, &conn) in tets.iter().enumerate() {
         let tet_idx = try_u32_from_usize(tet_idx_usize)?;
         let source_cell = tet_source_cells[tet_idx_usize];
         for [s0, s1, s2] in [[0usize, 1, 3], [1, 2, 3], [2, 0, 3], [0, 2, 1]] {
             let verts = [conn[s0], conn[s1], conn[s2]];
-            let key = FaceKey::from_tri(verts);
-            if let Some(&idx) = first_seen.get(&key) {
-                candidates[idx].owner_count += 1;
-            } else {
-                let idx = candidates.len();
+            let (min_v, rest_packed) = sort3(verts[0], verts[1], verts[2]);
+            let head_slot = &mut tri_heads[min_v as usize];
+            let mut cur = *head_slot;
+            let mut found = false;
+            while cur != u32::MAX {
+                let cand = &mut candidates[cur as usize];
+                if cand.rest_packed == rest_packed {
+                    cand.owner_count += 1;
+                    found = true;
+                    break;
+                }
+                cur = cand.next;
+            }
+            if !found {
+                let idx = candidates.len() as u32;
                 candidates.push(TetCandidateFace {
+                    rest_packed,
+                    next: *head_slot,
                     source_cell,
                     tet_idx,
                     verts,
                     owner_count: 1,
                 });
-                first_seen.insert(key, idx);
+                *head_slot = idx;
             }
         }
     }
@@ -576,7 +720,9 @@ pub fn extract_tet_view_surface(view: &TetView) -> Result<SurfaceMesh, FilterErr
     let mut triangle_source_cells: Vec<u32> = Vec::new();
     let mut triangle_tet_indices: Vec<u32> = Vec::new();
     let mut face_source_cells: Vec<u32> = Vec::new();
-    let mut edge_states: HashMap<[u32; 2], TetBoundaryEdgeState> = HashMap::new();
+    let mut edge_heads = tri_heads;
+    edge_heads.fill(u32::MAX);
+    let mut edge_entries: Vec<TetBoundaryEdgeEntry> = Vec::new();
     let points = view.points();
 
     for cand in candidates {
@@ -599,18 +745,13 @@ pub fn extract_tet_view_surface(view: &TetView) -> Result<SurfaceMesh, FilterErr
                 continue;
             }
             let edge = if a < b { [a, b] } else { [b, a] };
-            match edge_states.get_mut(&edge) {
-                None => {
-                    edge_states.insert(
-                        edge,
-                        TetBoundaryEdgeState::Once {
-                            src_cell: cand.source_cell,
-                            normal,
-                        },
-                    );
-                }
-                Some(state) => {
-                    *state = match *state {
+            let head_slot = &mut edge_heads[edge[0] as usize];
+            let mut cur = *head_slot;
+            let mut found = false;
+            while cur != u32::MAX {
+                let entry = &mut edge_entries[cur as usize];
+                if entry.edge[1] == edge[1] {
+                    entry.state = match entry.state {
                         TetBoundaryEdgeState::Once {
                             src_cell,
                             normal: prev_n,
@@ -627,15 +768,30 @@ pub fn extract_tet_view_surface(view: &TetView) -> Result<SurfaceMesh, FilterErr
                         TetBoundaryEdgeState::TwiceSameCellCoplanar
                         | TetBoundaryEdgeState::Keep => TetBoundaryEdgeState::Keep,
                     };
+                    found = true;
+                    break;
                 }
+                cur = entry.next;
+            }
+            if !found {
+                let idx = edge_entries.len() as u32;
+                edge_entries.push(TetBoundaryEdgeEntry {
+                    edge,
+                    next: *head_slot,
+                    state: TetBoundaryEdgeState::Once {
+                        src_cell: cand.source_cell,
+                        normal,
+                    },
+                });
+                *head_slot = idx;
             }
         }
     }
 
-    let mut wireframe_edges: Vec<[u32; 2]> = edge_states
+    let mut wireframe_edges: Vec<[u32; 2]> = edge_entries
         .into_iter()
-        .filter_map(|(edge, state)| match state {
-            TetBoundaryEdgeState::Once { .. } | TetBoundaryEdgeState::Keep => Some(edge),
+        .filter_map(|entry| match entry.state {
+            TetBoundaryEdgeState::Once { .. } | TetBoundaryEdgeState::Keep => Some(entry.edge),
             TetBoundaryEdgeState::TwiceSameCellCoplanar => None,
         })
         .collect();

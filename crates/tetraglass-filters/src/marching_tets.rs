@@ -17,6 +17,7 @@
 //!    chunk size and thread count.
 
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 
 use tetraglass_core::{
@@ -28,6 +29,41 @@ use crate::surface::{FilterError, map_cell_array, push_canonical_edge};
 
 /// Default number of tetrahedra processed per parallel chunk.
 pub const DEFAULT_TET_CHUNK_SIZE: usize = 8192;
+
+/// Fast deterministic multiplicative hasher for integer/edge keys.
+#[derive(Default)]
+struct FxHasher(u64);
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u8(b);
+        }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.0 = (self.0.rotate_left(5) ^ u64::from(i)).wrapping_mul(0x517cc1b727220a95);
+    }
+
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.0 = (self.0.rotate_left(5) ^ u64::from(i)).wrapping_mul(0x517cc1b727220a95);
+    }
+
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517cc1b727220a95);
+    }
+}
+
+type FxHashMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
 /// Canonical edge key `(min(p, q), max(p, q))` of `TetView` point indices.
 /// When an intersection lands exactly on a vertex `v`, `EdgeKey(v, v)` is used.
@@ -155,7 +191,7 @@ pub fn extract_isosurfaces_with_chunk_size(
 
     // Deterministic merge in chunk order `0..num_chunks`.
     let points_src = view.points();
-    let mut global_edge_map: HashMap<(u32, EdgeKey), u32> = HashMap::new();
+    let mut global_edge_map: FxHashMap<(u32, EdgeKey), u32> = FxHashMap::default();
     let mut out_points: Vec<[f64; 3]> = Vec::new();
     let mut out_edges: Vec<(EdgeKey, f64)> = Vec::new();
     let mut triangles: Vec<[u32; 3]> = Vec::new();
@@ -259,7 +295,7 @@ fn process_tet_chunk(
     isovalues: &[f64],
     iso_tol: f64,
 ) -> ChunkOutput {
-    let mut local_edge_map: HashMap<(u32, EdgeKey), u32> = HashMap::new();
+    let mut local_edge_map: FxHashMap<(u32, EdgeKey), u32> = FxHashMap::default();
     let mut local_edges: Vec<(u32, EdgeKey, f64)> = Vec::new();
     let mut local_triangles: Vec<[u32; 3]> = Vec::new();
     let mut local_tri_source_cells: Vec<u32> = Vec::new();
@@ -624,7 +660,8 @@ fn merge_clip_chunks(
     let diag = view.bounds().map_or(1.0, |b| b.diagonal()).max(1e-12);
     let vol_tol = 1e-18 * diag * diag * diag;
 
-    let mut global_edge_map: HashMap<EdgeKey, u32> = HashMap::new();
+    let mut vertex_to_vid = vec![u32::MAX; points_src.len()];
+    let mut global_edge_map: FxHashMap<EdgeKey, u32> = FxHashMap::default();
     let mut out_points: Vec<[f64; 3]> = Vec::new();
     let mut out_edges: Vec<(EdgeKey, f64)> = Vec::new();
     let mut out_tets: Vec<[u32; 4]> = Vec::new();
@@ -634,13 +671,25 @@ fn merge_clip_chunks(
     for chunk in chunk_outputs {
         let mut local_to_global = Vec::with_capacity(chunk.local_edges.len());
         for (edge_key, t) in chunk.local_edges {
-            if let Some(&existing_vid) = global_edge_map.get(&edge_key) {
+            if edge_key.0 == edge_key.1 {
+                let v = edge_key.0 as usize;
+                let existing = vertex_to_vid[v];
+                if existing != u32::MAX {
+                    local_to_global.push(existing);
+                } else {
+                    let vid = try_u32_from_usize(out_points.len())?;
+                    out_points.push(points_src[v]);
+                    out_edges.push((edge_key, 0.0));
+                    vertex_to_vid[v] = vid;
+                    local_to_global.push(vid);
+                }
+            } else if let Some(&existing_vid) = global_edge_map.get(&edge_key) {
                 local_to_global.push(existing_vid);
             } else {
                 let vid = try_u32_from_usize(out_points.len())?;
                 let p0 = points_src[edge_key.0 as usize];
                 let p1 = points_src[edge_key.1 as usize];
-                let pos = if edge_key.0 == edge_key.1 || t == 0.0 {
+                let pos = if t == 0.0 {
                     p0
                 } else if t == 1.0 {
                     p1
@@ -725,7 +774,7 @@ fn process_exact_clip_chunk(
     iso: f64,
     iso_tol: f64,
 ) -> ClipChunkOutput {
-    let mut local_edge_map: HashMap<EdgeKey, u32> = HashMap::new();
+    let mut local_edge_map: FxHashMap<EdgeKey, u32> = FxHashMap::default();
     let mut local_edges: Vec<(EdgeKey, f64)> = Vec::new();
     let mut local_tets: Vec<[u32; 4]> = Vec::new();
     let mut local_tet_source_cells: Vec<u32> = Vec::new();
@@ -784,6 +833,17 @@ fn process_exact_clip_chunk(
             continue;
         }
 
+        if s0 >= iso && s1 >= iso && s2 >= iso && s3 >= iso {
+            let i0 = get_or_insert_edge(v0, v0);
+            let i1 = get_or_insert_edge(v1, v1);
+            let i2 = get_or_insert_edge(v2, v2);
+            let i3 = get_or_insert_edge(v3, v3);
+            local_tets.push([i0, i1, i2, i3]);
+            local_tet_source_cells.push(src_cell);
+            local_tet_indices.push(global_tet_idx);
+            continue;
+        }
+
         let mut above = [0u32; 4];
         let mut num_above = 0usize;
         let mut below = [0u32; 4];
@@ -803,15 +863,6 @@ fn process_exact_clip_chunk(
 
         match num_above {
             0 => {}
-            4 => {
-                let i0 = get_or_insert_edge(v0, v0);
-                let i1 = get_or_insert_edge(v1, v1);
-                let i2 = get_or_insert_edge(v2, v2);
-                let i3 = get_or_insert_edge(v3, v3);
-                local_tets.push([i0, i1, i2, i3]);
-                local_tet_source_cells.push(src_cell);
-                local_tet_indices.push(global_tet_idx);
-            }
             1 => {
                 let u0 = above[0];
                 let d0 = below[0];
@@ -889,7 +940,7 @@ fn process_crinkle_clip_chunk(
     tet_source_cells: &[u32],
     keep_source_cell: &[bool],
 ) -> ClipChunkOutput {
-    let mut local_edge_map: HashMap<EdgeKey, u32> = HashMap::new();
+    let mut local_edge_map: FxHashMap<EdgeKey, u32> = FxHashMap::default();
     let mut local_edges: Vec<(EdgeKey, f64)> = Vec::new();
     let mut local_tets: Vec<[u32; 4]> = Vec::new();
     let mut local_tet_source_cells: Vec<u32> = Vec::new();
