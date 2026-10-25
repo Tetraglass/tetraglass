@@ -282,3 +282,193 @@ fn tgbin_decoder_rejects_corrupted_headers_and_out_of_bounds_indices() {
         Err(ExportError::InvalidBundle(_))
     ));
 }
+
+#[test]
+fn blender_scripts_spdx_headers_addon_registration_and_headless_cycles_render() {
+    use std::process::Command;
+
+    let root = workspace_root();
+    let blender_dir = root.join("blender");
+
+    // 1. Enforce `.agents/rules/blender-gpl.md`: every Python file in `blender/` must start
+    //    with `# SPDX-License-Identifier: GPL-3.0-or-later`.
+    for rel_py in ["__init__.py", "importer.py", "render.py"] {
+        let py_path = blender_dir.join(rel_py);
+        let content = fs::read_to_string(&py_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", py_path.display()));
+        let first_line = content.lines().next().unwrap_or("");
+        assert_eq!(
+            first_line,
+            "# SPDX-License-Identifier: GPL-3.0-or-later",
+            "{} must start with GPL-3.0-or-later SPDX header",
+            py_path.display()
+        );
+    }
+    assert!(blender_dir.join("blender_manifest.toml").is_file());
+
+    // 2. Export `gallery/slice.json` and `gallery/series-transient-last.json` to bundle directories.
+    let (slice_scene, mut slice_eval) = load_scene_and_evaluator(&root.join("gallery/slice.json"));
+    let slice_bundle_dir = root.join("target/bundle-export-tests/blender_slice_bundle");
+    let _ = fs::remove_dir_all(&slice_bundle_dir);
+    write_scene_bundle_output(&slice_bundle_dir, &slice_scene, &mut slice_eval, false)
+        .expect("write slice bundle");
+
+    let (series_scene, mut series_eval) =
+        load_scene_and_evaluator(&root.join("gallery/series-transient-last.json"));
+    let series_bundle_dir = root.join("target/bundle-export-tests/blender_series_bundle");
+    let _ = fs::remove_dir_all(&series_bundle_dir);
+    write_scene_bundle_output(&series_bundle_dir, &series_scene, &mut series_eval, true)
+        .expect("write series bundle");
+
+    // 3. Locate an installed Blender binary if present (`BLENDER_PATH`, `PATH`, or standard locations).
+    let candidate_bins = [
+        std::env::var("BLENDER_PATH").ok(),
+        Some("blender".to_string()),
+        Some("/opt/homebrew/bin/blender".to_string()),
+        Some("/Applications/Blender.app/Contents/MacOS/Blender".to_string()),
+    ];
+    let blender_bin = candidate_bins.into_iter().flatten().find(|bin| {
+        Command::new(bin)
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| out.status.success())
+    });
+
+    let Some(blender_bin) = blender_bin else {
+        // When running on a machine without Blender installed, verify the pure-Python syntax of
+        // `blender/*.py` if `python3` is available.
+        if let Ok(py_out) = Command::new("python3")
+            .arg("-m")
+            .arg("py_compile")
+            .arg(blender_dir.join("__init__.py"))
+            .arg(blender_dir.join("importer.py"))
+            .arg(blender_dir.join("render.py"))
+            .output()
+        {
+            assert!(
+                py_out.status.success(),
+                "python3 py_compile failed: {}",
+                String::from_utf8_lossy(&py_out.stderr)
+            );
+        }
+        return;
+    };
+
+    // 4. Verify add-on registration and interactive operator invocation inside headless Blender.
+    let addon_check_expr = format!(
+        "import sys, bpy; sys.path.insert(0, r'{}'); import blender; blender.register(); \
+         res = bpy.ops.import_scene.tetraglass_bundle(filepath=r'{}', clear_existing=True); \
+         assert 'FINISHED' in res, f'unexpected operator result: {{res}}'; \
+         blender.unregister()",
+        root.display(),
+        slice_bundle_dir.join("manifest.json").display()
+    );
+    let addon_out = Command::new(&blender_bin)
+        .arg("--background")
+        .arg("--factory-startup")
+        .arg("--python-expr")
+        .arg(&addon_check_expr)
+        .output()
+        .expect("run Blender add-on registration test");
+    assert!(
+        addon_out.status.success(),
+        "Blender add-on registration failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&addon_out.stdout),
+        String::from_utf8_lossy(&addon_out.stderr)
+    );
+
+    // 5. Run `blender/render.py` on `slice_bundle_dir` with Cycles (`--samples 4 --device cpu`)
+    //    and `--save-blend`.
+    let out_png = root.join("target/bundle-export-tests/blender_slice_out.png");
+    let out_blend = root.join("target/bundle-export-tests/blender_slice_out.blend");
+    let _ = fs::remove_file(&out_png);
+    let _ = fs::remove_file(&out_blend);
+
+    let render_out = Command::new(&blender_bin)
+        .arg("--background")
+        .arg("--factory-startup")
+        .arg("--python")
+        .arg(blender_dir.join("render.py"))
+        .arg("--")
+        .arg("--bundle")
+        .arg(&slice_bundle_dir)
+        .arg("--out")
+        .arg(&out_png)
+        .arg("--samples")
+        .arg("4")
+        .arg("--device")
+        .arg("cpu")
+        .arg("--width")
+        .arg("240")
+        .arg("--height")
+        .arg("160")
+        .arg("--save-blend")
+        .arg(&out_blend)
+        .output()
+        .expect("run blender/render.py on slice bundle");
+    let stdout = String::from_utf8_lossy(&render_out.stdout);
+    let stderr = String::from_utf8_lossy(&render_out.stderr);
+    assert!(
+        render_out.status.success(),
+        "blender/render.py failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.contains("PROGRESS stage=import status=starting"));
+    assert!(stdout.contains("PROGRESS stage=import status=done objects=3 steps=1"));
+    assert!(stdout.contains("PROGRESS stage=cycles device=CPU samples=4 resolution=240x160"));
+    assert!(stdout.contains("PROGRESS stage=save_blend"));
+    assert!(stdout.contains("PROGRESS stage=render frame=0 index=1 total_frames=1 status=done"));
+    assert!(stdout.contains("PROGRESS stage=complete frames=1"));
+
+    assert!(out_blend.is_file(), ".blend file should exist");
+    assert!(
+        fs::metadata(&out_blend).unwrap().len() > 1024,
+        ".blend file should be non-empty"
+    );
+
+    assert!(out_png.is_file(), "rendered PNG should exist");
+    let png_bytes = fs::read(&out_png).expect("read rendered PNG");
+    assert_eq!(&png_bytes[0..8], b"\x89PNG\r\n\x1a\n");
+    let width = u32::from_be_bytes(png_bytes[16..20].try_into().unwrap());
+    let height = u32::from_be_bytes(png_bytes[20..24].try_into().unwrap());
+    assert_eq!((width, height), (240, 160));
+
+    // 6. Run `blender/render.py --all-steps` on the 3-step `series_bundle_dir`.
+    let frame_pattern = root.join("target/bundle-export-tests/series_frames/frame_%04d.png");
+    let _ = fs::remove_dir_all(frame_pattern.parent().unwrap());
+    let series_render_out = Command::new(&blender_bin)
+        .arg("--background")
+        .arg("--factory-startup")
+        .arg("--python")
+        .arg(blender_dir.join("render.py"))
+        .arg("--")
+        .arg("--bundle")
+        .arg(&series_bundle_dir)
+        .arg("--out")
+        .arg(&frame_pattern)
+        .arg("--samples")
+        .arg("2")
+        .arg("--device")
+        .arg("cpu")
+        .arg("--width")
+        .arg("160")
+        .arg("--height")
+        .arg("120")
+        .arg("--all-steps")
+        .output()
+        .expect("run blender/render.py --all-steps on series bundle");
+    assert!(
+        series_render_out.status.success(),
+        "series blender/render.py failed:\n{}",
+        String::from_utf8_lossy(&series_render_out.stderr)
+    );
+    for step_idx in 0..3 {
+        let frame_path = root.join(format!(
+            "target/bundle-export-tests/series_frames/frame_{step_idx:04}.png"
+        ));
+        assert!(
+            frame_path.is_file(),
+            "missing rendered frame {}",
+            frame_path.display()
+        );
+    }
+}

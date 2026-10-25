@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+schema_version = "1.0.0"
+
+id = "tetraglass_bundle_importer"
+version = "0.1.0"
+name = "Tetraglass Bundle Importer"
+tagline = "Import Tetraglass FEM/CFD visualization bundles (manifest.json + .tgbin)"
+maintainer = "Tetraglass Contributors"
+type = "add-on"
+website = "https://github.com/Tetraglass/tetraglass"
+tags = ["Import-Export", "3D View"]
+blender_version_min = "4.2.0"
+license = ["SPDX:GPL-3.0-or-later"]

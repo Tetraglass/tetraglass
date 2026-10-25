@@ -352,3 +352,11 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implements `D-011` and `D-014`).
 - Dependencies added: none.
 - Follow-ups: M3.6 Blender scripts (`/blender-bridge`).
+
+## 2026-10-25 — M3.6 Blender scripts (`blender/`, `crates/tetraglass-export/tests/bundle_export.rs`)
+
+- Done: implemented the GPL-3.0-or-later Blender integration package in `blender/` (`blender/importer.py`, `blender/render.py`, `blender/__init__.py`, `blender/blender_manifest.toml`, `blender/README.md`) using only the Python standard library and `numpy` (plus `bpy`/`mathutils`). `blender/importer.py` decodes `manifest.json` and `.tgbin` mesh buffers (`load_bundle_manifest`, `read_tgbin`) and builds Blender meshes with `tetraglass_scalar`, `tetraglass_raw_scalar`, and named field attributes, a 256x1 linear-light LUT texture + 32-stop ColorRamp shader node tree, non-shadow-casting 3D wireframe edge curves (`_create_blender_edge_object`), perspective/orthographic camera, sun lights, solid/gradient world background (with `Is Camera Ray` separation and `Standard` view transform), and per-step keyframed timeline frames. `blender/render.py` provides the headless Cycles CLI driver (`--bundle`, `--out`, `--samples`, `--device`, `--step`, `--all-steps`, `--width`, `--height`, `--save-blend`) with real-time `PROGRESS` stdout streaming. `blender/__init__.py` and `blender/blender_manifest.toml` package the directory as an installable Blender add-on (`File > Import > Tetraglass Bundle (manifest.json)`).
+- Tests: `blender_scripts_spdx_headers_addon_registration_and_headless_cycles_render` in `crates/tetraglass-export/tests/bundle_export.rs` (verifying SPDX GPL headers, add-on registration and operator execution inside headless Blender 5.2 LTS, Cycles rendering of `gallery/slice.json` with `--save-blend` and `PROGRESS` streaming, and multi-step `--all-steps` rendering of `gallery/series-transient-last.json`).
+- Decisions: D-020 (supported Blender versions are Blender 4.2 LTS and Blender 5.x LTS; `blender/` stays in this repository under GPL-3.0-or-later).
+- Dependencies added: none.
+- Follow-ups: M3.7 Cycles from the CLI (`/blender-bridge`).
