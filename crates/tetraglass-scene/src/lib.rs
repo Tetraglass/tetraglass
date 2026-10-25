@@ -855,4 +855,39 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn parses_resample_filter_and_volume_transfer_function() {
+        let json = r#"{
+            "version": 1,
+            "sources": {
+                "flow": { "file": "results.vtu" }
+            },
+            "filters": {
+                "vol": {
+                    "type": "resample",
+                    "input": "flow",
+                    "dimensions": [32, 24, 16]
+                }
+            },
+            "view": {
+                "show": [
+                    {
+                        "input": "vol",
+                        "style": "volume",
+                        "color_by": "velocity:magnitude",
+                        "transfer_function": [[0.0, 0.0], [0.5, 0.25], [1.0, 0.9]]
+                    }
+                ]
+            }
+        }"#;
+
+        let scene = Scene::from_json_str(json).expect("resample scene should parse");
+        assert_eq!(scene.filters["vol"], Filter::resample("flow", [32, 24, 16]));
+        assert_eq!(scene.view.show[0].style, RepresentationStyle::Volume);
+        assert_eq!(
+            scene.view.show[0].transfer_function,
+            Some(vec![[0.0, 0.0], [0.5, 0.25], [1.0, 0.9]])
+        );
+    }
 }

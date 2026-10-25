@@ -18,8 +18,8 @@ use tetraglass_io::detect_format_from_extension;
 
 use crate::{
     ArrayAssociation, BackgroundSpec, ColorSpec, Filter, GlyphScaleBySpec, ParsedArrayRef,
-    RangeSpec, Representation, ResolvedComponent, SCENE_VERSION, Scene, StreamlineSeedsSpec,
-    TimeSelector,
+    RangeSpec, Representation, RepresentationStyle, ResolvedComponent, SCENE_VERSION, Scene,
+    StreamlineSeedsSpec, TimeSelector,
 };
 
 /// Metadata for a single attribute array used during semantic validation.
@@ -367,6 +367,7 @@ fn validate_impl(
                 | Filter::Threshold { .. }
                 | Filter::Streamlines { .. }
                 | Filter::Glyphs { .. }
+                | Filter::Resample { .. }
         ) && matches!(
             scene.filters.get(input),
             Some(
@@ -375,6 +376,7 @@ fn validate_impl(
                     | Filter::Contour { .. }
                     | Filter::Streamlines { .. }
                     | Filter::Glyphs { .. }
+                    | Filter::Resample { .. }
             )
         ) {
             let kind = match filter {
@@ -383,6 +385,7 @@ fn validate_impl(
                 Filter::Threshold { .. } => "threshold",
                 Filter::Streamlines { .. } => "streamlines",
                 Filter::Glyphs { .. } => "glyphs",
+                Filter::Resample { .. } => "resample",
                 _ => "slice",
             };
             let suggestion = resolve_root_source(name, &scene.sources, &scene.filters)
@@ -569,6 +572,23 @@ fn validate_impl(
                     ));
                 }
             }
+            Filter::Resample { dimensions, .. } => {
+                if dimensions.iter().any(|&d| d < 2) {
+                    issues.push(ValidationIssue::new(
+                        format!("filters.{name}.dimensions"),
+                        format!("resample dimensions must each be at least 2, got {dimensions:?}"),
+                        Some(
+                            "use grid dimensions such as [32, 32, 32] or [64, 64, 64]".to_string(),
+                        ),
+                    ));
+                } else if dimensions.iter().any(|&d| d > 512) {
+                    issues.push(ValidationIssue::new(
+                        format!("filters.{name}.dimensions"),
+                        format!("resample dimensions must each be at most 512, got {dimensions:?}"),
+                        Some("use grid dimensions in 2..=512 such as [64, 64, 64]".to_string()),
+                    ));
+                }
+            }
         }
     }
 
@@ -593,6 +613,8 @@ fn validate_impl(
                     augment_streamline_metadata(&mut filter_meta);
                 } else if matches!(filter, Filter::Glyphs { .. }) {
                     augment_glyph_metadata(&mut filter_meta);
+                } else if matches!(filter, Filter::Resample { .. }) {
+                    augment_resample_metadata(&mut filter_meta);
                 }
                 map.insert(filter_name.as_str(), filter_meta);
             }
@@ -665,6 +687,24 @@ fn validate_impl(
                 format!("unknown dataset \"{}\"", rep.input),
                 suggest_dataset_or_list(&rep.input, &defined_datasets, None),
             ));
+        } else if rep.style == RepresentationStyle::Volume
+            && !matches!(scene.filters.get(&rep.input), Some(Filter::Resample { .. }))
+        {
+            issues.push(ValidationIssue::new(
+                format!("{rep_prefix}.style"),
+                format!(
+                    "style \"volume\" requires a \"resample\" filter input, but \"{}\" is not a resample filter",
+                    rep.input
+                ),
+                Some(format!(
+                    "add a {{\"type\": \"resample\", \"input\": \"{}\", \"dimensions\": [64, 64, 64]}} filter",
+                    rep.input
+                )),
+            ));
+        }
+
+        if let Some(tf) = &rep.transfer_function {
+            validate_transfer_function(tf, &format!("{rep_prefix}.transfer_function"), &mut issues);
         }
 
         validate_color_spec(&rep.color, &format!("{rep_prefix}.color"), &mut issues);
@@ -1327,6 +1367,56 @@ fn augment_glyph_metadata(meta: &mut DatasetMetadata) {
     meta.point_arrays
         .entry("glyph_magnitude".to_string())
         .or_insert(synthetic_scalar);
+}
+
+fn augment_resample_metadata(meta: &mut DatasetMetadata) {
+    // Resample samples source cell arrays onto the regular grid's `point_data`.
+    for (cell_name, cell_meta) in meta.cell_arrays.clone() {
+        meta.point_arrays.entry(cell_name).or_insert(cell_meta);
+    }
+}
+
+fn validate_transfer_function(tf: &[[f64; 2]], path: &str, issues: &mut Vec<ValidationIssue>) {
+    if tf.len() < 2 {
+        issues.push(ValidationIssue::new(
+            path,
+            "transfer_function must contain at least 2 [t, alpha] control points",
+            Some("use control points such as [[0.0, 0.0], [1.0, 1.0]]".to_string()),
+        ));
+        return;
+    }
+    let mut prev_t: Option<f64> = None;
+    for (i, &[t, alpha]) in tf.iter().enumerate() {
+        if !t.is_finite() || !(0.0..=1.0).contains(&t) {
+            issues.push(ValidationIssue::new(
+                format!("{path}[{i}]"),
+                format!("transfer_function scalar coordinate t must be in 0.0..=1.0, got {t}"),
+                Some("normalize control point t values to 0.0..=1.0".to_string()),
+            ));
+            return;
+        }
+        if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
+            issues.push(ValidationIssue::new(
+                format!("{path}[{i}]"),
+                format!("transfer_function opacity alpha must be in 0.0..=1.0, got {alpha}"),
+                Some("set control point opacity alpha between 0.0 and 1.0".to_string()),
+            ));
+            return;
+        }
+        if let Some(pt) = prev_t
+            && t <= pt
+        {
+            issues.push(ValidationIssue::new(
+                format!("{path}[{i}]"),
+                format!(
+                    "transfer_function control points must have strictly increasing t, but {t} <= {pt}"
+                ),
+                Some("sort control points in ascending order of t in 0.0..=1.0".to_string()),
+            ));
+            return;
+        }
+        prev_t = Some(t);
+    }
 }
 
 fn validate_vector_array_field(

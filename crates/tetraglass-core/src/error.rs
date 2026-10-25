@@ -181,6 +181,26 @@ pub enum CoreError {
         /// Requested `[nx, ny, nz]` subdivisions.
         divisions: [u32; 3],
     },
+
+    /// A [`crate::RegularGrid`] was constructed with invalid dimensions (`nx < 2`, `ny < 2`, or `nz < 2`).
+    #[error("invalid regular grid dimensions {dimensions:?}: {reason}")]
+    InvalidRegularGridDimensions {
+        /// Requested `[nx, ny, nz]` sample counts.
+        dimensions: [usize; 3],
+        /// Explanation of why the dimensions are invalid.
+        reason: &'static str,
+    },
+
+    /// A [`crate::RegularGrid`] `inside_mask` length did not match `nx * ny * nz`.
+    #[error(
+        "regular grid inside_mask length {actual} does not match expected point count {expected}"
+    )]
+    InsideMaskLengthMismatch {
+        /// Actual length of `inside_mask`.
+        actual: usize,
+        /// Expected point count `nx * ny * nz`.
+        expected: usize,
+    },
 }
 
 /// Converts a `u64` index to `u32`, returning [`CoreError::IndexOverflow`] if it exceeds `u32::MAX`.

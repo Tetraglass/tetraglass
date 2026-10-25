@@ -738,3 +738,70 @@ fn glyphs_filter_evaluates_shapes_and_caches_results() {
     assert!(Arc::ptr_eq(arrows_surf, &eval2.representations[0].surface));
     assert!(Arc::ptr_eq(cones_surf, &eval2.representations[1].surface));
 }
+
+#[test]
+fn resample_filter_evaluates_volume_and_caches_results() {
+    let hex = read_vtu_from_path(testdata_vtu("hex_linear.vtu")).expect("load hex_linear.vtu");
+    let mut evaluator = SceneEvaluator::new();
+    evaluator.insert_source("hex", hex);
+
+    let mut scene = Scene::from_json_str(
+        r#"{
+            "version": 1,
+            "sources": {
+                "hex": { "file": "testdata/vtk/hex_linear.vtu" }
+            },
+            "filters": {
+                "vol": {
+                    "type": "resample",
+                    "input": "hex",
+                    "dimensions": [8, 7, 6]
+                }
+            },
+            "view": {
+                "show": [
+                    {
+                        "input": "vol",
+                        "style": "volume",
+                        "color_by": "linear",
+                        "transfer_function": [[0.0, 0.0], [1.0, 1.0]]
+                    }
+                ]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let eval1 = evaluator
+        .evaluate_scene(&scene)
+        .expect("evaluate resample scene");
+    assert_eq!(eval1.representations.len(), 1);
+    assert_eq!(evaluator.filter_executions(), 1);
+    assert_eq!(evaluator.cache_hits(), 0);
+
+    let vol1 = eval1.representations[0]
+        .volume
+        .as_ref()
+        .expect("volume representation carries RegularGrid");
+    assert_eq!(vol1.dimensions(), [8, 7, 6]);
+    assert_eq!(vol1.num_inside_points(), 8 * 7 * 6);
+    assert_eq!(
+        eval1.representations[0]
+            .coloring
+            .as_ref()
+            .unwrap()
+            .effective_range,
+        [0.0, 12.0]
+    );
+
+    // Changing colormap/transfer_function hits the volume cache without re-running resample.
+    scene.view.show[0].colormap = ColormapName::Turbo;
+    scene.view.show[0].transfer_function = Some(vec![[0.0, 0.0], [0.5, 0.2], [1.0, 0.8]]);
+    let eval2 = evaluator
+        .evaluate_scene(&scene)
+        .expect("re-evaluate resample scene");
+    assert_eq!(evaluator.filter_executions(), 1);
+    assert_eq!(evaluator.cache_hits(), 1);
+    let vol2 = eval2.representations[0].volume.as_ref().unwrap();
+    assert!(Arc::ptr_eq(vol1, vol2));
+}

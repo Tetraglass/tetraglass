@@ -52,6 +52,7 @@ mod glyphs;
 mod linearize;
 mod locator;
 mod marching_tets;
+mod resample;
 mod slice;
 mod streamlines;
 mod surface;
@@ -76,6 +77,10 @@ pub use marching_tets::{
     extract_isosurface, extract_isosurfaces_with_chunk_size,
     filter_tets_by_source_cell_with_chunk_size,
 };
+pub use resample::{
+    DEFAULT_RESAMPLE_CHUNK_SIZE, ResampleParams, resample, resample_grid, resample_with_chunk_size,
+    resample_with_locator,
+};
 pub use slice::{SliceParams, slice, slice_grid, slice_with_chunk_size};
 pub use streamlines::{
     DEFAULT_STREAMLINE_CHUNK_SIZE, DEFAULT_STREAMLINE_ERROR_TOLERANCE,
@@ -88,7 +93,7 @@ pub use surface::{
     FilterError, extract_external_surface, extract_external_surface_with_subdivisions,
     extract_tet_view_surface,
 };
-pub use tetraglass_core::{DEFAULT_TUBE_SIDES, PolylineSet, SurfaceMesh, TetView};
+pub use tetraglass_core::{DEFAULT_TUBE_SIDES, PolylineSet, RegularGrid, SurfaceMesh, TetView};
 pub use threshold::{
     ThresholdAssociation, ThresholdComponent, ThresholdParams, threshold, threshold_grid,
     threshold_with_chunk_size,

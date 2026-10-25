@@ -47,7 +47,8 @@ Every filter has `type` and `input`. Arrays on the input are carried to the outp
 "half": { "type": "clip", "input": "flow", "origin": [1.0, 0.5, 0.5], "normal": [1.0, 0.0, 0.0], "keep": "back", "mode": "exact" },
 "band": { "type": "threshold", "input": "flow", "field": "pressure", "min": 100.0, "max": 200.0 },
 "traces": { "type": "streamlines", "input": "flow", "vectors": "velocity", "seeds": { "line": { "from": [0.1, 0.1, 0.5], "to": [0.1, 0.9, 0.5], "count": 16 } }, "direction": "both", "integrator": "rk45", "tube_radius": 0.02 },
-"arrows": { "type": "glyphs", "input": "flow", "vectors": "velocity", "shape": "arrow", "scale_by": "magnitude", "every": 4 }
+"arrows": { "type": "glyphs", "input": "flow", "vectors": "velocity", "shape": "arrow", "scale_by": "magnitude", "every": 4 },
+"vol": { "type": "resample", "input": "flow", "dimensions": [64, 64, 64] }
 ```
 
 | `type` | Milestone | Fields |
@@ -59,7 +60,7 @@ Every filter has `type` and `input`. Arrays on the input are carried to the outp
 | `threshold` | M2 | `field`, `min`, `max` (either may be omitted for one-sided) |
 | `streamlines` | M4 | `vectors` (3-component vector array reference), `seeds` (`{"point": [...]}`, `{"points": [[...], ...]}`, `{"line": {"from": [...], "to": [...], "count": n}}`, or `{"plane": {"origin": [...], "normal": [...], "extent": [w, h], "count": [nu, nv]}}`), `max_length` (optional, `> 0`), `step_size` (optional, `> 0`), `direction` (`"forward"` default, `"backward"`, `"both"`), `integrator` (`"rk45"` default or `"rk4"`), `tube_radius` (optional, `> 0`) |
 | `glyphs` | M4 | `vectors` (3-component vector array reference), `shape` (`"arrow"` default, `"cone"`, `"sphere"`), `scale_by` (`"magnitude"` default or a positive number), `scale_factor` (optional positive multiplier), `every` (stride, default `1`) |
-| `resample` | M4 | `dimensions` ([nx, ny, nz]); output used by the `volume` representation |
+| `resample` | M4 | `dimensions` (`[nx, ny, nz]`, each `2..=512`); output used by the `"volume"` representation |
 
 ## Array references
 
@@ -88,6 +89,7 @@ A string `"<array>"` or `"<array>:<component>"`.
 | `log_scale` | `false` | Logarithmic color mapping; values must be positive. |
 | `center` | none | For diverging colormaps: value mapped to the middle of the map. |
 | `opacity` | `1.0` | 0 to 1. Below 1 uses order-independent transparency (M3). |
+| `transfer_function` | none | For `"volume"`: `[[t, alpha], ...]` piecewise-linear opacity control points with `t` and `alpha` in `0..=1` (defaults to `[[0.0, 0.0], [1.0, 1.0]]`). |
 | `colorbar` | `false` | `true`, or `{ "title": "...", "position": "right" }`. |
 | `edge_color` | `"black"` | For `surface_with_edges` and `wireframe`. |
 | `point_size` | `3.0` | Pixels, for `"points"`. |

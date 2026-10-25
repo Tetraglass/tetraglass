@@ -539,6 +539,16 @@ pub enum Filter {
         #[serde(default = "default_glyph_every")]
         every: usize,
     },
+
+    /// Resamples the input volume dataset onto a regular 3D grid `[nx, ny, nz]` for `"volume"` ray-marching (`"resample"`).
+    #[serde(rename_all = "snake_case")]
+    Resample {
+        /// Name of the input source or filter.
+        input: String,
+
+        /// Sample grid resolution `[nx, ny, nz]` along the X, Y, and Z axes (each `>= 2`).
+        dimensions: [usize; 3],
+    },
 }
 
 impl Filter {
@@ -684,6 +694,15 @@ impl Filter {
         }
     }
 
+    /// Creates a [`Filter::Resample`] reading from `input` with grid resolution `dimensions = [nx, ny, nz]`.
+    #[must_use]
+    pub fn resample(input: impl Into<String>, dimensions: [usize; 3]) -> Self {
+        Self::Resample {
+            input: input.into(),
+            dimensions,
+        }
+    }
+
     /// Returns the name of the upstream source or filter that feeds this filter.
     #[must_use]
     pub fn input(&self) -> &str {
@@ -694,7 +713,8 @@ impl Filter {
             | Self::Clip { input, .. }
             | Self::Threshold { input, .. }
             | Self::Streamlines { input, .. }
-            | Self::Glyphs { input, .. } => input,
+            | Self::Glyphs { input, .. }
+            | Self::Resample { input, .. } => input,
         }
     }
 }
@@ -779,6 +799,11 @@ pub struct Representation {
     #[serde(default = "default_point_size")]
     pub point_size: f64,
 
+    /// Optional piecewise-linear opacity transfer function `[[t, alpha], ...]` (`t` and `alpha` in `0.0..=1.0`,
+    /// sorted by `t`) for `"volume"` representations. When omitted, a linear ramp `[[0.0, 0.0], [1.0, 1.0]]` is used.
+    #[serde(default = "default_none_transfer_function")]
+    pub transfer_function: Option<Vec<[f64; 2]>>,
+
     /// Whether this representation is visible (default: `true`).
     #[serde(default = "default_true")]
     pub visible: bool,
@@ -801,6 +826,7 @@ impl Representation {
             colorbar: default_colorbar_spec(),
             edge_color: default_edge_color(),
             point_size: default_point_size(),
+            transfer_function: default_none_transfer_function(),
             visible: default_true(),
         }
     }
@@ -1478,6 +1504,10 @@ fn default_edge_color() -> ColorSpec {
 
 const fn default_point_size() -> f64 {
     DEFAULT_POINT_SIZE
+}
+
+const fn default_none_transfer_function() -> Option<Vec<[f64; 2]>> {
+    None
 }
 
 fn default_camera_fit() -> String {

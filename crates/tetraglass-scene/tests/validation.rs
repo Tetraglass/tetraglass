@@ -788,3 +788,93 @@ fn validates_glyphs_filter_vectors_parameters_and_augmented_arrays() {
     assert!(!by_path.contains_key("view.show[1].color_by"));
     assert!(!by_path.contains_key("view.show[2].color_by"));
 }
+
+#[test]
+fn validates_resample_dimensions_volume_style_and_transfer_function() {
+    let mut sources = BTreeMap::new();
+    sources.insert("flow".to_string(), flow_grid_with_pressure_and_velocity());
+
+    let scene = Scene::from_json_str(
+        r#"{
+            "version": 1,
+            "sources": { "flow": { "file": "flow.vtu" } },
+            "filters": {
+                "hull": { "type": "surface", "input": "flow" },
+                "bad_dims_low": {
+                    "type": "resample",
+                    "input": "flow",
+                    "dimensions": [1, 16, 16]
+                },
+                "bad_dims_high": {
+                    "type": "resample",
+                    "input": "flow",
+                    "dimensions": [1024, 16, 16]
+                },
+                "surf_input": {
+                    "type": "resample",
+                    "input": "hull",
+                    "dimensions": [8, 8, 8]
+                },
+                "good_vol": {
+                    "type": "resample",
+                    "input": "flow",
+                    "dimensions": [16, 16, 16]
+                }
+            },
+            "view": {
+                "show": [
+                    {
+                        "input": "flow",
+                        "style": "volume"
+                    },
+                    {
+                        "input": "good_vol",
+                        "style": "volume",
+                        "color_by": "pressure",
+                        "transfer_function": [[0.0, 0.0]]
+                    },
+                    {
+                        "input": "good_vol",
+                        "style": "volume",
+                        "color_by": "pressure",
+                        "transfer_function": [[0.5, 0.2], [0.3, 0.8]]
+                    },
+                    {
+                        "input": "good_vol",
+                        "style": "volume",
+                        "color_by": "cell_id",
+                        "transfer_function": [[0.0, 0.0], [0.5, 0.3], [1.0, 1.0]]
+                    }
+                ]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let report = validate_scene(&scene, &sources).expect_err("must report resample/volume errors");
+    let by_path: BTreeMap<&str, &ValidationIssue> = report
+        .issues()
+        .iter()
+        .map(|i| (i.path.as_str(), i))
+        .collect();
+
+    assert!(by_path.contains_key("filters.bad_dims_low.dimensions"));
+    assert!(by_path.contains_key("filters.bad_dims_high.dimensions"));
+    assert!(
+        by_path["filters.surf_input.input"]
+            .message
+            .contains("requires a volume dataset input")
+    );
+    assert!(
+        by_path["view.show[0].style"]
+            .message
+            .contains("requires a \"resample\" filter input")
+    );
+    assert!(by_path.contains_key("view.show[1].transfer_function"));
+    assert!(by_path.contains_key("view.show[2].transfer_function[1]"));
+
+    assert!(!by_path.contains_key("filters.good_vol"));
+    assert!(!by_path.contains_key("view.show[3].style"));
+    assert!(!by_path.contains_key("view.show[3].color_by"));
+    assert!(!by_path.contains_key("view.show[3].transfer_function"));
+}

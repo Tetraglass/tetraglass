@@ -48,6 +48,7 @@ mod series;
 mod surface;
 mod synthetic;
 mod tet_view;
+mod volume;
 
 pub use array::{ArrayBuffer, Attributes, ComponentCount, DataArray, ScalarType, ValueRange};
 pub use cell::{CellType, PolyhedronFaceIter, PolyhedronFaces};
@@ -61,6 +62,7 @@ pub use synthetic::{
     generate_synthetic_grid, m2_benchmark_hex_spec, m2_benchmark_tet_spec,
 };
 pub use tet_view::{TetView, signed_tet_volume};
+pub use volume::RegularGrid;
 
 #[cfg(test)]
 mod tests {
@@ -689,5 +691,46 @@ mod tests {
                 actual: 1,
             })
         );
+    }
+
+    #[test]
+    fn regular_grid_validates_inputs_and_computes_positions_and_bounding_surface() {
+        let dims = [3, 2, 2];
+        let bounds = BoundingBox {
+            min: [0.0, 0.0, 0.0],
+            max: [2.0, 1.0, 3.0],
+        };
+        let mask = vec![1u8; 12];
+        let mut point_data = Attributes::new(12);
+        point_data
+            .insert(
+                "linear",
+                DataArray::from_f64(
+                    ComponentCount::Scalar,
+                    (0..12).map(|i| i as f64).collect::<Vec<f64>>(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let grid = RegularGrid::new(dims, bounds, mask, point_data).expect("valid RegularGrid");
+        assert_eq!(grid.dimensions(), [3, 2, 2]);
+        assert_eq!(grid.num_points(), 12);
+        assert_eq!(grid.num_inside_points(), 12);
+        assert_eq!(grid.spacing(), [1.0, 1.0, 3.0]);
+        assert_eq!(grid.linear_index(2, 1, 1), Some(11));
+        assert_eq!(grid.grid_coords(11), Some([2, 1, 1]));
+        assert_eq!(grid.point_position(1, 1, 1), Some([1.0, 1.0, 3.0]));
+
+        let bbox_surf = grid.to_bounding_surface().expect("bounding surface");
+        assert_eq!(bbox_surf.num_points(), 8);
+        assert_eq!(bbox_surf.num_triangles(), 12);
+        assert_eq!(bbox_surf.num_wireframe_edges(), 12);
+
+        // Reject dimensions < 2
+        assert!(matches!(
+            RegularGrid::new([1, 2, 2], bounds, vec![1u8; 4], Attributes::new(4)),
+            Err(CoreError::InvalidRegularGridDimensions { .. })
+        ));
     }
 }

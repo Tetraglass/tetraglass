@@ -644,6 +644,37 @@
             "input",
             "vectors"
           ]
+        },
+        {
+          "description": "Resamples the input volume dataset onto a regular 3D grid `[nx, ny, nz]` for `\"volume\"` ray-marching (`\"resample\"`).",
+          "type": "object",
+          "properties": {
+            "dimensions": {
+              "description": "Sample grid resolution `[nx, ny, nz]` along the X, Y, and Z axes (each `>= 2`).",
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "input": {
+              "description": "Name of the input source or filter.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "resample"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "input",
+            "dimensions"
+          ]
         }
       ]
     },
@@ -935,6 +966,23 @@
           "description": "Drawing style (default: `\"surface\"`).",
           "$ref": "#/$defs/RepresentationStyle",
           "default": "surface"
+        },
+        "transfer_function": {
+          "description": "Optional piecewise-linear opacity transfer function `[[t, alpha], ...]` (`t` and `alpha` in `0.0..=1.0`,\nsorted by `t`) for `\"volume\"` representations. When omitted, a linear ramp `[[0.0, 0.0], [1.0, 1.0]]` is used.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
         },
         "visible": {
           "description": "Whether this representation is visible (default: `true`).",

@@ -12,15 +12,16 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use tetraglass_core::{
-    ArrayBuffer, Attributes, BoundingBox, DEFAULT_TUBE_SIDES, PolylineSet, SurfaceMesh, TetView,
-    TimeSeries, UnstructuredGrid, ValueRange,
+    ArrayBuffer, Attributes, BoundingBox, DEFAULT_TUBE_SIDES, PolylineSet, RegularGrid,
+    SurfaceMesh, TetView, TimeSeries, UnstructuredGrid, ValueRange,
 };
 use tetraglass_filters::{
     ClipParams, ContourComponent, ContourParams, DEFAULT_SUBDIVISIONS, GlyphAssociation,
-    GlyphParams, GlyphScaleMode, GlyphShape, LinearizeParams, SliceParams, StreamlineParams,
-    StreamlineSeeds, TetLocator, ThresholdAssociation, ThresholdComponent, ThresholdParams, clip,
-    contour, extract_external_surface_with_subdivisions, extract_tet_view_surface, glyphs,
-    linearize, slice, streamlines_with_locator, threshold,
+    GlyphParams, GlyphScaleMode, GlyphShape, LinearizeParams, ResampleParams, SliceParams,
+    StreamlineParams, StreamlineSeeds, TetLocator, ThresholdAssociation, ThresholdComponent,
+    ThresholdParams, clip, contour, extract_external_surface_with_subdivisions,
+    extract_tet_view_surface, glyphs, linearize, resample_with_locator, slice,
+    streamlines_with_locator, threshold,
 };
 use tetraglass_io::IoError;
 
@@ -31,6 +32,8 @@ use crate::{
     StreamlineDirectionSpec, StreamlineIntegratorSpec, StreamlineSeedsSpec, TimeSelector,
     ValidationIssue, ValidationReport, validate_scene_with_metadata,
 };
+
+type RepresentationGeometry = (PipelineHash, Arc<SurfaceMesh>, Option<Arc<RegularGrid>>);
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0100_0000_01b3;
@@ -451,6 +454,16 @@ fn hash_glyphs_filter(
     PipelineHash(h.finish())
 }
 
+fn hash_resample_filter(upstream_hash: PipelineHash, dimensions: [usize; 3]) -> PipelineHash {
+    let mut h = FnvHasher::new();
+    h.write_str("resample");
+    h.write_u64(upstream_hash.0);
+    h.write_usize(dimensions[0]);
+    h.write_usize(dimensions[1]);
+    h.write_usize(dimensions[2]);
+    PipelineHash(h.finish())
+}
+
 /// Output of evaluating a source or filter node in the scene pipeline.
 #[derive(Debug, Clone)]
 pub enum EvaluatedDataset {
@@ -469,6 +482,8 @@ pub enum EvaluatedDataset {
         /// Explicit `tube_radius` configured on the streamline filter, if any.
         tube_radius: Option<f64>,
     },
+    /// Resampled 3D regular grid volume (`M4.4`).
+    Volume(Arc<RegularGrid>),
 }
 
 impl EvaluatedDataset {
@@ -484,6 +499,7 @@ impl EvaluatedDataset {
                 source_bounds,
                 ..
             } => polylines.bounds().or(*source_bounds),
+            Self::Volume(volume) => Some(volume.bounds()),
         }
     }
 }
@@ -534,6 +550,10 @@ pub struct EvaluatedRepresentation {
     pub opacity: f64,
     /// Point diameter in pixels for `RepresentationStyle::Points`.
     pub point_size: f64,
+    /// Resampled 3D regular grid when `style == RepresentationStyle::Volume`, or `None` for surface/line styles.
+    pub volume: Option<Arc<RegularGrid>>,
+    /// Optional piecewise-linear opacity transfer function `[[t, alpha], ...]` for `"volume"` representations.
+    pub transfer_function: Option<Vec<[f64; 2]>>,
     /// Colorbar legend configuration.
     pub colorbar: ColorbarSpec,
 }
@@ -570,6 +590,7 @@ pub struct SceneEvaluator {
     tet_view_cache: HashMap<PipelineHash, Arc<TetView>>,
     locator_cache: HashMap<PipelineHash, Arc<TetLocator>>,
     streamline_cache: HashMap<PipelineHash, Arc<PolylineSet>>,
+    volume_cache: HashMap<PipelineHash, Arc<RegularGrid>>,
     surface_cache: HashMap<PipelineHash, Arc<SurfaceMesh>>,
     filter_executions: usize,
     cache_hits: usize,
@@ -662,6 +683,7 @@ impl SceneEvaluator {
         self.tet_view_cache.clear();
         self.locator_cache.clear();
         self.streamline_cache.clear();
+        self.volume_cache.clear();
         self.surface_cache.clear();
     }
 
@@ -875,6 +897,19 @@ impl SceneEvaluator {
                     )?;
                     return Ok((glyphs_hash, EvaluatedDataset::Surface(surface)));
                 }
+                Filter::Resample { input, dimensions } => {
+                    let (upstream_hash, upstream_data) = self.evaluate_dataset(scene, input)?;
+                    let resample_hash = hash_resample_filter(upstream_hash, *dimensions);
+                    let subdivisions = resolve_source_subdivisions(scene, input);
+                    let volume = self.get_or_resample_volume(
+                        resample_hash,
+                        upstream_hash,
+                        upstream_data,
+                        subdivisions,
+                        *dimensions,
+                    )?;
+                    return Ok((resample_hash, EvaluatedDataset::Volume(volume)));
+                }
             }
         }
 
@@ -920,19 +955,30 @@ impl SceneEvaluator {
         dataset_name: &str,
         style: RepresentationStyle,
     ) -> Result<(PipelineHash, Arc<SurfaceMesh>), SceneError> {
+        let (surface_hash, surface, _volume) =
+            self.evaluate_representation_geometry(scene, dataset_name, style)?;
+        Ok((surface_hash, surface))
+    }
+
+    fn evaluate_representation_geometry(
+        &mut self,
+        scene: &Scene,
+        dataset_name: &str,
+        style: RepresentationStyle,
+    ) -> Result<RepresentationGeometry, SceneError> {
         let (node_hash, data) = self.evaluate_dataset(scene, dataset_name)?;
         match data {
-            EvaluatedDataset::Surface(surface) => Ok((node_hash, surface)),
+            EvaluatedDataset::Surface(surface) => Ok((node_hash, surface, None)),
             other @ EvaluatedDataset::Grid(_) => {
                 let surface_hash = hash_surface_extraction(node_hash);
                 let subdivisions = resolve_source_subdivisions(scene, dataset_name);
                 let surface = self.get_or_extract_surface(surface_hash, other, subdivisions)?;
-                Ok((surface_hash, surface))
+                Ok((surface_hash, surface, None))
             }
             EvaluatedDataset::TetVolume(tet_view) => {
                 let surface_hash = hash_surface_extraction(node_hash);
                 let surface = self.get_or_extract_tet_surface_implicit(surface_hash, &tet_view)?;
-                Ok((surface_hash, surface))
+                Ok((surface_hash, surface, None))
             }
             EvaluatedDataset::Streamlines {
                 polylines,
@@ -947,9 +993,32 @@ impl SceneEvaluator {
                     tube_radius,
                     style,
                 )?;
-                Ok((surface_hash, surface))
+                Ok((surface_hash, surface, None))
+            }
+            EvaluatedDataset::Volume(volume) => {
+                let surface_hash = hash_surface_extraction(node_hash);
+                let surface = self.get_or_extract_volume_surface_implicit(surface_hash, &volume)?;
+                Ok((surface_hash, surface, Some(volume)))
             }
         }
+    }
+
+    fn get_or_extract_volume_surface_implicit(
+        &mut self,
+        surface_hash: PipelineHash,
+        volume: &RegularGrid,
+    ) -> Result<Arc<SurfaceMesh>, SceneError> {
+        if let Some(cached) = self.surface_cache.get(&surface_hash) {
+            return Ok(Arc::clone(cached));
+        }
+        let surface = Arc::new(
+            volume
+                .to_bounding_surface()
+                .map_err(tetraglass_filters::FilterError::from)?,
+        );
+        self.surface_cache
+            .insert(surface_hash, Arc::clone(&surface));
+        Ok(surface)
     }
 
     fn get_or_extract_tet_surface_implicit(
@@ -1029,6 +1098,11 @@ impl SceneEvaluator {
                 let radius = tube_radius.unwrap_or(0.012 * diag).max(1e-6);
                 Arc::new(polylines.to_tube_surface(radius, DEFAULT_TUBE_SIDES)?)
             }
+            EvaluatedDataset::Volume(volume) => Arc::new(
+                volume
+                    .to_bounding_surface()
+                    .map_err(tetraglass_filters::FilterError::from)?,
+            ),
         };
         self.surface_cache
             .insert(surface_hash, Arc::clone(&surface));
@@ -1075,17 +1149,15 @@ impl SceneEvaluator {
                 self.get_or_linearize_tet_view(upstream_hash, &grid, subdivisions)
             }
             EvaluatedDataset::TetVolume(tet_view) => Ok(tet_view),
-            EvaluatedDataset::Surface(_) | EvaluatedDataset::Streamlines { .. } => {
-                Err(SceneError::Validation(ValidationReport {
-                    issues: vec![ValidationIssue::new(
-                        "filters",
-                        format!(
-                            "{filter_kind} filter requires a volume dataset input, not a surface"
-                        ),
-                        None,
-                    )],
-                }))
-            }
+            EvaluatedDataset::Surface(_)
+            | EvaluatedDataset::Streamlines { .. }
+            | EvaluatedDataset::Volume(_) => Err(SceneError::Validation(ValidationReport {
+                issues: vec![ValidationIssue::new(
+                    "filters",
+                    format!("{filter_kind} filter requires a volume dataset input, not a surface"),
+                    None,
+                )],
+            })),
         }
     }
 
@@ -1434,6 +1506,37 @@ impl SceneEvaluator {
         Ok(surface)
     }
 
+    fn get_or_resample_volume(
+        &mut self,
+        resample_hash: PipelineHash,
+        upstream_hash: PipelineHash,
+        upstream_data: EvaluatedDataset,
+        subdivisions: u8,
+        dimensions: [usize; 3],
+    ) -> Result<Arc<RegularGrid>, SceneError> {
+        if let Some(cached) = self.volume_cache.get(&resample_hash) {
+            self.cache_hits += 1;
+            return Ok(Arc::clone(cached));
+        }
+
+        let tet_hash = match &upstream_data {
+            EvaluatedDataset::Grid(_) => hash_tet_view(upstream_hash, subdivisions),
+            _ => upstream_hash,
+        };
+        let tet_view =
+            self.resolve_volume_tet_view(upstream_hash, upstream_data, subdivisions, "resample")?;
+        let locator = self.get_or_build_locator(tet_hash, &tet_view);
+
+        self.filter_executions += 1;
+        let volume = Arc::new(resample_with_locator(
+            &tet_view,
+            &locator,
+            &ResampleParams::new(dimensions),
+        )?);
+        self.volume_cache.insert(resample_hash, Arc::clone(&volume));
+        Ok(volume)
+    }
+
     /// Validates `scene` against the loaded sources (resolving any [`TimeSeries`] sources at
     /// `scene.output.time`, defaulting to [`TimeSelector::FIRST`]) and lazily evaluates all
     /// visible representations and camera bounds.
@@ -1512,8 +1615,8 @@ impl SceneEvaluator {
             if !rep.visible {
                 continue;
             }
-            let (surface_hash, surface) =
-                self.evaluate_surface_for_style(scene, &rep.input, rep.style)?;
+            let (surface_hash, surface, volume) =
+                self.evaluate_representation_geometry(scene, &rep.input, rep.style)?;
             if let Some(b) = surface.bounds() {
                 visible_bounds = Some(match visible_bounds {
                     None => b,
@@ -1525,7 +1628,8 @@ impl SceneEvaluator {
             let edge_color = rep.edge_color.resolve_rgb().unwrap_or([0.0, 0.0, 0.0]);
             let root_series = find_root_source_name(&rep.input, scene)
                 .and_then(|src_name| self.series_sources.get(src_name));
-            let coloring = resolve_representation_coloring(rep, &surface, root_series)?;
+            let coloring =
+                resolve_representation_coloring(rep, &surface, volume.as_deref(), root_series)?;
 
             representations.push(EvaluatedRepresentation {
                 representation_index: idx,
@@ -1538,6 +1642,8 @@ impl SceneEvaluator {
                 coloring,
                 opacity: rep.opacity,
                 point_size: rep.point_size,
+                volume,
+                transfer_function: rep.transfer_function.clone(),
                 colorbar: rep.colorbar.clone(),
             });
         }
@@ -1614,6 +1720,7 @@ fn union_bounds(a: BoundingBox, b: BoundingBox) -> BoundingBox {
 fn resolve_representation_coloring(
     rep: &Representation,
     surface: &SurfaceMesh,
+    volume: Option<&RegularGrid>,
     root_series: Option<&TimeSeries<IoError>>,
 ) -> Result<Option<EvaluatedColoring>, SceneError> {
     let Some(raw_ref) = &rep.color_by else {
@@ -1621,28 +1728,35 @@ fn resolve_representation_coloring(
     };
     let parsed = ParsedArrayRef::parse(raw_ref)?;
 
+    let point_attrs = volume.map_or_else(|| surface.point_data(), |v| v.point_data());
     let (association, array) = match parsed.association {
         Some(ArrayAssociation::Point) => {
-            let arr = surface.point_data().get(&parsed.name).ok_or_else(|| {
-                SceneError::InvalidArrayRef {
+            let arr = point_attrs
+                .get(&parsed.name)
+                .ok_or_else(|| SceneError::InvalidArrayRef {
                     reference: raw_ref.clone(),
                     reason: format!("missing point array `{}`", parsed.name),
-                }
-            })?;
+                })?;
             (ArrayAssociation::Point, arr)
         }
         Some(ArrayAssociation::Cell) => {
-            let arr = surface.cell_data().get(&parsed.name).ok_or_else(|| {
-                SceneError::InvalidArrayRef {
-                    reference: raw_ref.clone(),
-                    reason: format!("missing cell array `{}`", parsed.name),
-                }
-            })?;
-            (ArrayAssociation::Cell, arr)
+            if let Some(vol) = volume
+                && let Some(arr) = vol.point_data().get(&parsed.name)
+            {
+                (ArrayAssociation::Point, arr)
+            } else {
+                let arr = surface.cell_data().get(&parsed.name).ok_or_else(|| {
+                    SceneError::InvalidArrayRef {
+                        reference: raw_ref.clone(),
+                        reason: format!("missing cell array `{}`", parsed.name),
+                    }
+                })?;
+                (ArrayAssociation::Cell, arr)
+            }
         }
         None => {
             // Point data wins if the name exists on both point and cell data (`docs/scene-format.md`).
-            if let Some(arr) = surface.point_data().get(&parsed.name) {
+            if let Some(arr) = point_attrs.get(&parsed.name) {
                 (ArrayAssociation::Point, arr)
             } else if let Some(arr) = surface.cell_data().get(&parsed.name) {
                 (ArrayAssociation::Cell, arr)

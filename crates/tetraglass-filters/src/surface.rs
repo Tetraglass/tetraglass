@@ -123,6 +123,15 @@ pub enum FilterError {
         /// Human-readable description of why the parameters are invalid.
         reason: &'static str,
     },
+
+    /// Resample filter dimensions are invalid (`nx < 2`, `ny < 2`, `nz < 2`, or overflow).
+    #[error("invalid resample dimensions {dimensions:?}: {reason}")]
+    InvalidResampleDimensions {
+        /// Requested `[nx, ny, nz]` grid dimensions.
+        dimensions: [usize; 3],
+        /// Human-readable description of why the dimensions are invalid.
+        reason: &'static str,
+    },
 }
 
 #[inline]
