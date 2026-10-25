@@ -13,7 +13,7 @@ use tetraglass_core::{
     Attributes, BoundingBox, CellType, ScalarType, TimeSeries, UnstructuredGrid,
 };
 use tetraglass_egui as _;
-use tetraglass_export::write_scene_glb_output;
+use tetraglass_export::{write_scene_bundle_output, write_scene_glb_output};
 use tetraglass_io::{
     IoError, MeshFormat, detect_format_from_bytes, detect_format_from_extension, read_msh_series,
     read_pvd_series_with_loader, read_vtu_series,
@@ -1119,12 +1119,7 @@ fn cmd_export(args: &[String]) -> Result<String, CliFailure> {
     };
 
     let format = format_arg.unwrap_or("gltf").to_ascii_lowercase();
-    if format == "bundle" {
-        return Err(CliFailure::Message(
-            "bundle export arrives in task M3.5 (use `--format gltf`)".to_string(),
-        ));
-    }
-    if format != "gltf" && format != "glb" {
+    if format != "gltf" && format != "glb" && format != "bundle" {
         return Err(CliFailure::Message(format!(
             "unknown export format `{format}`; expected `gltf`, `glb`, or `bundle`"
         )));
@@ -1147,24 +1142,44 @@ fn cmd_export(args: &[String]) -> Result<String, CliFailure> {
         evaluator.insert_series_source(name.clone(), series);
     }
 
-    let summary = write_scene_glb_output(
-        Path::new(output_path_str),
-        &scene,
-        &mut evaluator,
-        all_steps,
-    )
-    .map_err(|e| CliFailure::Message(e.to_string()))?;
-
-    let out = ExportSummary {
-        format: "gltf".to_string(),
-        files: summary
-            .glb_files
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect(),
-        manifest: summary.manifest_file.map(|p| p.display().to_string()),
-        num_steps: summary.num_steps,
-        total_triangles: summary.total_triangles,
+    let out = if format == "bundle" {
+        let summary = write_scene_bundle_output(
+            Path::new(output_path_str),
+            &scene,
+            &mut evaluator,
+            all_steps,
+        )
+        .map_err(|e| CliFailure::Message(e.to_string()))?;
+        ExportSummary {
+            format: "bundle".to_string(),
+            files: summary
+                .mesh_files
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
+            manifest: Some(summary.manifest_file.display().to_string()),
+            num_steps: summary.num_steps,
+            total_triangles: summary.total_triangles,
+        }
+    } else {
+        let summary = write_scene_glb_output(
+            Path::new(output_path_str),
+            &scene,
+            &mut evaluator,
+            all_steps,
+        )
+        .map_err(|e| CliFailure::Message(e.to_string()))?;
+        ExportSummary {
+            format: "gltf".to_string(),
+            files: summary
+                .glb_files
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
+            manifest: summary.manifest_file.map(|p| p.display().to_string()),
+            num_steps: summary.num_steps,
+            total_triangles: summary.total_triangles,
+        }
     };
     serde_json::to_string_pretty(&out).map_err(|e| CliFailure::Message(e.to_string()))
 }

@@ -741,4 +741,51 @@ fn export_command_writes_single_glb_and_time_series_manifest() {
     assert_eq!(series_summary["files"].as_array().unwrap().len(), 3);
     let manifest_path = series_summary["manifest"].as_str().expect("manifest path");
     assert!(std::path::Path::new(manifest_path).is_file());
+
+    // 3. Export `gallery/slice.json` and `gallery/series-transient-last.json` in `--format bundle` mode (`M3.5`).
+    let bundle_dir = out_dir.join("slice_bundle");
+    let bundle_out = tetraglass_bin()
+        .arg("export")
+        .arg(root.join("gallery/slice.json"))
+        .arg("-o")
+        .arg(&bundle_dir)
+        .arg("--format")
+        .arg("bundle")
+        .output()
+        .expect("run `tetraglass export --format bundle`");
+    assert!(
+        bundle_out.status.success(),
+        "`tetraglass export --format bundle` failed: {}",
+        String::from_utf8_lossy(&bundle_out.stderr)
+    );
+    let bundle_summary: serde_json::Value =
+        serde_json::from_slice(&bundle_out.stdout).expect("parse bundle export summary");
+    assert_eq!(bundle_summary["format"], "bundle");
+    assert_eq!(bundle_summary["num_steps"], 1);
+    assert!(bundle_dir.join("manifest.json").is_file());
+    assert_eq!(bundle_summary["files"].as_array().unwrap().len(), 2); // `slice.json` has 2 representations (`hull` + `cut`)
+
+    let series_bundle_dir = out_dir.join("series_bundle");
+    let series_bundle_out = tetraglass_bin()
+        .arg("export")
+        .arg(root.join("gallery/series-transient-last.json"))
+        .arg("-o")
+        .arg(&series_bundle_dir)
+        .arg("--format")
+        .arg("bundle")
+        .arg("--all-steps")
+        .output()
+        .expect("run `tetraglass export --format bundle --all-steps`");
+    assert!(
+        series_bundle_out.status.success(),
+        "`tetraglass export --format bundle --all-steps` failed: {}",
+        String::from_utf8_lossy(&series_bundle_out.stderr)
+    );
+    let series_bundle_summary: serde_json::Value =
+        serde_json::from_slice(&series_bundle_out.stdout)
+            .expect("parse series bundle export summary");
+    assert_eq!(series_bundle_summary["format"], "bundle");
+    assert_eq!(series_bundle_summary["num_steps"], 3);
+    assert!(series_bundle_dir.join("manifest.json").is_file());
+    assert_eq!(series_bundle_summary["files"].as_array().unwrap().len(), 3);
 }

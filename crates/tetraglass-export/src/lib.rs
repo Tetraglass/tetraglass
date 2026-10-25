@@ -29,9 +29,21 @@
 //! assert_eq!(parsed.meshes[0].positions.len(), parsed.meshes[0].texcoord_1.len());
 //! ```
 
+pub mod bundle;
 pub mod colormap;
 pub mod gltf;
 
+pub use bundle::{
+    BUNDLE_FORMAT_ID, BUNDLE_FORMAT_VERSION, BundleArchive, BundleBackground, BundleCamera,
+    BundleColormap, BundleLights, BundleManifest, BundleMaterialHints, BundleMeshData,
+    BundleMeshFileRef, BundleObject, BundleTimeStep, TGBIN_FLAGS_DEFAULT, TGBIN_HEADER_BYTES,
+    TGBIN_MAGIC, TGBIN_VERSION, decode_tgbin, encode_tgbin, export_evaluated_scene_to_bundle,
+    export_scene_to_bundle,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use bundle::{
+    BundleWriteSummary, read_bundle_dir, write_bundle_dir, write_scene_bundle_output,
+};
 pub use colormap::{
     colormap_lut_srgb_256, linear_to_srgb, normalize_scalar, sample_colormap_linear,
     sample_colormap_srgb, srgb_to_linear,
@@ -71,6 +83,10 @@ pub enum ExportError {
     /// Malformed or unsupported Binary glTF 2.0 (`.glb`) data.
     #[error("invalid glTF 2.0 binary (.glb): {0}")]
     InvalidGlb(String),
+
+    /// Malformed or unsupported Tetraglass bundle (`manifest.json` or `.tgbin`) data.
+    #[error("invalid Tetraglass bundle: {0}")]
+    InvalidBundle(String),
 
     /// Filesystem I/O error on native targets.
     #[cfg(not(target_arch = "wasm32"))]

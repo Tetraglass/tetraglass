@@ -344,3 +344,11 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none.
 - Dependencies added: none.
 - Follow-ups: M3.5 Bundle format (`/blender-bridge`).
+
+## 2026-10-25 — M3.5 Bundle format (`docs/bundle-format.md`, `crates/tetraglass-export`, `crates/tetraglass-cli`)
+
+- Done: authored `docs/bundle-format.md` specifying the renderer-neutral v1 bundle directory format (`manifest.json` + `meshes/*.tgbin`) per `D-011` and `.agents/rules/blender-gpl.md`. Implemented the bundle writer and round-trip reader/validator in `crates/tetraglass-export/src/bundle.rs` (`BundleManifest`, `BundleCamera`, `BundleLights`, `BundleBackground`, `BundleTimeStep`, `BundleObject`, `BundleColormap`, `BundleMaterialHints`, `BundleMeshFileRef`, `BundleMeshData`, `BundleArchive`, `encode_tgbin`, `decode_tgbin`, `export_evaluated_scene_to_bundle`, `export_scene_to_bundle`, `write_bundle_dir`, `write_scene_bundle_output`, and `read_bundle_dir`), storing `f32` vertex positions and original element wireframe `edge_positions` relative to `dataset_center` (`D-014`), 256-entry sRGB colormap LUTs, normalized `[0, 1]` and raw scalar attributes, and material/camera/lighting hints. Wired `tetraglass export <scene.json> -o <bundle_dir> --format bundle [--all-steps]` into `crates/tetraglass-cli`.
+- Tests: `gallery_scenes_round_trip_through_bundle_writer_and_reader`, `multi_step_series_bundle_exports_all_steps_and_round_trips`, and `tgbin_decoder_rejects_corrupted_headers_and_out_of_bounds_indices` in `crates/tetraglass-export/tests/bundle_export.rs`, plus CLI `--format bundle` and `--all-steps` tests in `crates/tetraglass-cli/tests/cli.rs`.
+- Decisions: none (implements `D-011` and `D-014`).
+- Dependencies added: none.
+- Follow-ups: M3.6 Blender scripts (`/blender-bridge`).

@@ -63,7 +63,7 @@ Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 complete (2026-
 - [x] **M3.2 Shareable links.** A link to a scene plus data opens in the web viewer.
 - [x] **M3.3 Transparency.** Weighted blended order-independent transparency.
 - [x] **M3.4 glTF export.** Baked colors, normalized scalar in a second texture coordinate, one .glb per time step.
-- [ ] **M3.5 Bundle format.** Write `docs/bundle-format.md`, then the export crate's bundle writer (`/blender-bridge`).
+- [x] **M3.5 Bundle format.** Write `docs/bundle-format.md`, then the export crate's bundle writer (`/blender-bridge`).
 - [ ] **M3.6 Blender scripts.** GPL importer and headless render driver in `blender/`, installable as an add-on.
 - [ ] **M3.7 Cycles from the CLI.** `render --engine cycles`, Blender discovery, progress streaming, `--save-blend`.
 - [ ] **M3.8 Gate.** `/milestone-gate`.
