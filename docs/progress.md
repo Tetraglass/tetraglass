@@ -368,3 +368,12 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (enforces `D-011` and `D-020`).
 - Dependencies added: none.
 - Follow-ups: M3.8 Gate (`/milestone-gate`).
+
+## 2026-10-25 — M3.8 Gate & Milestone M3 Retrospective (`docs/milestones/m3-gate.md`)
+
+- Done: verified all M3 tasks (`M3.1`–`M3.7`), demonstrated `gallery/slice.json` rendered both via `tetraglass render --engine cycles` (`docs/milestones/m3-slice-cycles.png`, Blender 5.2.2 LTS) and via `tetraglass render --engine raster` (`docs/milestones/m3-slice-raster.png`) alongside the `wasm32-unknown-unknown` WebGPU browser viewer and shareable link tests, and wrote `docs/milestones/m3-gate.md`.
+- Retrospective:
+  - **Planned vs. actual:** M3 (WebGPU viewer, shareable links, WBOIT transparency, glTF 2.0 `.glb` export, renderer-neutral `.tgbin` bundle format, GPL Blender add-on/headless Cycles driver, and CLI `--engine cycles`) completed in 8 focused tasks (`M3.1`–`M3.8`) with zero scope cuts.
+  - **What worked well:** Keeping `tetraglass-export` 100% `wasm32-unknown-unknown`-compatible and strictly data-only (`D-011`) made both `.glb` and `.tgbin` bundle exports fast and testable without Blender installed, while the pure-Python + `numpy` scripts in `blender/` (`D-020`) work seamlessly with Blender 4.2 LTS and 5.x LTS. Using `Standard` color management and `Is Camera Ray` world background separation in `blender/importer.py` ensured Cycles renders match the rasterizer's calibrated colormaps and white backgrounds out of the box.
+  - **Adjustments for M4:** Milestone M4 (`M4.1` Cell locator through `M4.7` Gate and release 0.2) builds flow and volume visualization (`streamlines`, `glyphs`, `volume rendering`, and `animation export`). The multi-step `--all-steps` infrastructure added to `tetraglass-export` and `blender/render.py` in M3 already provides the foundation for `M4.5 Animation export`.
+- Follow-ups: M4.1 Cell locator (`BVH over linearized tets for point location`).
