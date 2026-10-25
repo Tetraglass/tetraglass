@@ -693,3 +693,98 @@ fn validates_streamlines_filter_vectors_seeds_parameters_and_output_arrays() {
     assert!(!by_path.contains_key("view.show[2].color_by"));
     assert!(!by_path.contains_key("view.show[3].color_by"));
 }
+
+#[test]
+fn validates_glyphs_filter_vectors_parameters_and_augmented_arrays() {
+    let mut sources = BTreeMap::new();
+    sources.insert("flow".to_string(), flow_grid_with_pressure_and_velocity());
+
+    let scene = Scene::from_json_str(
+        r#"{
+            "version": 1,
+            "sources": { "flow": { "file": "flow.vtu" } },
+            "filters": {
+                "hull": { "type": "surface", "input": "flow" },
+                "typo_vec": {
+                    "type": "glyphs",
+                    "input": "flow",
+                    "vectors": "velocty"
+                },
+                "scalar_vec": {
+                    "type": "glyphs",
+                    "input": "flow",
+                    "vectors": "pressure"
+                },
+                "comp_vec": {
+                    "type": "glyphs",
+                    "input": "flow",
+                    "vectors": "velocity:x"
+                },
+                "bad_params": {
+                    "type": "glyphs",
+                    "input": "flow",
+                    "vectors": "velocity",
+                    "scale_by": -0.5,
+                    "scale_factor": 0.0,
+                    "every": 0
+                },
+                "surf_input": {
+                    "type": "glyphs",
+                    "input": "hull",
+                    "vectors": "velocity"
+                },
+                "good_glyphs": {
+                    "type": "glyphs",
+                    "input": "flow",
+                    "vectors": "velocity",
+                    "shape": "arrow",
+                    "scale_by": "magnitude",
+                    "every": 2
+                }
+            },
+            "view": {
+                "show": [
+                    { "input": "good_glyphs", "color_by": "glyph_magnitude" },
+                    { "input": "good_glyphs", "color_by": "velocity:magnitude" },
+                    { "input": "good_glyphs", "color_by": "cell_id" }
+                ]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let report = validate_scene(&scene, &sources).expect_err("must report glyphs errors");
+    let by_path: BTreeMap<&str, &ValidationIssue> = report
+        .issues()
+        .iter()
+        .map(|i| (i.path.as_str(), i))
+        .collect();
+
+    assert_eq!(
+        by_path["filters.typo_vec.vectors"].suggestion.as_deref(),
+        Some("did you mean \"velocity\"?")
+    );
+    assert!(
+        by_path["filters.scalar_vec.vectors"]
+            .message
+            .contains("has 1 component(s), expected 3")
+    );
+    assert_eq!(
+        by_path["filters.comp_vec.vectors"].suggestion.as_deref(),
+        Some("use the 3-component vector array \"velocity\" directly")
+    );
+    assert!(by_path.contains_key("filters.bad_params.scale_by"));
+    assert!(by_path.contains_key("filters.bad_params.scale_factor"));
+    assert!(by_path.contains_key("filters.bad_params.every"));
+    assert!(
+        by_path["filters.surf_input.input"]
+            .message
+            .contains("requires a volume dataset input")
+    );
+
+    assert!(!by_path.contains_key("filters.good_glyphs"));
+    assert!(!by_path.contains_key("filters.good_glyphs.vectors"));
+    assert!(!by_path.contains_key("view.show[0].color_by"));
+    assert!(!by_path.contains_key("view.show[1].color_by"));
+    assert!(!by_path.contains_key("view.show[2].color_by"));
+}

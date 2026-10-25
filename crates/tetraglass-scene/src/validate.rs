@@ -17,8 +17,9 @@ use tetraglass_core::{
 use tetraglass_io::detect_format_from_extension;
 
 use crate::{
-    ArrayAssociation, BackgroundSpec, ColorSpec, Filter, ParsedArrayRef, RangeSpec, Representation,
-    ResolvedComponent, SCENE_VERSION, Scene, StreamlineSeedsSpec, TimeSelector,
+    ArrayAssociation, BackgroundSpec, ColorSpec, Filter, GlyphScaleBySpec, ParsedArrayRef,
+    RangeSpec, Representation, ResolvedComponent, SCENE_VERSION, Scene, StreamlineSeedsSpec,
+    TimeSelector,
 };
 
 /// Metadata for a single attribute array used during semantic validation.
@@ -365,6 +366,7 @@ fn validate_impl(
                 | Filter::Clip { .. }
                 | Filter::Threshold { .. }
                 | Filter::Streamlines { .. }
+                | Filter::Glyphs { .. }
         ) && matches!(
             scene.filters.get(input),
             Some(
@@ -372,6 +374,7 @@ fn validate_impl(
                     | Filter::Slice { .. }
                     | Filter::Contour { .. }
                     | Filter::Streamlines { .. }
+                    | Filter::Glyphs { .. }
             )
         ) {
             let kind = match filter {
@@ -379,6 +382,7 @@ fn validate_impl(
                 Filter::Clip { .. } => "clip",
                 Filter::Threshold { .. } => "threshold",
                 Filter::Streamlines { .. } => "streamlines",
+                Filter::Glyphs { .. } => "glyphs",
                 _ => "slice",
             };
             let suggestion = resolve_root_source(name, &scene.sources, &scene.filters)
@@ -527,6 +531,44 @@ fn validate_impl(
                     ));
                 }
             }
+            Filter::Glyphs {
+                scale_by,
+                scale_factor,
+                every,
+                ..
+            } => {
+                if *every == 0 {
+                    issues.push(ValidationIssue::new(
+                        format!("filters.{name}.every"),
+                        "glyph every stride must be at least 1, got 0",
+                        Some("use a positive integer stride such as 1 or 4".to_string()),
+                    ));
+                }
+                if let GlyphScaleBySpec::Factor(v) = scale_by
+                    && (!v.is_finite() || *v <= 0.0)
+                {
+                    issues.push(ValidationIssue::new(
+                        format!("filters.{name}.scale_by"),
+                        format!("glyph scale_by factor must be positive, got {v}"),
+                        Some(
+                            "use \"magnitude\" or a positive world-space size such as 0.1"
+                                .to_string(),
+                        ),
+                    ));
+                }
+                if let Some(sf) = scale_factor
+                    && (!sf.is_finite() || *sf <= 0.0)
+                {
+                    issues.push(ValidationIssue::new(
+                        format!("filters.{name}.scale_factor"),
+                        format!("glyph scale_factor must be positive, got {sf}"),
+                        Some(
+                            "omit scale_factor for the default or specify a positive multiplier"
+                                .to_string(),
+                        ),
+                    ));
+                }
+            }
         }
     }
 
@@ -549,6 +591,8 @@ fn validate_impl(
                 let mut filter_meta = meta.clone();
                 if matches!(filter, Filter::Streamlines { .. }) {
                     augment_streamline_metadata(&mut filter_meta);
+                } else if matches!(filter, Filter::Glyphs { .. }) {
+                    augment_glyph_metadata(&mut filter_meta);
                 }
                 map.insert(filter_name.as_str(), filter_meta);
             }
@@ -556,7 +600,7 @@ fn validate_impl(
         map
     });
 
-    // Validate filter field references (such as `contour.field`, `threshold.field`, and `streamlines.vectors`) against resolved dataset metadata.
+    // Validate filter field references (such as `contour.field`, `threshold.field`, `streamlines.vectors`, and `glyphs.vectors`) against resolved dataset metadata.
     for (name, filter) in &scene.filters {
         match filter {
             Filter::Contour { input, field, .. } => {
@@ -575,7 +619,27 @@ fn validate_impl(
                 let dataset_meta = resolved_datasets
                     .as_ref()
                     .and_then(|map| map.get(input.as_str()));
-                validate_streamlines_vectors(name, vectors, input, dataset_meta, &mut issues);
+                validate_vector_array_field(
+                    "streamlines",
+                    name,
+                    vectors,
+                    input,
+                    dataset_meta,
+                    &mut issues,
+                );
+            }
+            Filter::Glyphs { input, vectors, .. } => {
+                let dataset_meta = resolved_datasets
+                    .as_ref()
+                    .and_then(|map| map.get(input.as_str()));
+                validate_vector_array_field(
+                    "glyphs",
+                    name,
+                    vectors,
+                    input,
+                    dataset_meta,
+                    &mut issues,
+                );
             }
             _ => {}
         }
@@ -1249,7 +1313,24 @@ fn augment_streamline_metadata(meta: &mut DatasetMetadata) {
         .or_insert(synthetic_scalar);
 }
 
-fn validate_streamlines_vectors(
+fn augment_glyph_metadata(meta: &mut DatasetMetadata) {
+    // Glyphs replicate source cell arrays onto glyph vertices (`point_data`) and
+    // attach `"glyph_magnitude"` in `point_data`.
+    for (cell_name, cell_meta) in meta.cell_arrays.clone() {
+        meta.point_arrays.entry(cell_name).or_insert(cell_meta);
+    }
+    let synthetic_scalar = ArrayMetadata {
+        components: ComponentCount::Scalar,
+        component_ranges: vec![Some(ValueRange { min: 0.0, max: 1.0 })],
+        magnitude_range: Some(ValueRange { min: 0.0, max: 1.0 }),
+    };
+    meta.point_arrays
+        .entry("glyph_magnitude".to_string())
+        .or_insert(synthetic_scalar);
+}
+
+fn validate_vector_array_field(
+    filter_kind: &str,
     filter_name: &str,
     raw: &str,
     input_name: &str,
@@ -1279,7 +1360,7 @@ fn validate_streamlines_vectors(
         issues.push(ValidationIssue::new(
             &vectors_path,
             format!(
-                "streamlines vectors reference \"{raw}\" must not specify a component selector \":{comp}\""
+                "{filter_kind} vectors reference \"{raw}\" must not specify a component selector \":{comp}\""
             ),
             Some(format!("use the 3-component vector array \"{fixed}\" directly")),
         ));
@@ -1371,7 +1452,7 @@ fn validate_streamlines_vectors(
             }
         }
         let suggestion = if vec_candidates.is_empty() {
-            Some("streamlines require a 3-component vector array".to_string())
+            Some(format!("{filter_kind} require a 3-component vector array"))
         } else {
             Some(format!(
                 "use a 3-component vector array such as {}",
@@ -1381,7 +1462,7 @@ fn validate_streamlines_vectors(
         issues.push(ValidationIssue::new(
             &vectors_path,
             format!(
-                "streamlines vectors array \"{}\" on \"{input_name}\" has {} component(s), expected 3",
+                "{filter_kind} vectors array \"{}\" on \"{input_name}\" has {} component(s), expected 3",
                 parsed.name,
                 array_meta.components.as_usize()
             ),

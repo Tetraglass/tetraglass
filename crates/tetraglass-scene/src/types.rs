@@ -331,6 +331,74 @@ impl StreamlineSeedsSpec {
     }
 }
 
+/// Geometric shape for vector glyphs (`filters.<name>.shape`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GlyphShapeSpec {
+    /// Cylindrical shaft with a conical tip oriented along the vector (default).
+    #[default]
+    Arrow,
+    /// Circular cone with base at the sample point and apex oriented along the vector.
+    Cone,
+    /// UV sphere centered at the sample point.
+    Sphere,
+}
+
+impl From<GlyphShapeSpec> for tetraglass_filters::GlyphShape {
+    fn from(shape: GlyphShapeSpec) -> Self {
+        match shape {
+            GlyphShapeSpec::Arrow => Self::Arrow,
+            GlyphShapeSpec::Cone => Self::Cone,
+            GlyphShapeSpec::Sphere => Self::Sphere,
+        }
+    }
+}
+
+/// Named scaling preset for [`GlyphScaleBySpec`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GlyphScalePreset {
+    /// Scale glyph size proportionally to the local vector magnitude `|v|` (`"magnitude"`).
+    #[default]
+    Magnitude,
+}
+
+/// Glyph scaling specification (`"magnitude"` or a fixed positive size in world units).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum GlyphScaleBySpec {
+    /// Named scaling preset (`"magnitude"`).
+    Preset(GlyphScalePreset),
+    /// Uniform world-space base size (`> 0.0`) for all glyphs.
+    Factor(f64),
+}
+
+impl Default for GlyphScaleBySpec {
+    fn default() -> Self {
+        Self::Preset(GlyphScalePreset::Magnitude)
+    }
+}
+
+impl GlyphScaleBySpec {
+    /// Scale proportionally to vector magnitude (`"magnitude"`).
+    pub const MAGNITUDE: Self = Self::Preset(GlyphScalePreset::Magnitude);
+
+    /// Creates a fixed uniform world-space size (`> 0.0`).
+    #[must_use]
+    pub const fn fixed(size: f64) -> Self {
+        Self::Factor(size)
+    }
+}
+
+impl From<GlyphScaleBySpec> for tetraglass_filters::GlyphScaleMode {
+    fn from(spec: GlyphScaleBySpec) -> Self {
+        match spec {
+            GlyphScaleBySpec::Preset(GlyphScalePreset::Magnitude) => Self::Magnitude,
+            GlyphScaleBySpec::Factor(v) => Self::Fixed(v),
+        }
+    }
+}
+
 /// Visualization filter definition (`filters.<name>`).
 ///
 /// Internally tagged by `"type"`. Milestone M1 implements `"surface"`, M2 adds `"slice"`,
@@ -444,6 +512,32 @@ pub enum Filter {
         /// Defaults to `0.012 * bounds.diagonal()`.
         #[serde(default = "default_none_f64")]
         tube_radius: Option<f64>,
+    },
+
+    /// Instantiates oriented and scaled 3D glyphs (`"arrow"`, `"cone"`, or `"sphere"`) from a 3-component vector field (`"glyphs"`).
+    #[serde(rename_all = "snake_case")]
+    Glyphs {
+        /// Name of the input source or filter.
+        input: String,
+
+        /// Vector attribute array reference (`"[point:|cell:]<array>"`, 3 components) to orient and scale glyphs.
+        vectors: String,
+
+        /// Glyph geometry shape: `"arrow"` (default), `"cone"`, or `"sphere"`.
+        #[serde(default = "default_glyph_shape")]
+        shape: GlyphShapeSpec,
+
+        /// Glyph sizing mode: `"magnitude"` (default) or a fixed positive world-space size.
+        #[serde(default = "default_glyph_scale_by")]
+        scale_by: GlyphScaleBySpec,
+
+        /// Optional positive multiplier applied to the glyph size (`> 0.0`).
+        #[serde(default = "default_none_f64")]
+        scale_factor: Option<f64>,
+
+        /// Subsampling stride (`>= 1`, default: `1`).
+        #[serde(default = "default_glyph_every")]
+        every: usize,
     },
 }
 
@@ -577,6 +671,19 @@ impl Filter {
         }
     }
 
+    /// Creates a [`Filter::Glyphs`] reading from `input` on `vectors` with default arrow shape, magnitude scaling, and stride `1`.
+    #[must_use]
+    pub fn glyphs(input: impl Into<String>, vectors: impl Into<String>) -> Self {
+        Self::Glyphs {
+            input: input.into(),
+            vectors: vectors.into(),
+            shape: default_glyph_shape(),
+            scale_by: default_glyph_scale_by(),
+            scale_factor: None,
+            every: default_glyph_every(),
+        }
+    }
+
     /// Returns the name of the upstream source or filter that feeds this filter.
     #[must_use]
     pub fn input(&self) -> &str {
@@ -586,7 +693,8 @@ impl Filter {
             | Self::Contour { input, .. }
             | Self::Clip { input, .. }
             | Self::Threshold { input, .. }
-            | Self::Streamlines { input, .. } => input,
+            | Self::Streamlines { input, .. }
+            | Self::Glyphs { input, .. } => input,
         }
     }
 }
@@ -1322,6 +1430,18 @@ const fn default_streamline_direction() -> StreamlineDirectionSpec {
 
 const fn default_streamline_integrator() -> StreamlineIntegratorSpec {
     StreamlineIntegratorSpec::Rk45
+}
+
+const fn default_glyph_shape() -> GlyphShapeSpec {
+    GlyphShapeSpec::Arrow
+}
+
+const fn default_glyph_scale_by() -> GlyphScaleBySpec {
+    GlyphScaleBySpec::Preset(GlyphScalePreset::Magnitude)
+}
+
+const fn default_glyph_every() -> usize {
+    1
 }
 
 const fn default_representation_style() -> RepresentationStyle {

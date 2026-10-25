@@ -75,7 +75,7 @@ Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 complete (2026-
 - [x] **M4.1 Cell locator.** BVH over linearized tets for point location.
 - [x] **M4.2a Streamline filter, RK4/RK45 integrators, seeds, and tube geometry.** `PolylineSet` and `to_tube_surface` in `tetraglass-core`; `streamlines` filter in `tetraglass-filters` with point, line, and plane seeds, fixed-step RK4 and adaptive Dormand-Prince RK45 integration (`forward`, `backward`, `both`), `TetLocator::locate_with_hint` stepping, point/cell attribute interpolation, and analytic/all-cell-family/determinism tests (`/add-filter`).
 - [x] **M4.2b Streamline scene integration, line/tube styles, and gallery scene.** `Filter::Streamlines` and `"lines"` / `"tubes"` representation styles in `tetraglass-scene`, semantic validation, colormapped line/tube rendering in `tetraglass-render`, JSON Schema snapshot, `docs/scene-format.md`, and streamline gallery scene with baseline (`/author-scene`, `/render-check`).
-- [ ] **M4.3 Glyphs.** Instanced arrows, cones and spheres, oriented and scaled by a vector.
+- [x] **M4.3 Glyphs.** Instanced arrows, cones and spheres, oriented and scaled by a vector.
 - [ ] **M4.4 Volume rendering.** Resample to a regular grid; GPU ray marching; transfer function editor in the viewer.
 - [ ] **M4.5 Animation export.** PNG sequences from the rasterizer and frame ranges through Cycles.
 - [ ] **M4.6 Schema freeze.** Scene schema v1 final, migration tests from earlier drafts.

@@ -483,6 +483,7 @@ fn gallery_scenes_and_author_scene_skill_example_validate_and_match_baselines() 
         "clip",
         "threshold",
         "streamlines",
+        "glyphs",
     ];
 
     let mut failures = Vec::new();
@@ -691,6 +692,7 @@ fn mdbook_guide_and_gallery_cover_all_filters_and_chapters_exist() {
         "clip",
         "threshold",
         "streamlines",
+        "glyphs",
     ] {
         assert!(
             seen_filter_types.contains(expected_filter),

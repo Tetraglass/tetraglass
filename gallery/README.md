@@ -14,3 +14,4 @@ Reproducible scene files rendered in CI and compared against `tests/baselines/`.
 | `clip.json` | Exact plane `clip` (`normal: [1.0, -0.8, 0.9]`, `keep: "back"`) of `hex_linear.vtu` colored by `linear` with `surface_with_edges` inside a `silver` outer element wireframe. |
 | `threshold.json` | Whole-cell `threshold` (`field: "linear"`, `min: 0.0`, `max: 9.0`) on `hex_linear.vtu` keeping 5 of 8 hexahedra with `surface_with_edges` inside a `silver` outer element wireframe. |
 | `streamlines.json` | `streamlines` (`vectors: "velocity"`, `4x4` plane seed grid, `"direction": "both"`, `"integrator": "rk45"`) on `hex_linear.vtu` rendered as shaded `"tubes"` colored by `velocity:magnitude` with Viridis inside a `silver` outer element wireframe. |
+| `glyphs.json` | `glyphs` (`vectors: "velocity"`, `"shape": "arrow"`, `"scale_by": "magnitude"`) on `hex_linear.vtu` colored by `velocity:magnitude` with Viridis inside a `silver` outer element wireframe. |

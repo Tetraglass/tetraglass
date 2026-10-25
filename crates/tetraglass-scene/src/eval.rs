@@ -16,18 +16,20 @@ use tetraglass_core::{
     TimeSeries, UnstructuredGrid, ValueRange,
 };
 use tetraglass_filters::{
-    ClipParams, ContourComponent, ContourParams, DEFAULT_SUBDIVISIONS, LinearizeParams,
-    SliceParams, StreamlineParams, StreamlineSeeds, TetLocator, ThresholdAssociation,
-    ThresholdComponent, ThresholdParams, clip, contour, extract_external_surface_with_subdivisions,
-    extract_tet_view_surface, linearize, slice, streamlines_with_locator, threshold,
+    ClipParams, ContourComponent, ContourParams, DEFAULT_SUBDIVISIONS, GlyphAssociation,
+    GlyphParams, GlyphScaleMode, GlyphShape, LinearizeParams, SliceParams, StreamlineParams,
+    StreamlineSeeds, TetLocator, ThresholdAssociation, ThresholdComponent, ThresholdParams, clip,
+    contour, extract_external_surface_with_subdivisions, extract_tet_view_surface, glyphs,
+    linearize, slice, streamlines_with_locator, threshold,
 };
 use tetraglass_io::IoError;
 
 use crate::{
     ArrayAssociation, ClipKeep, ClipMode, ColorbarSpec, ColormapName, DatasetMetadata, Filter,
-    ParsedArrayRef, RangePreset, RangeSpec, Representation, RepresentationStyle, ResolvedComponent,
-    Scene, SceneError, StreamlineDirectionSpec, StreamlineIntegratorSpec, StreamlineSeedsSpec,
-    TimeSelector, ValidationIssue, ValidationReport, validate_scene_with_metadata,
+    GlyphScaleBySpec, GlyphScalePreset, GlyphShapeSpec, ParsedArrayRef, RangePreset, RangeSpec,
+    Representation, RepresentationStyle, ResolvedComponent, Scene, SceneError,
+    StreamlineDirectionSpec, StreamlineIntegratorSpec, StreamlineSeedsSpec, TimeSelector,
+    ValidationIssue, ValidationReport, validate_scene_with_metadata,
 };
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
@@ -411,6 +413,41 @@ fn hash_streamline_surface(
         | RepresentationStyle::Volume => 2u8,
     };
     h.write_u8(style_group);
+    PipelineHash(h.finish())
+}
+
+fn hash_glyphs_filter(
+    upstream_hash: PipelineHash,
+    vectors: &str,
+    shape: GlyphShapeSpec,
+    scale_by: GlyphScaleBySpec,
+    scale_factor: Option<f64>,
+    every: usize,
+) -> PipelineHash {
+    let mut h = FnvHasher::new();
+    h.write_str("glyphs");
+    h.write_u64(upstream_hash.0);
+    h.write_str(vectors);
+    h.write_u8(match shape {
+        GlyphShapeSpec::Arrow => 0,
+        GlyphShapeSpec::Cone => 1,
+        GlyphShapeSpec::Sphere => 2,
+    });
+    match scale_by {
+        GlyphScaleBySpec::Preset(GlyphScalePreset::Magnitude) => h.write_u8(0),
+        GlyphScaleBySpec::Factor(v) => {
+            h.write_u8(1);
+            h.write_f64(v);
+        }
+    }
+    match scale_factor {
+        Some(sf) => {
+            h.write_u8(1);
+            h.write_f64(sf);
+        }
+        None => h.write_u8(0),
+    }
+    h.write_usize(every);
     PipelineHash(h.finish())
 }
 
@@ -806,6 +843,37 @@ impl SceneEvaluator {
                             tube_radius: *tube_radius,
                         },
                     ));
+                }
+                Filter::Glyphs {
+                    input,
+                    vectors,
+                    shape,
+                    scale_by,
+                    scale_factor,
+                    every,
+                } => {
+                    let (upstream_hash, upstream_data) = self.evaluate_dataset(scene, input)?;
+                    let glyphs_hash = hash_glyphs_filter(
+                        upstream_hash,
+                        vectors,
+                        *shape,
+                        *scale_by,
+                        *scale_factor,
+                        *every,
+                    );
+                    let subdivisions = resolve_source_subdivisions(scene, input);
+                    let surface = self.get_or_build_glyphs_surface(
+                        glyphs_hash,
+                        upstream_hash,
+                        upstream_data,
+                        subdivisions,
+                        vectors,
+                        *shape,
+                        *scale_by,
+                        *scale_factor,
+                        *every,
+                    )?;
+                    return Ok((glyphs_hash, EvaluatedDataset::Surface(surface)));
                 }
             }
         }
@@ -1297,6 +1365,73 @@ impl SceneEvaluator {
         self.streamline_cache
             .insert(streamline_hash, Arc::clone(&polylines));
         Ok(polylines)
+    }
+
+    #[allow(clippy::too_many_arguments)] // Reason: passes hash, upstream data, subdivisions, and glyph parameters together
+    fn get_or_build_glyphs_surface(
+        &mut self,
+        glyphs_hash: PipelineHash,
+        upstream_hash: PipelineHash,
+        upstream_data: EvaluatedDataset,
+        subdivisions: u8,
+        raw_vectors: &str,
+        shape: GlyphShapeSpec,
+        scale_by: GlyphScaleBySpec,
+        scale_factor: Option<f64>,
+        every: usize,
+    ) -> Result<Arc<SurfaceMesh>, SceneError> {
+        if let Some(cached) = self.surface_cache.get(&glyphs_hash) {
+            self.cache_hits += 1;
+            return Ok(Arc::clone(cached));
+        }
+
+        let tet_view =
+            self.resolve_volume_tet_view(upstream_hash, upstream_data, subdivisions, "glyphs")?;
+
+        let parsed = ParsedArrayRef::parse(raw_vectors)?;
+        if let Some(comp) = parsed.component {
+            return Err(SceneError::InvalidArrayRef {
+                reference: raw_vectors.to_string(),
+                reason: format!(
+                    "glyphs vectors reference must not specify a component selector `:{comp}`"
+                ),
+            });
+        }
+        let assoc = match parsed.association {
+            Some(ArrayAssociation::Point) => {
+                if tet_view.point_data().get(&parsed.name).is_none() {
+                    return Err(SceneError::InvalidArrayRef {
+                        reference: raw_vectors.to_string(),
+                        reason: format!("missing point array `{}`", parsed.name),
+                    });
+                }
+                GlyphAssociation::Point
+            }
+            Some(ArrayAssociation::Cell) => {
+                if tet_view.cell_data().get(&parsed.name).is_none() {
+                    return Err(SceneError::InvalidArrayRef {
+                        reference: raw_vectors.to_string(),
+                        reason: format!("missing cell array `{}`", parsed.name),
+                    });
+                }
+                GlyphAssociation::Cell
+            }
+            None => GlyphAssociation::Auto,
+        };
+
+        let mut params = GlyphParams::new(parsed.name)
+            .with_association(assoc)
+            .shape(GlyphShape::from(shape))
+            .scale_by(GlyphScaleMode::from(scale_by))
+            .every(every);
+        if let Some(sf) = scale_factor {
+            params = params.scale_factor(sf);
+        }
+
+        self.filter_executions += 1;
+        let surface = Arc::new(glyphs(&tet_view, &params)?);
+        self.surface_cache.insert(glyphs_hash, Arc::clone(&surface));
+        Ok(surface)
     }
 
     /// Validates `scene` against the loaded sources (resolving any [`TimeSeries`] sources at

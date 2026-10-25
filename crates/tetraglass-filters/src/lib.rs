@@ -48,6 +48,7 @@
 mod basis;
 mod clip;
 mod contour;
+mod glyphs;
 mod linearize;
 mod locator;
 mod marching_tets;
@@ -59,6 +60,11 @@ mod threshold;
 pub use clip::{ClipKeep, ClipMode, ClipParams, clip, clip_grid, clip_with_chunk_size};
 pub use contour::{
     ContourComponent, ContourParams, contour, contour_grid, contour_with_chunk_size,
+};
+pub use glyphs::{
+    DEFAULT_GLYPH_CHUNK_SIZE, DEFAULT_GLYPH_LENGTH_FRACTION, GlyphAssociation, GlyphInstance,
+    GlyphParams, GlyphScaleMode, GlyphShape, glyph_instances, glyphs, glyphs_grid,
+    glyphs_with_chunk_size,
 };
 pub use linearize::{DEFAULT_SUBDIVISIONS, LinearizeParams, linearize, linearize_default};
 pub use locator::{

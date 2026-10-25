@@ -594,6 +594,56 @@
             "vectors",
             "seeds"
           ]
+        },
+        {
+          "description": "Instantiates oriented and scaled 3D glyphs (`\"arrow\"`, `\"cone\"`, or `\"sphere\"`) from a 3-component vector field (`\"glyphs\"`).",
+          "type": "object",
+          "properties": {
+            "every": {
+              "description": "Subsampling stride (`>= 1`, default: `1`).",
+              "type": "integer",
+              "format": "uint",
+              "default": 1,
+              "minimum": 0
+            },
+            "input": {
+              "description": "Name of the input source or filter.",
+              "type": "string"
+            },
+            "scale_by": {
+              "description": "Glyph sizing mode: `\"magnitude\"` (default) or a fixed positive world-space size.",
+              "$ref": "#/$defs/GlyphScaleBySpec",
+              "default": "magnitude"
+            },
+            "scale_factor": {
+              "description": "Optional positive multiplier applied to the glyph size (`> 0.0`).",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "default": null
+            },
+            "shape": {
+              "description": "Glyph geometry shape: `\"arrow\"` (default), `\"cone\"`, or `\"sphere\"`.",
+              "$ref": "#/$defs/GlyphShapeSpec",
+              "default": "arrow"
+            },
+            "type": {
+              "type": "string",
+              "const": "glyphs"
+            },
+            "vectors": {
+              "description": "Vector attribute array reference (`\"[point:|cell:]<array>\"`, 3 components) to orient and scale glyphs.",
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "input",
+            "vectors"
+          ]
         }
       ]
     },
@@ -619,6 +669,50 @@
         "from",
         "to",
         "pattern"
+      ]
+    },
+    "GlyphScaleBySpec": {
+      "description": "Glyph scaling specification (`\"magnitude\"` or a fixed positive size in world units).",
+      "anyOf": [
+        {
+          "description": "Named scaling preset (`\"magnitude\"`).",
+          "$ref": "#/$defs/GlyphScalePreset"
+        },
+        {
+          "description": "Uniform world-space base size (`> 0.0`) for all glyphs.",
+          "type": "number",
+          "format": "double"
+        }
+      ]
+    },
+    "GlyphScalePreset": {
+      "description": "Named scaling preset for [`GlyphScaleBySpec`].",
+      "oneOf": [
+        {
+          "description": "Scale glyph size proportionally to the local vector magnitude `|v|` (`\"magnitude\"`).",
+          "type": "string",
+          "const": "magnitude"
+        }
+      ]
+    },
+    "GlyphShapeSpec": {
+      "description": "Geometric shape for vector glyphs (`filters.<name>.shape`).",
+      "oneOf": [
+        {
+          "description": "Cylindrical shaft with a conical tip oriented along the vector (default).",
+          "type": "string",
+          "const": "arrow"
+        },
+        {
+          "description": "Circular cone with base at the sample point and apex oriented along the vector.",
+          "type": "string",
+          "const": "cone"
+        },
+        {
+          "description": "UV sphere centered at the sample point.",
+          "type": "string",
+          "const": "sphere"
+        }
       ]
     },
     "LightingPreset": {

@@ -672,3 +672,69 @@ fn streamlines_filter_evaluates_tubes_lines_and_wireframe_and_caches_results() {
     assert!(Arc::ptr_eq(lines_surf, &eval2.representations[1].surface));
     assert!(Arc::ptr_eq(wire_surf, &eval2.representations[2].surface));
 }
+
+#[test]
+fn glyphs_filter_evaluates_shapes_and_caches_results() {
+    let hex = read_vtu_from_path(testdata_vtu("hex_linear.vtu")).expect("load hex_linear.vtu");
+    let mut evaluator = SceneEvaluator::new();
+    evaluator.insert_source("hex", hex);
+
+    let mut scene = Scene::from_json_str(
+        r#"{
+            "version": 1,
+            "sources": {
+                "hex": { "file": "testdata/vtk/hex_linear.vtu" }
+            },
+            "filters": {
+                "arrows": {
+                    "type": "glyphs",
+                    "input": "hex",
+                    "vectors": "velocity",
+                    "shape": "arrow",
+                    "scale_by": "magnitude",
+                    "every": 2
+                },
+                "cones": {
+                    "type": "glyphs",
+                    "input": "hex",
+                    "vectors": "velocity",
+                    "shape": "cone",
+                    "scale_by": 0.25,
+                    "every": 3
+                }
+            },
+            "view": {
+                "show": [
+                    { "input": "arrows", "color_by": "velocity:magnitude" },
+                    { "input": "cones", "color_by": "glyph_magnitude" }
+                ]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let eval1 = evaluator
+        .evaluate_scene(&scene)
+        .expect("evaluate glyphs scene");
+    assert_eq!(eval1.representations.len(), 2);
+    assert_eq!(evaluator.filter_executions(), 2);
+    assert_eq!(evaluator.cache_hits(), 0);
+
+    let arrows_surf = &eval1.representations[0].surface;
+    let cones_surf = &eval1.representations[1].surface;
+    assert!(arrows_surf.num_triangles() > 0);
+    assert!(cones_surf.num_triangles() > 0);
+    assert!(arrows_surf.total_area() > 0.0);
+    assert!(cones_surf.total_area() > 0.0);
+
+    // Changing colormap/camera hits the surface cache without re-running glyphs.
+    scene.view.show[0].colormap = ColormapName::Turbo;
+    scene.view.camera.azimuth = 45.0;
+    let eval2 = evaluator
+        .evaluate_scene(&scene)
+        .expect("re-evaluate glyphs scene");
+    assert_eq!(evaluator.filter_executions(), 2);
+    assert_eq!(evaluator.cache_hits(), 2);
+    assert!(Arc::ptr_eq(arrows_surf, &eval2.representations[0].surface));
+    assert!(Arc::ptr_eq(cones_surf, &eval2.representations[1].surface));
+}

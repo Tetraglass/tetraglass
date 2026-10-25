@@ -116,6 +116,13 @@ pub enum FilterError {
         /// Human-readable description of why the parameters are invalid.
         reason: &'static str,
     },
+
+    /// Glyph filter parameters are invalid (zero `every` stride or non-positive scale factor).
+    #[error("invalid glyph parameters: {reason}")]
+    InvalidGlyphParams {
+        /// Human-readable description of why the parameters are invalid.
+        reason: &'static str,
+    },
 }
 
 #[inline]

@@ -55,11 +55,11 @@ pub use types::{
     BackgroundGradient, BackgroundSpec, CameraConfig, ClipKeep, ClipMode, ColorSpec,
     ColorbarOptions, ColorbarPosition, ColorbarSpec, ColormapName, CyclesConfig,
     DEFAULT_CYCLES_SAMPLES, DEFAULT_LINEARIZE_LEVEL, DEFAULT_MSAA_SAMPLES, DEFAULT_OUTPUT_SIZE,
-    DEFAULT_POINT_SIZE, DEFAULT_VIEW_ANGLE_DEGREES, Filter, FramesConfig, LightingPreset, Output,
-    ProjectionKind, RangePreset, RangeSpec, RenderEngine, Representation, RepresentationStyle,
-    SCENE_VERSION, Scene, Source, SourceFormat, StreamlineDirectionSpec, StreamlineIntegratorSpec,
-    StreamlineLineSeedSpec, StreamlinePlaneSeedSpec, StreamlineSeedsSpec, TimePreset, TimeSelector,
-    TimeStepIndex, View,
+    DEFAULT_POINT_SIZE, DEFAULT_VIEW_ANGLE_DEGREES, Filter, FramesConfig, GlyphScaleBySpec,
+    GlyphScalePreset, GlyphShapeSpec, LightingPreset, Output, ProjectionKind, RangePreset,
+    RangeSpec, RenderEngine, Representation, RepresentationStyle, SCENE_VERSION, Scene, Source,
+    SourceFormat, StreamlineDirectionSpec, StreamlineIntegratorSpec, StreamlineLineSeedSpec,
+    StreamlinePlaneSeedSpec, StreamlineSeedsSpec, TimePreset, TimeSelector, TimeStepIndex, View,
 };
 pub use validate::{
     ArrayMetadata, DatasetMetadata, ValidationIssue, ValidationReport, closest_match,
@@ -785,5 +785,74 @@ mod tests {
             "view": { "show": [{ "input": "bad" }] }
         }"#;
         assert!(Scene::from_json_str(bad_seed_json).is_err());
+    }
+
+    #[test]
+    fn parses_glyphs_filter_shapes_and_scale_modes() {
+        let json = r#"{
+            "version": 1,
+            "sources": {
+                "flow": { "file": "results.vtu" }
+            },
+            "filters": {
+                "arrows_default": {
+                    "type": "glyphs",
+                    "input": "flow",
+                    "vectors": "velocity"
+                },
+                "cones_fixed": {
+                    "type": "glyphs",
+                    "input": "flow",
+                    "vectors": "point:velocity",
+                    "shape": "cone",
+                    "scale_by": 0.25,
+                    "scale_factor": 1.5,
+                    "every": 4
+                },
+                "spheres_mag": {
+                    "type": "glyphs",
+                    "input": "flow",
+                    "vectors": "velocity",
+                    "shape": "sphere",
+                    "scale_by": "magnitude",
+                    "every": 2
+                }
+            },
+            "view": {
+                "show": [
+                    { "input": "arrows_default", "color_by": "velocity:magnitude" },
+                    { "input": "cones_fixed", "color_by": "glyph_magnitude" },
+                    { "input": "spheres_mag" }
+                ]
+            }
+        }"#;
+
+        let scene = Scene::from_json_str(json).expect("glyphs scene should parse");
+        assert_eq!(
+            scene.filters["arrows_default"],
+            Filter::glyphs("flow", "velocity")
+        );
+        assert_eq!(
+            scene.filters["cones_fixed"],
+            Filter::Glyphs {
+                input: "flow".to_string(),
+                vectors: "point:velocity".to_string(),
+                shape: GlyphShapeSpec::Cone,
+                scale_by: GlyphScaleBySpec::fixed(0.25),
+                scale_factor: Some(1.5),
+                every: 4,
+            }
+        );
+        assert_eq!(
+            scene.filters["spheres_mag"],
+            Filter::Glyphs {
+                input: "flow".to_string(),
+                vectors: "velocity".to_string(),
+                shape: GlyphShapeSpec::Sphere,
+                scale_by: GlyphScaleBySpec::MAGNITUDE,
+                scale_factor: None,
+                every: 2,
+            }
+        );
     }
 }
