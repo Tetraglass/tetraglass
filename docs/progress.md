@@ -385,3 +385,10 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-005, D-008, and D-014).
 - Dependencies added: none.
 - Follow-ups: M4.2 Streamlines (point, line and plane seeds; RK4, then adaptive RK45; lines and tubes).
+
+## 2026-10-25: M4.2a Streamline filter, RK4/RK45 integrators, seeds, and tube geometry
+- Done: split `M4.2` into `M4.2a` (core `PolylineSet` + filter/integrators/seeds/tube geometry) and `M4.2b` (scene integration, line/tube styles, and gallery scene); added `PolylineSet` and `DEFAULT_TUBE_SIDES` (`12`) in `tetraglass-core` with rotation-minimizing parallel-transport tube surface generation (`to_tube_surface`), line surface conversion (`to_line_surface`), and `.vtu`-compatible `CellType::Line` conversion (`to_unstructured_grid`); implemented `streamlines`, `streamlines_with_locator`, `streamlines_with_chunk_size`, and `streamlines_grid` (`StreamlineParams`, `StreamlineSeeds::{Point, Points, Line, Plane}`, `StreamlineDirection::{Forward, Backward, Both}`, `StreamlineIntegrator::{Rk4, Rk45}`) in `tetraglass-filters` with Dormand-Prince 5(4) adaptive step-size control, boundary step-halving, `TetLocator::locate_with_hint` acceleration, and interpolation of all point/cell arrays plus `"arc_length"`, `"integration_time"`, and `"seed_id"` (`4.89 ms` to integrate 64 `Both`-direction `RK45` streamlines and `4.71 ms` to generate `60,672` tube triangles on `600k` tets).
+- Tests: unit test `polyline_set_validates_inputs_and_builds_tubes_and_grids` and doctest in `tetraglass-core`, doctest in `crates/tetraglass-filters/src/streamlines.rs`, and integration tests in `crates/tetraglass-filters/tests/streamlines.rs` covering analytic circular flow (`velocity = [-y, x, 0]`) radius/arc-length/time conservation in `Rk4` and `Rk45`, all 6 VTK cell families and Gmsh `tet2_v41.msh`, `Point`/`Line`/`Plane` seeds, stagnation and out-of-bounds seeds, invalid parameter error cases, and chunk-parallel determinism.
+- Decisions: none (implemented per D-005, D-008, and D-014).
+- Dependencies added: none.
+- Follow-ups: M4.2b Streamline scene integration, line/tube styles, and gallery scene.

@@ -52,6 +52,7 @@ mod linearize;
 mod locator;
 mod marching_tets;
 mod slice;
+mod streamlines;
 mod surface;
 mod threshold;
 
@@ -70,11 +71,18 @@ pub use marching_tets::{
     filter_tets_by_source_cell_with_chunk_size,
 };
 pub use slice::{SliceParams, slice, slice_grid, slice_with_chunk_size};
+pub use streamlines::{
+    DEFAULT_STREAMLINE_CHUNK_SIZE, DEFAULT_STREAMLINE_ERROR_TOLERANCE,
+    DEFAULT_STREAMLINE_MAX_LENGTH_FACTOR, DEFAULT_STREAMLINE_MAX_STEPS,
+    DEFAULT_STREAMLINE_STEP_FRACTION, DEFAULT_STREAMLINE_TERMINAL_SPEED, StreamlineDirection,
+    StreamlineIntegrator, StreamlineParams, StreamlineSeeds, streamlines, streamlines_grid,
+    streamlines_with_chunk_size, streamlines_with_locator,
+};
 pub use surface::{
     FilterError, extract_external_surface, extract_external_surface_with_subdivisions,
     extract_tet_view_surface,
 };
-pub use tetraglass_core::{SurfaceMesh, TetView};
+pub use tetraglass_core::{DEFAULT_TUBE_SIDES, PolylineSet, SurfaceMesh, TetView};
 pub use threshold::{
     ThresholdAssociation, ThresholdComponent, ThresholdParams, threshold, threshold_grid,
     threshold_with_chunk_size,

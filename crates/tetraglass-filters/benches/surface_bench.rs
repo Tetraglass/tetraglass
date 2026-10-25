@@ -13,9 +13,10 @@ use tetraglass_core::{
     m2_benchmark_tet_spec,
 };
 use tetraglass_filters::{
-    ClipKeep, ClipMode, ClipParams, ContourParams, SliceParams, TetLocator, ThresholdParams, clip,
+    ClipKeep, ClipMode, ClipParams, ContourParams, SliceParams, StreamlineDirection,
+    StreamlineIntegrator, StreamlineParams, StreamlineSeeds, TetLocator, ThresholdParams, clip,
     contour, extract_external_surface, extract_tet_view_surface, linearize_default, slice,
-    threshold,
+    streamlines_with_locator, threshold,
 };
 
 fn main() {
@@ -206,6 +207,30 @@ fn main() {
     println!(
         "[BVH Cell Locator 600k tets] build: {bvh_build_ms:.2} ms ({} nodes) | 10k batch locate: {bvh_batch_ms:.2} ms | 10k hinted walk: {bvh_hint_ms:.2} ms",
         locator.num_nodes(),
+    );
+
+    // Streamlines integration + tube generation on 600k tets (`M4.2a`)
+    let t_stream = Instant::now();
+    let stream_params = StreamlineParams::new(
+        "velocity",
+        StreamlineSeeds::plane([0.5, 0.5, 0.5], [0.0, 0.0, 1.0], [0.7, 0.7], [8, 8]),
+    )
+    .direction(StreamlineDirection::Both)
+    .integrator(StreamlineIntegrator::Rk45)
+    .max_length(1.2);
+    let stream_lines =
+        streamlines_with_locator(&tet_lin, &locator, &stream_params).expect("64 streamlines");
+    let stream_ms = t_stream.elapsed().as_secs_f64() * 1000.0;
+    let t_tube = Instant::now();
+    let stream_tubes = stream_lines
+        .to_tube_surface(0.005, 12)
+        .expect("streamline tubes");
+    let tube_ms = t_tube.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "[Streamlines 600k tets (64 seeds, RK45 Both)] integrate: {stream_ms:.2} ms ({} lines, {} pts) | tube mesh: {tube_ms:.2} ms ({} tris)",
+        stream_lines.num_polylines(),
+        stream_lines.num_points(),
+        stream_tubes.num_triangles(),
     );
 
     assert!(

@@ -43,6 +43,7 @@ mod array;
 mod cell;
 mod error;
 mod grid;
+mod polyline;
 mod series;
 mod surface;
 mod synthetic;
@@ -52,6 +53,7 @@ pub use array::{ArrayBuffer, Attributes, ComponentCount, DataArray, ScalarType, 
 pub use cell::{CellType, PolyhedronFaceIter, PolyhedronFaces};
 pub use error::{CoreError, try_u32_from_i64, try_u32_from_u64, try_u32_from_usize};
 pub use grid::{BoundingBox, UnstructuredGrid};
+pub use polyline::{DEFAULT_TUBE_SIDES, PolylineSet};
 pub use series::{DEFAULT_STEP_CACHE_CAPACITY, StepLoader, TimeSeries};
 pub use surface::SurfaceMesh;
 pub use synthetic::{
@@ -608,6 +610,83 @@ mod tests {
                 cell_index: 0,
                 point_index: 9,
                 num_points: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn polyline_set_validates_inputs_and_builds_tubes_and_grids() {
+        let pts = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 3.0],
+        ];
+        let mut point_data = Attributes::new(5);
+        point_data
+            .insert(
+                "arc_length",
+                DataArray::from_f64(ComponentCount::Scalar, vec![0.0, 1.0, 2.0, 0.0, 3.0]).unwrap(),
+            )
+            .unwrap();
+        let mut cell_data = Attributes::new(2);
+        cell_data
+            .insert(
+                "seed_id",
+                DataArray::from_i32(ComponentCount::Scalar, vec![0, 1]).unwrap(),
+            )
+            .unwrap();
+
+        let lines = PolylineSet::new(
+            pts.clone(),
+            vec![3, 5],
+            vec![0, 0, 1, 2, 2],
+            vec![0, 1],
+            point_data,
+            cell_data,
+        )
+        .expect("valid 2-polyline set");
+
+        assert_eq!(lines.num_points(), 5);
+        assert_eq!(lines.num_polylines(), 2);
+        assert_eq!(lines.num_segments(), 3);
+        assert!((lines.polyline_length(0).unwrap() - 2.0).abs() < 1e-12);
+        assert!((lines.polyline_length(1).unwrap() - 3.0).abs() < 1e-12);
+        assert!((lines.total_length() - 5.0).abs() < 1e-12);
+
+        let tube = lines
+            .to_tube_surface(0.1, DEFAULT_TUBE_SIDES)
+            .expect("build tube surface");
+        assert_eq!(tube.num_points(), 5 * DEFAULT_TUBE_SIDES);
+        assert_eq!(tube.num_triangles(), 3 * DEFAULT_TUBE_SIDES * 2);
+        assert_eq!(tube.num_wireframe_edges(), 3);
+
+        let line_surf = lines.to_line_surface().expect("build line surface");
+        assert_eq!(line_surf.num_points(), 5);
+        assert_eq!(line_surf.num_triangles(), 0);
+        assert_eq!(line_surf.num_wireframe_edges(), 3);
+
+        let grid = lines.to_unstructured_grid().expect("convert to Line grid");
+        assert_eq!(grid.num_points(), 5);
+        assert_eq!(grid.num_cells(), 3);
+        assert_eq!(grid.cell_types(), &[CellType::Line; 3]);
+
+        // Reject 1-point polyline (< 2 points)
+        assert_eq!(
+            PolylineSet::new(
+                pts,
+                vec![1, 5],
+                vec![0, 0, 1, 2, 2],
+                vec![0, 1],
+                Attributes::new(5),
+                Attributes::new(2),
+            ),
+            Err(CoreError::InvalidCellNodeCount {
+                cell_index: 0,
+                cell_type: CellType::Line,
+                expected: 2,
+                actual: 1,
             })
         );
     }

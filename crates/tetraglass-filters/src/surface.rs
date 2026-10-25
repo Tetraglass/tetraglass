@@ -93,6 +93,29 @@ pub enum FilterError {
         /// Upper bound (`None` if omitted).
         max: Option<f64>,
     },
+
+    /// Requested vector array does not have 3 components (`ComponentCount::Vector3`).
+    #[error("vector array `{array}` must have 3 components, got {num_components}")]
+    NonVectorArray {
+        /// Name of the attribute array.
+        array: String,
+        /// Actual number of components in the array.
+        num_components: usize,
+    },
+
+    /// Streamline seed specification is invalid (empty, zero count, non-finite coordinates, or zero plane normal).
+    #[error("invalid streamline seeds: {reason}")]
+    InvalidStreamlineSeeds {
+        /// Human-readable description of why the seed specification is invalid.
+        reason: &'static str,
+    },
+
+    /// Streamline integration parameters are invalid (non-positive `max_length`, `step_size`, or `max_steps == 0`).
+    #[error("invalid streamline parameters: {reason}")]
+    InvalidStreamlineParams {
+        /// Human-readable description of why the parameters are invalid.
+        reason: &'static str,
+    },
 }
 
 #[inline]
