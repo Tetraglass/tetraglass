@@ -392,3 +392,14 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-005, D-008, and D-014).
 - Dependencies added: none.
 - Follow-ups: M4.2b Streamline scene integration, line/tube styles, and gallery scene.
+
+## 2026-10-25: M4.2b Streamline scene integration, line/tube styles, and gallery scene
+- Done: integrated `Filter::Streamlines` (`"type": "streamlines"`) and `"tubes"` / `"lines"` / `"wireframe"` streamline representation styles into `tetraglass-scene`:
+  - `types.rs`: added `Filter::Streamlines`, `Filter::streamlines`, `StreamlineSeedsSpec` (`Point`, `Points`, `Line`, `Plane`), `StreamlineLineSeedSpec`, `StreamlinePlaneSeedSpec`, `StreamlineDirectionSpec` (`Forward`, `Backward`, `Both`), and `StreamlineIntegratorSpec` (`Rk45`, `Rk4`) with `#[serde(deny_unknown_fields, rename_all = "snake_case")]` and `schemars::JsonSchema` derives.
+  - `validate.rs`: validated volume-input requirement, finite seed coordinates and positive counts/extents, positive `max_length` / `step_size` / `tube_radius`, 3-component vector array existence on `vectors` with edit-distance suggestions, and downstream `color_by` support for streamline-generated `"arc_length"`, `"integration_time"`, and `"seed_id"` arrays alongside interpolated source point and cell arrays.
+  - `eval.rs`: added `EvaluatedDataset::Streamlines`, `locator_cache`, `streamline_cache`, `evaluate_surface_for_style`, and style-dependent streamline surface extraction (`12`-sided tubes for `"tubes"`, thin `6`-sided colormapped lines for `"lines"`, and `wireframe_edges` with promoted per-polyline attributes for `"wireframe"`).
+  - Updated `crates/tetraglass-cli/tests/snapshots/scene-v1.schema.json`, `docs/scene-format.md`, `docs/book/src/filters.md`, `docs/book/src/gallery.md`, and `gallery/README.md`, and added `gallery/streamlines.json` with its visual regression baseline `tests/baselines/streamlines.png` (inspected per `/render-check`).
+- Tests: unit test `parses_streamlines_filter_seed_variants_and_rejects_unknown_fields` in `tetraglass-scene`, `validates_streamlines_filter_vectors_seeds_parameters_and_output_arrays` in `crates/tetraglass-scene/tests/validation.rs`, `streamlines_filter_evaluates_tubes_lines_and_wireframe_and_caches_results` in `crates/tetraglass-scene/tests/evaluation_cache.rs`, and CLI schema snapshot + gallery baseline tests in `crates/tetraglass-cli/tests/cli.rs`.
+- Decisions: none (implemented per D-004, D-008, `docs/scene-format.md`, and `.agents/rules/scene-schema.md`).
+- Dependencies added: none.
+- Follow-ups: M4.3 Glyphs (instanced arrows, cones and spheres, oriented and scaled by a vector).

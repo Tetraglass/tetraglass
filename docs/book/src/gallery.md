@@ -13,6 +13,7 @@ Every scene in [`gallery/`](../../../gallery/) is validated and rendered in CI a
 | `gallery/contour.json` | Multi-isovalue `"type": "contour"` (`values: [2.5, 5.0, 7.5, 10.0]`) colored with `turbo` inside a `silver` outer element wireframe. | `tetraglass render gallery/contour.json -o out.png` |
 | `gallery/clip.json` | Exact half-space `"type": "clip"` (`normal: [1.0, -0.8, 0.9]`, `keep: "back"`, `mode: "exact"`) with `surface_with_edges` inside a `silver` outer element wireframe. | `tetraglass render gallery/clip.json -o out.png` |
 | `gallery/threshold.json` | Whole-cell `"type": "threshold"` (`field: "linear"`, `min: 0.0`, `max: 9.0`) keeping 5 of 8 hexahedra with `surface_with_edges` inside a `silver` outer element wireframe. | `tetraglass render gallery/threshold.json -o out.png` |
+| `gallery/streamlines.json` | Bidirectional RK4(5) `"type": "streamlines"` (`vectors: "velocity"`, `4x4` plane seed grid) rendered with `"style": "tubes"` colored by `velocity:magnitude` (`viridis`) inside a `silver` outer element wireframe. | `tetraglass render gallery/streamlines.json -o out.png` |
 
 ## Filter gallery highlights
 

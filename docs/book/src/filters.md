@@ -20,6 +20,7 @@ Calling `linearize(&grid, &LinearizeParams { subdivisions })` (or `linearize_def
 | Isosurface contour | `contour` / `contour_grid` | `"contour"` | `TetView` -> `SurfaceMesh` | Extracts one or more isosurfaces `val == isovalues[k]` of a point scalar or vector component/magnitude (`ContourComponent`), interpolating every point array onto cut edges. |
 | Half-space clip | `clip` / `clip_grid` | `"clip"` | `TetView` -> `TetView` | Clips a tetrahedral volume to a half-space (`keep: "back"` or `"front"`). In `"exact"` mode, cut tetrahedra are split via conformal 1-tet / 3-tet prism decomposition; in `"crinkle"` mode, whole original source cells (`tet_source_cells`) overlapping the kept half-space are retained intact. |
 | Scalar threshold | `threshold` / `threshold_grid` | `"threshold"` | `TetView` -> `TetView` | Keeps whole original source cells (`tet_source_cells`) whose cell scalar (or all vertex scalars for point fields) satisfies `min <= val <= max` (supports one-sided and two-sided bounds). |
+| Streamlines | `streamlines` / `streamlines_grid` | `"streamlines"` | `TetView` -> `PolylineSet` (`SurfaceMesh` via `"tubes"` / `"lines"`) | Integrates streamlines through a 3-component vector field using adaptive RK4(5) or fixed-step RK4 with BVH cell location (`TetLocator`), point/line/plane seeds, interpolated point/cell attributes plus `"arc_length"`, `"integration_time"`, and `"seed_id"`, and parallel-transported tube geometry (`PolylineSet::to_tube_surface`). |
 
 ## 3. Chaining filters in JSON and Rust
 

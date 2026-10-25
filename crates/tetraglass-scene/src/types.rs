@@ -210,6 +210,127 @@ impl From<ClipMode> for tetraglass_filters::ClipMode {
     }
 }
 
+/// Integration direction for streamlines (`filters.<name>.direction`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamlineDirectionSpec {
+    /// Integrate forward along `+v(x)` (default).
+    #[default]
+    Forward,
+    /// Integrate backward along `-v(x)`.
+    Backward,
+    /// Integrate both backward and forward from each seed and join into a single polyline.
+    Both,
+}
+
+impl From<StreamlineDirectionSpec> for tetraglass_filters::StreamlineDirection {
+    fn from(direction: StreamlineDirectionSpec) -> Self {
+        match direction {
+            StreamlineDirectionSpec::Forward => Self::Forward,
+            StreamlineDirectionSpec::Backward => Self::Backward,
+            StreamlineDirectionSpec::Both => Self::Both,
+        }
+    }
+}
+
+/// Numerical ODE integrator for streamlines (`filters.<name>.integrator`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamlineIntegratorSpec {
+    /// Adaptive Dormand-Prince RK4(5) integrator (default).
+    #[default]
+    Rk45,
+    /// Fixed-step classical 4th-order Runge-Kutta integrator.
+    Rk4,
+}
+
+impl From<StreamlineIntegratorSpec> for tetraglass_filters::StreamlineIntegrator {
+    fn from(integrator: StreamlineIntegratorSpec) -> Self {
+        match integrator {
+            StreamlineIntegratorSpec::Rk45 => Self::Rk45,
+            StreamlineIntegratorSpec::Rk4 => Self::Rk4,
+        }
+    }
+}
+
+/// Uniform line-segment seed generator (`{ "line": { "from": [...], "to": [...], "count": n } }`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct StreamlineLineSeedSpec {
+    /// Start point `[x, y, z]` of the seed segment.
+    pub from: [f64; 3],
+    /// End point `[x, y, z]` of the seed segment.
+    pub to: [f64; 3],
+    /// Number of seed points (`>= 1`) uniformly spaced along the segment.
+    pub count: usize,
+}
+
+/// Rectangular plane-grid seed generator (`{ "plane": { "origin": [...], "normal": [...], "extent": [w, h], "count": [nu, nv] } }`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct StreamlinePlaneSeedSpec {
+    /// Optional center `[x, y, z]` of the seed plane. Defaults to the center of the input dataset bounds when omitted.
+    #[serde(default = "default_none_vec3")]
+    pub origin: Option<[f64; 3]>,
+    /// Plane normal `[nx, ny, nz]` (must be non-zero; normalized automatically).
+    pub normal: [f64; 3],
+    /// Optional width and height `[w, h]` of the seed grid on the plane. Defaults to `[0.5 * diag, 0.5 * diag]` when omitted.
+    #[serde(default = "default_none_vec2")]
+    pub extent: Option<[f64; 2]>,
+    /// Grid resolution `[nu, nv]` along the two in-plane axes (`nu >= 1`, `nv >= 1`).
+    pub count: [usize; 2],
+}
+
+/// Seed specification for streamline integration (`filters.<name>.seeds`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum StreamlineSeedsSpec {
+    /// A single seed point `[x, y, z]`.
+    Point([f64; 3]),
+    /// An explicit list of seed points `[[x, y, z], ...]`.
+    Points(Vec<[f64; 3]>),
+    /// `count` seed points uniformly spaced along the segment from `from` to `to`.
+    Line(StreamlineLineSeedSpec),
+    /// A `count[0] * count[1]` rectangular grid of seed points on a plane.
+    Plane(StreamlinePlaneSeedSpec),
+}
+
+impl StreamlineSeedsSpec {
+    /// Creates a single-point seed generator (`{ "point": [x, y, z] }`).
+    #[must_use]
+    pub const fn point(pt: [f64; 3]) -> Self {
+        Self::Point(pt)
+    }
+
+    /// Creates an explicit point-list seed generator (`{ "points": [[x, y, z], ...] }`).
+    #[must_use]
+    pub const fn points(pts: Vec<[f64; 3]>) -> Self {
+        Self::Points(pts)
+    }
+
+    /// Creates a uniform line-segment seed generator (`{ "line": { "from": ..., "to": ..., "count": ... } }`).
+    #[must_use]
+    pub const fn line(from: [f64; 3], to: [f64; 3], count: usize) -> Self {
+        Self::Line(StreamlineLineSeedSpec { from, to, count })
+    }
+
+    /// Creates a rectangular plane-grid seed generator (`{ "plane": { ... } }`).
+    #[must_use]
+    pub const fn plane(
+        origin: Option<[f64; 3]>,
+        normal: [f64; 3],
+        extent: Option<[f64; 2]>,
+        count: [usize; 2],
+    ) -> Self {
+        Self::Plane(StreamlinePlaneSeedSpec {
+            origin,
+            normal,
+            extent,
+            count,
+        })
+    }
+}
+
 /// Visualization filter definition (`filters.<name>`).
 ///
 /// Internally tagged by `"type"`. Milestone M1 implements `"surface"`, M2 adds `"slice"`,
@@ -289,6 +410,40 @@ pub enum Filter {
         /// Optional inclusive upper bound (omit for a one-sided `>= min` threshold).
         #[serde(default = "default_none_f64")]
         max: Option<f64>,
+    },
+
+    /// Integrates streamlines through a 3-component vector field on the input volume dataset (`"streamlines"`).
+    #[serde(rename_all = "snake_case")]
+    Streamlines {
+        /// Name of the input source or filter.
+        input: String,
+
+        /// Vector attribute array reference (`"[point:|cell:]<array>"`, 3 components) to integrate.
+        vectors: String,
+
+        /// Seed point generator (`"point"`, `"points"`, `"line"`, or `"plane"`).
+        seeds: StreamlineSeedsSpec,
+
+        /// Optional maximum arc length per integration direction (`> 0.0`). Defaults to `4.0 * bounds.diagonal()`.
+        #[serde(default = "default_none_f64")]
+        max_length: Option<f64>,
+
+        /// Optional initial / fixed integration step size (`> 0.0`). Defaults to `0.01 * bounds.diagonal()`.
+        #[serde(default = "default_none_f64")]
+        step_size: Option<f64>,
+
+        /// Integration direction: `"forward"` (default), `"backward"`, or `"both"`.
+        #[serde(default = "default_streamline_direction")]
+        direction: StreamlineDirectionSpec,
+
+        /// ODE integrator: `"rk45"` (default) or `"rk4"`.
+        #[serde(default = "default_streamline_integrator")]
+        integrator: StreamlineIntegratorSpec,
+
+        /// Optional tube radius in world units (`> 0.0`) used when displayed with `"tubes"` or `"surface"` style.
+        /// Defaults to `0.012 * bounds.diagonal()`.
+        #[serde(default = "default_none_f64")]
+        tube_radius: Option<f64>,
     },
 }
 
@@ -403,6 +558,25 @@ impl Filter {
         }
     }
 
+    /// Creates a [`Filter::Streamlines`] reading from `input` on `vectors` with `seeds` and default integration settings.
+    #[must_use]
+    pub fn streamlines(
+        input: impl Into<String>,
+        vectors: impl Into<String>,
+        seeds: StreamlineSeedsSpec,
+    ) -> Self {
+        Self::Streamlines {
+            input: input.into(),
+            vectors: vectors.into(),
+            seeds,
+            max_length: None,
+            step_size: None,
+            direction: default_streamline_direction(),
+            integrator: default_streamline_integrator(),
+            tube_radius: None,
+        }
+    }
+
     /// Returns the name of the upstream source or filter that feeds this filter.
     #[must_use]
     pub fn input(&self) -> &str {
@@ -411,7 +585,8 @@ impl Filter {
             | Self::Slice { input, .. }
             | Self::Contour { input, .. }
             | Self::Clip { input, .. }
-            | Self::Threshold { input, .. } => input,
+            | Self::Threshold { input, .. }
+            | Self::Streamlines { input, .. } => input,
         }
     }
 }
@@ -1129,12 +1304,24 @@ const fn default_none_vec3() -> Option<[f64; 3]> {
     None
 }
 
+const fn default_none_vec2() -> Option<[f64; 2]> {
+    None
+}
+
 const fn default_clip_keep() -> ClipKeep {
     ClipKeep::Front
 }
 
 const fn default_clip_mode() -> ClipMode {
     ClipMode::Exact
+}
+
+const fn default_streamline_direction() -> StreamlineDirectionSpec {
+    StreamlineDirectionSpec::Forward
+}
+
+const fn default_streamline_integrator() -> StreamlineIntegratorSpec {
+    StreamlineIntegratorSpec::Rk45
 }
 
 const fn default_representation_style() -> RepresentationStyle {

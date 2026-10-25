@@ -280,10 +280,23 @@ impl PolylineSet {
     /// [`SurfaceMesh::wireframe_edges`] populated from the consecutive segments of each polyline).
     pub fn to_line_surface(&self) -> Result<SurfaceMesh, CoreError> {
         let mut edges = Vec::with_capacity(self.num_segments());
+        let mut point_polyline_indices = vec![0usize; self.points.len()];
         for i in 0..self.num_polylines() {
             if let Some(range) = self.polyline_point_range(i) {
+                for idx in &mut point_polyline_indices[range.clone()] {
+                    *idx = i;
+                }
                 for v in range.start..range.end.saturating_sub(1) {
                     edges.push([v as u32, (v + 1) as u32]);
+                }
+            }
+        }
+        let mut point_data = self.point_data.clone();
+        if !self.points.is_empty() {
+            for (name, arr) in self.cell_data.iter() {
+                if point_data.get(name).is_none() {
+                    let promoted = gather_array_by_indices(arr, &point_polyline_indices)?;
+                    point_data.insert(name.to_string(), promoted)?;
                 }
             }
         }
@@ -292,7 +305,7 @@ impl PolylineSet {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            self.point_data.clone(),
+            point_data,
             Attributes::new(0),
         )?
         .with_wireframe_edges(edges)

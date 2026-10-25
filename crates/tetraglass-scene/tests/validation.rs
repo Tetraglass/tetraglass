@@ -571,3 +571,125 @@ fn validates_threshold_filter_bounds_field_and_volume_input() {
     assert!(!by_path.contains_key("filters.good_cell_thresh.field"));
     assert!(!by_path.contains_key("filters.slice_of_thresh.input"));
 }
+
+#[test]
+fn validates_streamlines_filter_vectors_seeds_parameters_and_output_arrays() {
+    let mut sources = BTreeMap::new();
+    sources.insert("flow".to_string(), flow_grid_with_pressure_and_velocity());
+
+    let scene = Scene::from_json_str(
+        r#"{
+            "version": 1,
+            "sources": {
+                "flow": { "file": "results.vtu" }
+            },
+            "filters": {
+                "hull": { "type": "surface", "input": "flow" },
+                "typo_vec": {
+                    "type": "streamlines",
+                    "input": "flow",
+                    "vectors": "velocty",
+                    "seeds": { "point": [0.2, 0.2, 0.2] }
+                },
+                "scalar_vec": {
+                    "type": "streamlines",
+                    "input": "flow",
+                    "vectors": "pressure",
+                    "seeds": { "point": [0.2, 0.2, 0.2] }
+                },
+                "comp_vec": {
+                    "type": "streamlines",
+                    "input": "flow",
+                    "vectors": "velocity:magnitude",
+                    "seeds": { "point": [0.2, 0.2, 0.2] }
+                },
+                "bad_line": {
+                    "type": "streamlines",
+                    "input": "flow",
+                    "vectors": "velocity",
+                    "seeds": { "line": { "from": [0.0, 0.0, 0.0], "to": [1.0, 0.0, 0.0], "count": 0 } },
+                    "max_length": -1.0,
+                    "step_size": 0.0,
+                    "tube_radius": -0.05
+                },
+                "bad_plane": {
+                    "type": "streamlines",
+                    "input": "flow",
+                    "vectors": "velocity",
+                    "seeds": { "plane": { "normal": [0.0, 0.0, 0.0], "extent": [-1.0, 1.0], "count": [4, 0] } }
+                },
+                "surf_input": {
+                    "type": "streamlines",
+                    "input": "hull",
+                    "vectors": "velocity",
+                    "seeds": { "point": [0.2, 0.2, 0.2] }
+                },
+                "good_trace": {
+                    "type": "streamlines",
+                    "input": "flow",
+                    "vectors": "velocity",
+                    "seeds": { "line": { "from": [0.1, 0.1, 0.1], "to": [0.4, 0.4, 0.1], "count": 4 } },
+                    "direction": "both"
+                }
+            },
+            "view": {
+                "show": [
+                    { "input": "good_trace", "style": "tubes", "color_by": "arc_length" },
+                    { "input": "good_trace", "style": "lines", "color_by": "integration_time" },
+                    { "input": "good_trace", "style": "tubes", "color_by": "seed_id" },
+                    { "input": "good_trace", "style": "tubes", "color_by": "velocity:magnitude" }
+                ]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let report = validate_scene(&scene, &sources).expect_err("must report streamlines errors");
+    let by_path: BTreeMap<&str, &ValidationIssue> = report
+        .issues()
+        .iter()
+        .map(|i| (i.path.as_str(), i))
+        .collect();
+
+    assert_eq!(
+        by_path["filters.typo_vec.vectors"].suggestion.as_deref(),
+        Some("did you mean \"velocity\"?")
+    );
+    assert!(
+        by_path["filters.scalar_vec.vectors"]
+            .message
+            .contains("has 1 component(s), expected 3")
+    );
+    assert_eq!(
+        by_path["filters.scalar_vec.vectors"].suggestion.as_deref(),
+        Some("use a 3-component vector array such as \"velocity\"")
+    );
+    assert_eq!(
+        by_path["filters.comp_vec.vectors"].suggestion.as_deref(),
+        Some("use the 3-component vector array \"velocity\" directly")
+    );
+    assert!(by_path.contains_key("filters.bad_line.seeds.line.count"));
+    assert!(by_path.contains_key("filters.bad_line.max_length"));
+    assert!(by_path.contains_key("filters.bad_line.step_size"));
+    assert!(by_path.contains_key("filters.bad_line.tube_radius"));
+    assert_eq!(
+        by_path["filters.bad_plane.seeds.plane.normal"].message,
+        "must not be [0, 0, 0]"
+    );
+    assert!(by_path.contains_key("filters.bad_plane.seeds.plane.extent"));
+    assert!(by_path.contains_key("filters.bad_plane.seeds.plane.count"));
+    assert!(
+        by_path["filters.surf_input.input"]
+            .message
+            .contains("requires a volume dataset input")
+    );
+
+    // `good_trace` and all 4 representations coloring by `arc_length`, `integration_time`,
+    // `seed_id`, and `velocity:magnitude` must not report any validation issues.
+    assert!(!by_path.contains_key("filters.good_trace"));
+    assert!(!by_path.contains_key("filters.good_trace.vectors"));
+    assert!(!by_path.contains_key("view.show[0].color_by"));
+    assert!(!by_path.contains_key("view.show[1].color_by"));
+    assert!(!by_path.contains_key("view.show[2].color_by"));
+    assert!(!by_path.contains_key("view.show[3].color_by"));
+}

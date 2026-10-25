@@ -598,3 +598,77 @@ fn threshold_filter_evaluates_point_and_cell_arrays_caches_and_chains_into_slice
     assert_eq!(evaluator.filter_executions(), 2);
     assert!(Arc::ptr_eq(layer_surf, &eval2.representations[0].surface));
 }
+
+#[test]
+fn streamlines_filter_evaluates_tubes_lines_and_wireframe_and_caches_results() {
+    let hex = read_vtu_from_path(testdata_vtu("hex_linear.vtu")).expect("load hex_linear.vtu");
+    let mut evaluator = SceneEvaluator::new();
+    evaluator.insert_source("hex", hex);
+
+    let mut scene = Scene::from_json_str(
+        r#"{
+            "version": 1,
+            "sources": {
+                "hex": { "file": "testdata/vtk/hex_linear.vtu" }
+            },
+            "filters": {
+                "traces": {
+                    "type": "streamlines",
+                    "input": "hex",
+                    "vectors": "velocity",
+                    "seeds": {
+                        "line": {
+                            "from": [1.5, 0.2, 1.0],
+                            "to": [1.5, 1.2, 1.0],
+                            "count": 4
+                        }
+                    },
+                    "max_length": 2.0,
+                    "step_size": 0.03,
+                    "direction": "both",
+                    "integrator": "rk45",
+                    "tube_radius": 0.04
+                }
+            },
+            "view": {
+                "show": [
+                    { "input": "traces", "style": "tubes", "color_by": "arc_length" },
+                    { "input": "traces", "style": "lines", "color_by": "velocity:magnitude" },
+                    { "input": "traces", "style": "wireframe", "color_by": "seed_id" }
+                ]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let eval1 = evaluator
+        .evaluate_scene(&scene)
+        .expect("evaluate streamlines scene");
+    assert_eq!(eval1.representations.len(), 3);
+    // `traces` ODE integration executed once (+1), and the 2nd & 3rd representations hit `streamline_cache` (+2 hits).
+    assert_eq!(evaluator.filter_executions(), 1);
+    assert_eq!(evaluator.cache_hits(), 2);
+
+    let tubes_surf = &eval1.representations[0].surface;
+    let lines_surf = &eval1.representations[1].surface;
+    let wire_surf = &eval1.representations[2].surface;
+
+    // 12-sided tubes have more triangles than 6-sided lines, and both have positive area, while wireframe lines use wireframe_edges.
+    assert!(tubes_surf.num_triangles() > lines_surf.num_triangles());
+    assert!(tubes_surf.total_area() > lines_surf.total_area());
+    assert!(lines_surf.total_area() > 0.0);
+    assert_eq!(wire_surf.num_triangles(), 0);
+    assert!(wire_surf.num_wireframe_edges() > 0);
+
+    // Changing colormap/camera hits the streamline and surface caches without re-integrating.
+    scene.view.show[0].colormap = ColormapName::Turbo;
+    scene.view.camera.azimuth = 50.0;
+    let eval2 = evaluator
+        .evaluate_scene(&scene)
+        .expect("re-evaluate streamlines scene");
+    assert_eq!(evaluator.filter_executions(), 1);
+    assert_eq!(evaluator.cache_hits(), 5);
+    assert!(Arc::ptr_eq(tubes_surf, &eval2.representations[0].surface));
+    assert!(Arc::ptr_eq(lines_surf, &eval2.representations[1].surface));
+    assert!(Arc::ptr_eq(wire_surf, &eval2.representations[2].surface));
+}

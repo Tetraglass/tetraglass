@@ -12,22 +12,22 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use tetraglass_core::{
-    ArrayBuffer, Attributes, BoundingBox, SurfaceMesh, TetView, TimeSeries, UnstructuredGrid,
-    ValueRange,
+    ArrayBuffer, Attributes, BoundingBox, DEFAULT_TUBE_SIDES, PolylineSet, SurfaceMesh, TetView,
+    TimeSeries, UnstructuredGrid, ValueRange,
 };
 use tetraglass_filters::{
     ClipParams, ContourComponent, ContourParams, DEFAULT_SUBDIVISIONS, LinearizeParams,
-    SliceParams, ThresholdAssociation, ThresholdComponent, ThresholdParams, clip, contour,
-    extract_external_surface_with_subdivisions, extract_tet_view_surface, linearize, slice,
-    threshold,
+    SliceParams, StreamlineParams, StreamlineSeeds, TetLocator, ThresholdAssociation,
+    ThresholdComponent, ThresholdParams, clip, contour, extract_external_surface_with_subdivisions,
+    extract_tet_view_surface, linearize, slice, streamlines_with_locator, threshold,
 };
 use tetraglass_io::IoError;
 
 use crate::{
     ArrayAssociation, ClipKeep, ClipMode, ColorbarSpec, ColormapName, DatasetMetadata, Filter,
     ParsedArrayRef, RangePreset, RangeSpec, Representation, RepresentationStyle, ResolvedComponent,
-    Scene, SceneError, TimeSelector, ValidationIssue, ValidationReport,
-    validate_scene_with_metadata,
+    Scene, SceneError, StreamlineDirectionSpec, StreamlineIntegratorSpec, StreamlineSeedsSpec,
+    TimeSelector, ValidationIssue, ValidationReport, validate_scene_with_metadata,
 };
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
@@ -293,6 +293,127 @@ fn hash_threshold_filter(
     PipelineHash(h.finish())
 }
 
+#[allow(clippy::too_many_arguments)] // Reason: hashes all streamline integration parameters together
+fn hash_streamlines_filter(
+    upstream: PipelineHash,
+    vectors: &str,
+    seeds: &StreamlineSeedsSpec,
+    max_length: Option<f64>,
+    step_size: Option<f64>,
+    direction: StreamlineDirectionSpec,
+    integrator: StreamlineIntegratorSpec,
+) -> PipelineHash {
+    let mut h = FnvHasher::new();
+    h.write_str("filter:streamlines");
+    h.write_u64(upstream.0);
+    h.write_str(vectors);
+    match seeds {
+        StreamlineSeedsSpec::Point([x, y, z]) => {
+            h.write_u8(0);
+            h.write_f64(*x);
+            h.write_f64(*y);
+            h.write_f64(*z);
+        }
+        StreamlineSeedsSpec::Points(pts) => {
+            h.write_u8(1);
+            h.write_usize(pts.len());
+            for &[x, y, z] in pts {
+                h.write_f64(x);
+                h.write_f64(y);
+                h.write_f64(z);
+            }
+        }
+        StreamlineSeedsSpec::Line(line) => {
+            h.write_u8(2);
+            for &v in &line.from {
+                h.write_f64(v);
+            }
+            for &v in &line.to {
+                h.write_f64(v);
+            }
+            h.write_usize(line.count);
+        }
+        StreamlineSeedsSpec::Plane(plane) => {
+            h.write_u8(3);
+            match plane.origin {
+                Some([ox, oy, oz]) => {
+                    h.write_u8(1);
+                    h.write_f64(ox);
+                    h.write_f64(oy);
+                    h.write_f64(oz);
+                }
+                None => h.write_u8(0),
+            }
+            for &v in &plane.normal {
+                h.write_f64(v);
+            }
+            match plane.extent {
+                Some([ew, eh]) => {
+                    h.write_u8(1);
+                    h.write_f64(ew);
+                    h.write_f64(eh);
+                }
+                None => h.write_u8(0),
+            }
+            h.write_usize(plane.count[0]);
+            h.write_usize(plane.count[1]);
+        }
+    }
+    match max_length {
+        Some(ml) => {
+            h.write_u8(1);
+            h.write_f64(ml);
+        }
+        None => h.write_u8(0),
+    }
+    match step_size {
+        Some(ss) => {
+            h.write_u8(1);
+            h.write_f64(ss);
+        }
+        None => h.write_u8(0),
+    }
+    h.write_u8(match direction {
+        StreamlineDirectionSpec::Forward => 0,
+        StreamlineDirectionSpec::Backward => 1,
+        StreamlineDirectionSpec::Both => 2,
+    });
+    h.write_u8(match integrator {
+        StreamlineIntegratorSpec::Rk45 => 0,
+        StreamlineIntegratorSpec::Rk4 => 1,
+    });
+    PipelineHash(h.finish())
+}
+
+fn hash_streamline_surface(
+    streamline_hash: PipelineHash,
+    tube_radius: Option<f64>,
+    style: RepresentationStyle,
+) -> PipelineHash {
+    let mut h = FnvHasher::new();
+    h.write_str("streamline_surface");
+    h.write_u64(streamline_hash.0);
+    match tube_radius {
+        Some(tr) => {
+            h.write_u8(1);
+            h.write_f64(tr);
+        }
+        None => h.write_u8(0),
+    }
+    // Group styles that produce identical tessellated surface geometry.
+    let style_group = match style {
+        RepresentationStyle::Wireframe => 0u8,
+        RepresentationStyle::Lines => 1u8,
+        RepresentationStyle::Tubes
+        | RepresentationStyle::Surface
+        | RepresentationStyle::SurfaceWithEdges
+        | RepresentationStyle::Points
+        | RepresentationStyle::Volume => 2u8,
+    };
+    h.write_u8(style_group);
+    PipelineHash(h.finish())
+}
+
 /// Output of evaluating a source or filter node in the scene pipeline.
 #[derive(Debug, Clone)]
 pub enum EvaluatedDataset {
@@ -302,6 +423,15 @@ pub enum EvaluatedDataset {
     TetVolume(Arc<TetView>),
     /// Extracted or generated triangulated surface mesh.
     Surface(Arc<SurfaceMesh>),
+    /// Integrated streamline polylines (`M4.2`).
+    Streamlines {
+        /// Integrated streamline polylines and interpolated arrays.
+        polylines: Arc<PolylineSet>,
+        /// Bounding box of the upstream volume dataset (used for default tube radius).
+        source_bounds: Option<BoundingBox>,
+        /// Explicit `tube_radius` configured on the streamline filter, if any.
+        tube_radius: Option<f64>,
+    },
 }
 
 impl EvaluatedDataset {
@@ -312,6 +442,11 @@ impl EvaluatedDataset {
             Self::Grid(grid) => grid.bounds(),
             Self::TetVolume(view) => view.bounds(),
             Self::Surface(surface) => surface.bounds(),
+            Self::Streamlines {
+                polylines,
+                source_bounds,
+                ..
+            } => polylines.bounds().or(*source_bounds),
         }
     }
 }
@@ -396,6 +531,8 @@ pub struct SceneEvaluator {
     sources: BTreeMap<String, LoadedSource>,
     series_sources: BTreeMap<String, TimeSeries<IoError>>,
     tet_view_cache: HashMap<PipelineHash, Arc<TetView>>,
+    locator_cache: HashMap<PipelineHash, Arc<TetLocator>>,
+    streamline_cache: HashMap<PipelineHash, Arc<PolylineSet>>,
     surface_cache: HashMap<PipelineHash, Arc<SurfaceMesh>>,
     filter_executions: usize,
     cache_hits: usize,
@@ -486,6 +623,8 @@ impl SceneEvaluator {
     /// Clears all cached filter outputs without removing loaded sources.
     pub fn clear_cache(&mut self) {
         self.tet_view_cache.clear();
+        self.locator_cache.clear();
+        self.streamline_cache.clear();
         self.surface_cache.clear();
     }
 
@@ -625,6 +764,49 @@ impl SceneEvaluator {
                     )?;
                     return Ok((threshold_hash, EvaluatedDataset::TetVolume(thresholded)));
                 }
+                Filter::Streamlines {
+                    input,
+                    vectors,
+                    seeds,
+                    max_length,
+                    step_size,
+                    direction,
+                    integrator,
+                    tube_radius,
+                } => {
+                    let (upstream_hash, upstream_data) = self.evaluate_dataset(scene, input)?;
+                    let source_bounds = upstream_data.bounds();
+                    let streamline_hash = hash_streamlines_filter(
+                        upstream_hash,
+                        vectors,
+                        seeds,
+                        *max_length,
+                        *step_size,
+                        *direction,
+                        *integrator,
+                    );
+                    let subdivisions = resolve_source_subdivisions(scene, input);
+                    let polylines = self.get_or_trace_streamlines(
+                        streamline_hash,
+                        upstream_hash,
+                        upstream_data,
+                        subdivisions,
+                        vectors,
+                        seeds,
+                        *max_length,
+                        *step_size,
+                        *direction,
+                        *integrator,
+                    )?;
+                    return Ok((
+                        streamline_hash,
+                        EvaluatedDataset::Streamlines {
+                            polylines,
+                            source_bounds,
+                            tube_radius: *tube_radius,
+                        },
+                    ));
+                }
             }
         }
 
@@ -651,11 +833,24 @@ impl SceneEvaluator {
     ///
     /// Per `docs/scene-format.md`, showing a volume mesh source or volume filter directly
     /// implies external surface extraction, which is cached under the same input hash as an
-    /// explicit `Filter::Surface`.
+    /// explicit `Filter::Surface`. Streamline filters default to `"tubes"` geometry when called
+    /// via this method; use [`Self::evaluate_surface_for_style`] to select `"lines"` or `"wireframe"`.
     pub fn evaluate_surface(
         &mut self,
         scene: &Scene,
         dataset_name: &str,
+    ) -> Result<(PipelineHash, Arc<SurfaceMesh>), SceneError> {
+        self.evaluate_surface_for_style(scene, dataset_name, RepresentationStyle::Tubes)
+    }
+
+    /// Evaluates the displayable [`SurfaceMesh`] for a named source or filter in `scene`
+    /// using the representation's [`RepresentationStyle`] (such as `"tubes"`, `"lines"`, or `"wireframe"`
+    /// for streamline outputs).
+    pub fn evaluate_surface_for_style(
+        &mut self,
+        scene: &Scene,
+        dataset_name: &str,
+        style: RepresentationStyle,
     ) -> Result<(PipelineHash, Arc<SurfaceMesh>), SceneError> {
         let (node_hash, data) = self.evaluate_dataset(scene, dataset_name)?;
         match data {
@@ -671,6 +866,21 @@ impl SceneEvaluator {
                 let surface = self.get_or_extract_tet_surface_implicit(surface_hash, &tet_view)?;
                 Ok((surface_hash, surface))
             }
+            EvaluatedDataset::Streamlines {
+                polylines,
+                source_bounds,
+                tube_radius,
+            } => {
+                let surface_hash = hash_streamline_surface(node_hash, tube_radius, style);
+                let surface = self.get_or_extract_streamline_surface_implicit(
+                    surface_hash,
+                    &polylines,
+                    source_bounds,
+                    tube_radius,
+                    style,
+                )?;
+                Ok((surface_hash, surface))
+            }
         }
     }
 
@@ -683,6 +893,39 @@ impl SceneEvaluator {
             return Ok(Arc::clone(cached));
         }
         let surface = Arc::new(extract_tet_view_surface(tet_view)?);
+        self.surface_cache
+            .insert(surface_hash, Arc::clone(&surface));
+        Ok(surface)
+    }
+
+    fn get_or_extract_streamline_surface_implicit(
+        &mut self,
+        surface_hash: PipelineHash,
+        polylines: &PolylineSet,
+        source_bounds: Option<BoundingBox>,
+        tube_radius: Option<f64>,
+        style: RepresentationStyle,
+    ) -> Result<Arc<SurfaceMesh>, SceneError> {
+        if let Some(cached) = self.surface_cache.get(&surface_hash) {
+            return Ok(Arc::clone(cached));
+        }
+        let diag = source_bounds
+            .or_else(|| polylines.bounds())
+            .map_or(1.0, |b| b.diagonal().max(1e-6));
+        let base_radius = tube_radius.unwrap_or(0.012 * diag).max(1e-6);
+        let surface = match style {
+            RepresentationStyle::Wireframe => Arc::new(polylines.to_line_surface()?),
+            RepresentationStyle::Lines => {
+                Arc::new(polylines.to_tube_surface((base_radius * 0.35).max(1e-6), 6)?)
+            }
+            RepresentationStyle::Tubes
+            | RepresentationStyle::Surface
+            | RepresentationStyle::SurfaceWithEdges
+            | RepresentationStyle::Points
+            | RepresentationStyle::Volume => {
+                Arc::new(polylines.to_tube_surface(base_radius, DEFAULT_TUBE_SIDES)?)
+            }
+        };
         self.surface_cache
             .insert(surface_hash, Arc::clone(&surface));
         Ok(surface)
@@ -707,6 +950,17 @@ impl SceneEvaluator {
             )?),
             EvaluatedDataset::TetVolume(tet_view) => Arc::new(extract_tet_view_surface(&tet_view)?),
             EvaluatedDataset::Surface(surf) => surf,
+            EvaluatedDataset::Streamlines {
+                polylines,
+                source_bounds,
+                tube_radius,
+            } => {
+                let diag = source_bounds
+                    .or_else(|| polylines.bounds())
+                    .map_or(1.0, |b| b.diagonal().max(1e-6));
+                let radius = tube_radius.unwrap_or(0.012 * diag).max(1e-6);
+                Arc::new(polylines.to_tube_surface(radius, DEFAULT_TUBE_SIDES)?)
+            }
         };
         self.surface_cache
             .insert(surface_hash, Arc::clone(&surface));
@@ -728,6 +982,19 @@ impl SceneEvaluator {
         Ok(view)
     }
 
+    fn get_or_build_locator(
+        &mut self,
+        tet_hash: PipelineHash,
+        tet_view: &TetView,
+    ) -> Arc<TetLocator> {
+        if let Some(cached) = self.locator_cache.get(&tet_hash) {
+            return Arc::clone(cached);
+        }
+        let locator = Arc::new(TetLocator::new(tet_view));
+        self.locator_cache.insert(tet_hash, Arc::clone(&locator));
+        locator
+    }
+
     fn resolve_volume_tet_view(
         &mut self,
         upstream_hash: PipelineHash,
@@ -740,13 +1007,17 @@ impl SceneEvaluator {
                 self.get_or_linearize_tet_view(upstream_hash, &grid, subdivisions)
             }
             EvaluatedDataset::TetVolume(tet_view) => Ok(tet_view),
-            EvaluatedDataset::Surface(_) => Err(SceneError::Validation(ValidationReport {
-                issues: vec![ValidationIssue::new(
-                    "filters",
-                    format!("{filter_kind} filter requires a volume dataset input, not a surface"),
-                    None,
-                )],
-            })),
+            EvaluatedDataset::Surface(_) | EvaluatedDataset::Streamlines { .. } => {
+                Err(SceneError::Validation(ValidationReport {
+                    issues: vec![ValidationIssue::new(
+                        "filters",
+                        format!(
+                            "{filter_kind} filter requires a volume dataset input, not a surface"
+                        ),
+                        None,
+                    )],
+                }))
+            }
         }
     }
 
@@ -928,6 +1199,106 @@ impl SceneEvaluator {
         Ok(surface)
     }
 
+    #[allow(clippy::too_many_arguments)] // Reason: passes hash, upstream data, subdivisions, and streamline integration parameters together
+    fn get_or_trace_streamlines(
+        &mut self,
+        streamline_hash: PipelineHash,
+        upstream_hash: PipelineHash,
+        upstream_data: EvaluatedDataset,
+        subdivisions: u8,
+        raw_vectors: &str,
+        seeds: &StreamlineSeedsSpec,
+        max_length: Option<f64>,
+        step_size: Option<f64>,
+        direction: StreamlineDirectionSpec,
+        integrator: StreamlineIntegratorSpec,
+    ) -> Result<Arc<PolylineSet>, SceneError> {
+        if let Some(cached) = self.streamline_cache.get(&streamline_hash) {
+            self.cache_hits += 1;
+            return Ok(Arc::clone(cached));
+        }
+
+        let tet_hash = match &upstream_data {
+            EvaluatedDataset::Grid(_) => hash_tet_view(upstream_hash, subdivisions),
+            _ => upstream_hash,
+        };
+        let tet_view = self.resolve_volume_tet_view(
+            upstream_hash,
+            upstream_data,
+            subdivisions,
+            "streamlines",
+        )?;
+        let locator = self.get_or_build_locator(tet_hash, &tet_view);
+
+        let parsed = ParsedArrayRef::parse(raw_vectors)?;
+        if let Some(comp) = parsed.component {
+            return Err(SceneError::InvalidArrayRef {
+                reference: raw_vectors.to_string(),
+                reason: format!(
+                    "streamlines vectors reference must not specify a component selector `:{comp}`"
+                ),
+            });
+        }
+        match parsed.association {
+            Some(ArrayAssociation::Point) if tet_view.point_data().get(&parsed.name).is_none() => {
+                return Err(SceneError::InvalidArrayRef {
+                    reference: raw_vectors.to_string(),
+                    reason: format!("missing point array `{}`", parsed.name),
+                });
+            }
+            Some(ArrayAssociation::Cell) if tet_view.cell_data().get(&parsed.name).is_none() => {
+                return Err(SceneError::InvalidArrayRef {
+                    reference: raw_vectors.to_string(),
+                    reason: format!("missing cell array `{}`", parsed.name),
+                });
+            }
+            _ => {}
+        }
+
+        let bounds = tet_view.bounds();
+        let resolved_seeds = match seeds {
+            StreamlineSeedsSpec::Point(pt) => StreamlineSeeds::Point(*pt),
+            StreamlineSeedsSpec::Points(pts) => StreamlineSeeds::Points(pts.clone()),
+            StreamlineSeedsSpec::Line(line) => StreamlineSeeds::Line {
+                from: line.from,
+                to: line.to,
+                count: line.count,
+            },
+            StreamlineSeedsSpec::Plane(plane) => {
+                let origin = plane
+                    .origin
+                    .or_else(|| bounds.map(|b| b.center()))
+                    .unwrap_or([0.0, 0.0, 0.0]);
+                let extent = plane.extent.unwrap_or_else(|| {
+                    let half_diag = bounds.map_or(0.5, |b| (0.5 * b.diagonal()).max(1e-6));
+                    [half_diag, half_diag]
+                });
+                StreamlineSeeds::Plane {
+                    origin,
+                    normal: plane.normal,
+                    extent,
+                    count: plane.count,
+                }
+            }
+        };
+
+        let mut params = StreamlineParams::new(parsed.name, resolved_seeds)
+            .direction(direction.into())
+            .integrator(integrator.into());
+        if let Some(ml) = max_length {
+            params = params.max_length(ml);
+        }
+        if let Some(ss) = step_size {
+            params = params.step_size(ss);
+        }
+
+        self.filter_executions += 1;
+        let polylines = Arc::new(streamlines_with_locator(&tet_view, &locator, &params)?);
+        self.streamline_cache
+            .insert(streamline_hash, Arc::clone(&polylines));
+        Ok(polylines)
+    }
+
     /// Validates `scene` against the loaded sources (resolving any [`TimeSeries`] sources at
     /// `scene.output.time`, defaulting to [`TimeSelector::FIRST`]) and lazily evaluates all
     /// visible representations and camera bounds.
@@ -1006,7 +1377,8 @@ impl SceneEvaluator {
             if !rep.visible {
                 continue;
             }
-            let (surface_hash, surface) = self.evaluate_surface(scene, &rep.input)?;
+            let (surface_hash, surface) =
+                self.evaluate_surface_for_style(scene, &rep.input, rep.style)?;
             if let Some(b) = surface.bounds() {
                 visible_bounds = Some(match visible_bounds {
                     None => b,

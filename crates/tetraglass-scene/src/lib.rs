@@ -57,7 +57,9 @@ pub use types::{
     DEFAULT_CYCLES_SAMPLES, DEFAULT_LINEARIZE_LEVEL, DEFAULT_MSAA_SAMPLES, DEFAULT_OUTPUT_SIZE,
     DEFAULT_POINT_SIZE, DEFAULT_VIEW_ANGLE_DEGREES, Filter, FramesConfig, LightingPreset, Output,
     ProjectionKind, RangePreset, RangeSpec, RenderEngine, Representation, RepresentationStyle,
-    SCENE_VERSION, Scene, Source, SourceFormat, TimePreset, TimeSelector, TimeStepIndex, View,
+    SCENE_VERSION, Scene, Source, SourceFormat, StreamlineDirectionSpec, StreamlineIntegratorSpec,
+    StreamlineLineSeedSpec, StreamlinePlaneSeedSpec, StreamlineSeedsSpec, TimePreset, TimeSelector,
+    TimeStepIndex, View,
 };
 pub use validate::{
     ArrayMetadata, DatasetMetadata, ValidationIssue, ValidationReport, closest_match,
@@ -691,5 +693,97 @@ mod tests {
             scene.filters["upper_only"],
             Filter::threshold_max("flow", "velocity:magnitude", 10.0)
         );
+    }
+
+    #[test]
+    fn parses_streamlines_filter_seed_variants_and_rejects_unknown_fields() {
+        let json = r#"{
+            "version": 1,
+            "sources": {
+                "flow": { "file": "results.vtu" }
+            },
+            "filters": {
+                "trace_pt": {
+                    "type": "streamlines",
+                    "input": "flow",
+                    "vectors": "velocity",
+                    "seeds": { "point": [0.5, 0.5, 0.5] }
+                },
+                "trace_line": {
+                    "type": "streamlines",
+                    "input": "flow",
+                    "vectors": "velocity",
+                    "seeds": { "line": { "from": [0.1, 0.1, 0.5], "to": [0.9, 0.1, 0.5], "count": 8 } },
+                    "max_length": 5.0,
+                    "step_size": 0.02,
+                    "direction": "both",
+                    "integrator": "rk4",
+                    "tube_radius": 0.03
+                },
+                "trace_plane": {
+                    "type": "streamlines",
+                    "input": "flow",
+                    "vectors": "velocity",
+                    "seeds": { "plane": { "origin": [1.0, 1.0, 1.0], "normal": [1.0, 0.0, 0.0], "extent": [1.2, 0.8], "count": [4, 3] } }
+                }
+            },
+            "view": {
+                "show": [
+                    { "input": "trace_line", "style": "tubes" },
+                    { "input": "trace_plane", "style": "lines" }
+                ]
+            }
+        }"#;
+
+        let scene = Scene::from_json_str(json).expect("streamlines scene should parse");
+        assert_eq!(
+            scene.filters["trace_pt"],
+            Filter::streamlines(
+                "flow",
+                "velocity",
+                StreamlineSeedsSpec::point([0.5, 0.5, 0.5])
+            )
+        );
+        assert_eq!(
+            scene.filters["trace_line"],
+            Filter::Streamlines {
+                input: "flow".to_string(),
+                vectors: "velocity".to_string(),
+                seeds: StreamlineSeedsSpec::line([0.1, 0.1, 0.5], [0.9, 0.1, 0.5], 8),
+                max_length: Some(5.0),
+                step_size: Some(0.02),
+                direction: StreamlineDirectionSpec::Both,
+                integrator: StreamlineIntegratorSpec::Rk4,
+                tube_radius: Some(0.03),
+            }
+        );
+        assert_eq!(
+            scene.filters["trace_plane"],
+            Filter::streamlines(
+                "flow",
+                "velocity",
+                StreamlineSeedsSpec::plane(
+                    Some([1.0, 1.0, 1.0]),
+                    [1.0, 0.0, 0.0],
+                    Some([1.2, 0.8]),
+                    [4, 3]
+                )
+            )
+        );
+
+        let bad_seed_json = r#"{
+            "version": 1,
+            "sources": { "flow": { "file": "results.vtu" } },
+            "filters": {
+                "bad": {
+                    "type": "streamlines",
+                    "input": "flow",
+                    "vectors": "velocity",
+                    "seeds": { "line": { "from": [0.0, 0.0, 0.0], "to": [1.0, 0.0, 0.0], "count": 4, "extra": 1 } }
+                }
+            },
+            "view": { "show": [{ "input": "bad" }] }
+        }"#;
+        assert!(Scene::from_json_str(bad_seed_json).is_err());
     }
 }

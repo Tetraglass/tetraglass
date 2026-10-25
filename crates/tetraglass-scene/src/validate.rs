@@ -18,7 +18,7 @@ use tetraglass_io::detect_format_from_extension;
 
 use crate::{
     ArrayAssociation, BackgroundSpec, ColorSpec, Filter, ParsedArrayRef, RangeSpec, Representation,
-    ResolvedComponent, SCENE_VERSION, Scene, TimeSelector,
+    ResolvedComponent, SCENE_VERSION, Scene, StreamlineSeedsSpec, TimeSelector,
 };
 
 /// Metadata for a single attribute array used during semantic validation.
@@ -364,14 +364,21 @@ fn validate_impl(
                 | Filter::Contour { .. }
                 | Filter::Clip { .. }
                 | Filter::Threshold { .. }
+                | Filter::Streamlines { .. }
         ) && matches!(
             scene.filters.get(input),
-            Some(Filter::Surface { .. } | Filter::Slice { .. } | Filter::Contour { .. })
+            Some(
+                Filter::Surface { .. }
+                    | Filter::Slice { .. }
+                    | Filter::Contour { .. }
+                    | Filter::Streamlines { .. }
+            )
         ) {
             let kind = match filter {
                 Filter::Contour { .. } => "contour",
                 Filter::Clip { .. } => "clip",
                 Filter::Threshold { .. } => "threshold",
+                Filter::Streamlines { .. } => "streamlines",
                 _ => "slice",
             };
             let suggestion = resolve_root_source(name, &scene.sources, &scene.filters)
@@ -475,6 +482,51 @@ fn validate_impl(
                     ));
                 }
             }
+            Filter::Streamlines {
+                seeds,
+                max_length,
+                step_size,
+                tube_radius,
+                ..
+            } => {
+                validate_streamline_seeds(name, seeds, &mut issues);
+                if let Some(ml) = max_length
+                    && (!ml.is_finite() || *ml <= 0.0)
+                {
+                    issues.push(ValidationIssue::new(
+                        format!("filters.{name}.max_length"),
+                        format!("streamline max_length must be positive, got {ml}"),
+                        Some(
+                            "omit max_length for the automatic default or specify a positive length"
+                                .to_string(),
+                        ),
+                    ));
+                }
+                if let Some(ss) = step_size
+                    && (!ss.is_finite() || *ss <= 0.0)
+                {
+                    issues.push(ValidationIssue::new(
+                        format!("filters.{name}.step_size"),
+                        format!("streamline step_size must be positive, got {ss}"),
+                        Some(
+                            "omit step_size for the automatic default or specify a positive step size"
+                                .to_string(),
+                        ),
+                    ));
+                }
+                if let Some(tr) = tube_radius
+                    && (!tr.is_finite() || *tr <= 0.0)
+                {
+                    issues.push(ValidationIssue::new(
+                        format!("filters.{name}.tube_radius"),
+                        format!("streamline tube_radius must be positive, got {tr}"),
+                        Some(
+                            "omit tube_radius for the automatic default or specify a positive radius"
+                                .to_string(),
+                        ),
+                    ));
+                }
+            }
         }
     }
 
@@ -482,39 +534,48 @@ fn validate_impl(
     detect_filter_cycles(&scene.filters, &mut issues);
 
     // Resolve dataset metadata for all valid sources and filters when loaded_sources is provided.
-    let resolved_datasets: Option<BTreeMap<&str, &DatasetMetadata>> =
-        loaded_sources.map(|loaded| {
-            let mut map: BTreeMap<&str, &DatasetMetadata> = BTreeMap::new();
-            for (src_name, meta) in loaded {
-                if scene.sources.contains_key(src_name) {
-                    map.insert(src_name.as_str(), meta);
-                }
+    let resolved_datasets: Option<BTreeMap<&str, DatasetMetadata>> = loaded_sources.map(|loaded| {
+        let mut map: BTreeMap<&str, DatasetMetadata> = BTreeMap::new();
+        for (src_name, meta) in loaded {
+            if scene.sources.contains_key(src_name) {
+                map.insert(src_name.as_str(), meta.clone());
             }
-            for filter_name in scene.filters.keys() {
-                if let Some(root_source) =
-                    resolve_root_source(filter_name, &scene.sources, &scene.filters)
-                    && let Some(meta) = loaded.get(root_source)
-                {
-                    map.insert(filter_name.as_str(), meta);
+        }
+        for (filter_name, filter) in &scene.filters {
+            if let Some(root_source) =
+                resolve_root_source(filter_name, &scene.sources, &scene.filters)
+                && let Some(meta) = loaded.get(root_source)
+            {
+                let mut filter_meta = meta.clone();
+                if matches!(filter, Filter::Streamlines { .. }) {
+                    augment_streamline_metadata(&mut filter_meta);
                 }
+                map.insert(filter_name.as_str(), filter_meta);
             }
-            map
-        });
+        }
+        map
+    });
 
-    // Validate filter field references (such as `contour.field` and `threshold.field`) against resolved dataset metadata.
+    // Validate filter field references (such as `contour.field`, `threshold.field`, and `streamlines.vectors`) against resolved dataset metadata.
     for (name, filter) in &scene.filters {
         match filter {
             Filter::Contour { input, field, .. } => {
                 let dataset_meta = resolved_datasets
                     .as_ref()
-                    .and_then(|map| map.get(input.as_str()).copied());
+                    .and_then(|map| map.get(input.as_str()));
                 validate_contour_field(name, field, input, dataset_meta, &mut issues);
             }
             Filter::Threshold { input, field, .. } => {
                 let dataset_meta = resolved_datasets
                     .as_ref()
-                    .and_then(|map| map.get(input.as_str()).copied());
+                    .and_then(|map| map.get(input.as_str()));
                 validate_threshold_field(name, field, input, dataset_meta, &mut issues);
+            }
+            Filter::Streamlines { input, vectors, .. } => {
+                let dataset_meta = resolved_datasets
+                    .as_ref()
+                    .and_then(|map| map.get(input.as_str()));
+                validate_streamlines_vectors(name, vectors, input, dataset_meta, &mut issues);
             }
             _ => {}
         }
@@ -608,7 +669,7 @@ fn validate_impl(
                 &rep_prefix,
                 resolved_datasets
                     .as_ref()
-                    .and_then(|map| map.get(rep.input.as_str()).copied()),
+                    .and_then(|map| map.get(rep.input.as_str())),
                 &mut issues,
             );
         }
@@ -1051,6 +1112,278 @@ fn validate_threshold_field(
                 "component \"{comp_str}\" is not valid for {}-component array \"{}\" on \"{input_name}\"",
                 array_meta.components.as_usize(),
                 parsed.name
+            ),
+            suggestion,
+        ));
+    }
+}
+
+fn validate_streamline_seeds(
+    filter_name: &str,
+    seeds: &StreamlineSeedsSpec,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    match seeds {
+        StreamlineSeedsSpec::Point(pt) => {
+            if !pt.iter().all(|v| v.is_finite()) {
+                issues.push(ValidationIssue::new(
+                    format!("filters.{filter_name}.seeds.point"),
+                    "streamline seed point coordinates must be finite numbers",
+                    None,
+                ));
+            }
+        }
+        StreamlineSeedsSpec::Points(pts) => {
+            if pts.is_empty() {
+                issues.push(ValidationIssue::new(
+                    format!("filters.{filter_name}.seeds.points"),
+                    "streamline seed points list must not be empty",
+                    Some("provide at least one finite [x, y, z] seed point".to_string()),
+                ));
+            } else if !pts.iter().all(|pt| pt.iter().all(|v| v.is_finite())) {
+                issues.push(ValidationIssue::new(
+                    format!("filters.{filter_name}.seeds.points"),
+                    "streamline seed point coordinates must be finite numbers",
+                    None,
+                ));
+            }
+        }
+        StreamlineSeedsSpec::Line(line) => {
+            if !line.from.iter().all(|v| v.is_finite()) {
+                issues.push(ValidationIssue::new(
+                    format!("filters.{filter_name}.seeds.line.from"),
+                    "streamline line seed start coordinates must be finite numbers",
+                    None,
+                ));
+            }
+            if !line.to.iter().all(|v| v.is_finite()) {
+                issues.push(ValidationIssue::new(
+                    format!("filters.{filter_name}.seeds.line.to"),
+                    "streamline line seed end coordinates must be finite numbers",
+                    None,
+                ));
+            }
+            if line.count == 0 {
+                issues.push(ValidationIssue::new(
+                    format!("filters.{filter_name}.seeds.line.count"),
+                    "streamline line seed count must be at least 1",
+                    Some("use a positive seed count such as 16".to_string()),
+                ));
+            }
+        }
+        StreamlineSeedsSpec::Plane(plane) => {
+            if let Some(orig) = plane.origin
+                && !orig.iter().all(|v| v.is_finite())
+            {
+                issues.push(ValidationIssue::new(
+                    format!("filters.{filter_name}.seeds.plane.origin"),
+                    "streamline plane seed origin coordinates must be finite numbers",
+                    None,
+                ));
+            }
+            if !plane.normal.iter().all(|v| v.is_finite()) {
+                issues.push(ValidationIssue::new(
+                    format!("filters.{filter_name}.seeds.plane.normal"),
+                    "streamline plane seed normal coordinates must be finite numbers",
+                    None,
+                ));
+            } else if plane.normal[0] * plane.normal[0]
+                + plane.normal[1] * plane.normal[1]
+                + plane.normal[2] * plane.normal[2]
+                <= 1e-24
+            {
+                issues.push(ValidationIssue::new(
+                    format!("filters.{filter_name}.seeds.plane.normal"),
+                    "must not be [0, 0, 0]",
+                    Some(
+                        "use a non-zero plane normal such as [1, 0, 0], [0, 1, 0], or [0, 0, 1]"
+                            .to_string(),
+                    ),
+                ));
+            }
+            if let Some(ext) = plane.extent
+                && (!ext.iter().all(|v| v.is_finite()) || ext[0] <= 0.0 || ext[1] <= 0.0)
+            {
+                issues.push(ValidationIssue::new(
+                    format!("filters.{filter_name}.seeds.plane.extent"),
+                    format!(
+                        "streamline plane seed extent must have positive finite dimensions, got [{}, {}]",
+                        ext[0], ext[1]
+                    ),
+                    Some("use positive [width, height] dimensions".to_string()),
+                ));
+            }
+            if plane.count[0] == 0 || plane.count[1] == 0 {
+                issues.push(ValidationIssue::new(
+                    format!("filters.{filter_name}.seeds.plane.count"),
+                    format!(
+                        "streamline plane seed count must have positive dimensions, got [{}, {}]",
+                        plane.count[0], plane.count[1]
+                    ),
+                    Some("use positive grid counts such as [5, 5]".to_string()),
+                ));
+            }
+        }
+    }
+}
+
+fn augment_streamline_metadata(meta: &mut DatasetMetadata) {
+    // Streamlines sample source cell arrays onto streamline vertices (`point_data`) and
+    // attach `"arc_length"` and `"integration_time"` point arrays plus `"seed_id"` cell data.
+    for (cell_name, cell_meta) in meta.cell_arrays.clone() {
+        meta.point_arrays.entry(cell_name).or_insert(cell_meta);
+    }
+    let synthetic_scalar = ArrayMetadata {
+        components: ComponentCount::Scalar,
+        component_ranges: vec![Some(ValueRange { min: 0.0, max: 1.0 })],
+        magnitude_range: Some(ValueRange { min: 0.0, max: 1.0 }),
+    };
+    meta.point_arrays
+        .entry("arc_length".to_string())
+        .or_insert_with(|| synthetic_scalar.clone());
+    meta.point_arrays
+        .entry("integration_time".to_string())
+        .or_insert_with(|| synthetic_scalar.clone());
+    meta.cell_arrays
+        .entry("seed_id".to_string())
+        .or_insert(synthetic_scalar);
+}
+
+fn validate_streamlines_vectors(
+    filter_name: &str,
+    raw: &str,
+    input_name: &str,
+    dataset_meta: Option<&DatasetMetadata>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let vectors_path = format!("filters.{filter_name}.vectors");
+
+    let parsed = match ParsedArrayRef::parse(raw) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            let suggestion = suggest_component_for_malformed_ref(raw);
+            issues.push(ValidationIssue::new(
+                &vectors_path,
+                format!("invalid array reference \"{raw}\""),
+                suggestion,
+            ));
+            return;
+        }
+    };
+
+    if let Some(comp) = parsed.component {
+        let fixed = match parsed.association {
+            Some(assoc) => format!("{assoc}:{}", parsed.name),
+            None => parsed.name.clone(),
+        };
+        issues.push(ValidationIssue::new(
+            &vectors_path,
+            format!(
+                "streamlines vectors reference \"{raw}\" must not specify a component selector \":{comp}\""
+            ),
+            Some(format!("use the 3-component vector array \"{fixed}\" directly")),
+        ));
+        return;
+    }
+
+    let Some(meta) = dataset_meta else {
+        return;
+    };
+
+    let found_array: Option<(ArrayAssociation, &ArrayMetadata)> = match parsed.association {
+        Some(ArrayAssociation::Point) => meta
+            .point_arrays
+            .get(&parsed.name)
+            .map(|a| (ArrayAssociation::Point, a)),
+        Some(ArrayAssociation::Cell) => meta
+            .cell_arrays
+            .get(&parsed.name)
+            .map(|a| (ArrayAssociation::Cell, a)),
+        None => meta
+            .point_arrays
+            .get(&parsed.name)
+            .map(|a| (ArrayAssociation::Point, a))
+            .or_else(|| {
+                meta.cell_arrays
+                    .get(&parsed.name)
+                    .map(|a| (ArrayAssociation::Cell, a))
+            }),
+    };
+
+    let Some((_assoc, array_meta)) = found_array else {
+        if parsed.association == Some(ArrayAssociation::Point)
+            && meta.cell_arrays.contains_key(&parsed.name)
+        {
+            let fixed = ParsedArrayRef {
+                association: Some(ArrayAssociation::Cell),
+                name: parsed.name.clone(),
+                component: None,
+            };
+            issues.push(ValidationIssue::new(
+                &vectors_path,
+                format!(
+                    "no point array \"{}\" on \"{input_name}\" (exists as a cell array)",
+                    parsed.name
+                ),
+                Some(format!("did you mean \"{fixed}\"?")),
+            ));
+            return;
+        }
+        if parsed.association == Some(ArrayAssociation::Cell)
+            && meta.point_arrays.contains_key(&parsed.name)
+        {
+            let fixed = ParsedArrayRef {
+                association: Some(ArrayAssociation::Point),
+                name: parsed.name.clone(),
+                component: None,
+            };
+            issues.push(ValidationIssue::new(
+                &vectors_path,
+                format!(
+                    "no cell array \"{}\" on \"{input_name}\" (exists as a point array)",
+                    parsed.name
+                ),
+                Some(format!("did you mean \"{fixed}\"?")),
+            ));
+            return;
+        }
+
+        let candidates = meta.all_array_names();
+        let suggestion = suggest_array_name(&parsed.name, &candidates);
+        issues.push(ValidationIssue::new(
+            &vectors_path,
+            format!("no array \"{}\" on \"{input_name}\"", parsed.name),
+            suggestion,
+        ));
+        return;
+    };
+
+    if array_meta.components != ComponentCount::Vector3 {
+        let mut vec_candidates: Vec<&str> = meta
+            .point_arrays
+            .iter()
+            .filter(|(_, a)| a.components == ComponentCount::Vector3)
+            .map(|(k, _)| k.as_str())
+            .collect();
+        for (k, a) in &meta.cell_arrays {
+            if a.components == ComponentCount::Vector3 && !meta.point_arrays.contains_key(k) {
+                vec_candidates.push(k.as_str());
+            }
+        }
+        let suggestion = if vec_candidates.is_empty() {
+            Some("streamlines require a 3-component vector array".to_string())
+        } else {
+            Some(format!(
+                "use a 3-component vector array such as {}",
+                format_quoted_list(&vec_candidates)
+            ))
+        };
+        issues.push(ValidationIssue::new(
+            &vectors_path,
+            format!(
+                "streamlines vectors array \"{}\" on \"{input_name}\" has {} component(s), expected 3",
+                parsed.name,
+                array_meta.components.as_usize()
             ),
             suggestion,
         ));

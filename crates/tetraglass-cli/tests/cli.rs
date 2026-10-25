@@ -482,6 +482,7 @@ fn gallery_scenes_and_author_scene_skill_example_validate_and_match_baselines() 
         "contour",
         "clip",
         "threshold",
+        "streamlines",
     ];
 
     let mut failures = Vec::new();
@@ -683,7 +684,14 @@ fn mdbook_guide_and_gallery_cover_all_filters_and_chapters_exist() {
         }
     }
 
-    for expected_filter in ["surface", "slice", "contour", "clip", "threshold"] {
+    for expected_filter in [
+        "surface",
+        "slice",
+        "contour",
+        "clip",
+        "threshold",
+        "streamlines",
+    ] {
         assert!(
             seen_filter_types.contains(expected_filter),
             "gallery/ scenes do not cover filter type `{expected_filter}`"

@@ -528,6 +528,72 @@
             "input",
             "field"
           ]
+        },
+        {
+          "description": "Integrates streamlines through a 3-component vector field on the input volume dataset (`\"streamlines\"`).",
+          "type": "object",
+          "properties": {
+            "direction": {
+              "description": "Integration direction: `\"forward\"` (default), `\"backward\"`, or `\"both\"`.",
+              "$ref": "#/$defs/StreamlineDirectionSpec",
+              "default": "forward"
+            },
+            "input": {
+              "description": "Name of the input source or filter.",
+              "type": "string"
+            },
+            "integrator": {
+              "description": "ODE integrator: `\"rk45\"` (default) or `\"rk4\"`.",
+              "$ref": "#/$defs/StreamlineIntegratorSpec",
+              "default": "rk45"
+            },
+            "max_length": {
+              "description": "Optional maximum arc length per integration direction (`> 0.0`). Defaults to `4.0 * bounds.diagonal()`.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "default": null
+            },
+            "seeds": {
+              "description": "Seed point generator (`\"point\"`, `\"points\"`, `\"line\"`, or `\"plane\"`).",
+              "$ref": "#/$defs/StreamlineSeedsSpec"
+            },
+            "step_size": {
+              "description": "Optional initial / fixed integration step size (`> 0.0`). Defaults to `0.01 * bounds.diagonal()`.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "default": null
+            },
+            "tube_radius": {
+              "description": "Optional tube radius in world units (`> 0.0`) used when displayed with `\"tubes\"` or `\"surface\"` style.\nDefaults to `0.012 * bounds.diagonal()`.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "streamlines"
+            },
+            "vectors": {
+              "description": "Vector attribute array reference (`\"[point:|cell:]<array>\"`, 3 components) to integrate.",
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "input",
+            "vectors",
+            "seeds"
+          ]
         }
       ]
     },
@@ -882,6 +948,211 @@
           "description": "Gmsh MSH 2.2 or 4.1 mesh (`.msh`).",
           "type": "string",
           "const": "msh"
+        }
+      ]
+    },
+    "StreamlineDirectionSpec": {
+      "description": "Integration direction for streamlines (`filters.<name>.direction`).",
+      "oneOf": [
+        {
+          "description": "Integrate forward along `+v(x)` (default).",
+          "type": "string",
+          "const": "forward"
+        },
+        {
+          "description": "Integrate backward along `-v(x)`.",
+          "type": "string",
+          "const": "backward"
+        },
+        {
+          "description": "Integrate both backward and forward from each seed and join into a single polyline.",
+          "type": "string",
+          "const": "both"
+        }
+      ]
+    },
+    "StreamlineIntegratorSpec": {
+      "description": "Numerical ODE integrator for streamlines (`filters.<name>.integrator`).",
+      "oneOf": [
+        {
+          "description": "Adaptive Dormand-Prince RK4(5) integrator (default).",
+          "type": "string",
+          "const": "rk45"
+        },
+        {
+          "description": "Fixed-step classical 4th-order Runge-Kutta integrator.",
+          "type": "string",
+          "const": "rk4"
+        }
+      ]
+    },
+    "StreamlineLineSeedSpec": {
+      "description": "Uniform line-segment seed generator (`{ \"line\": { \"from\": [...], \"to\": [...], \"count\": n } }`).",
+      "type": "object",
+      "properties": {
+        "count": {
+          "description": "Number of seed points (`>= 1`) uniformly spaced along the segment.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "from": {
+          "description": "Start point `[x, y, z]` of the seed segment.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "to": {
+          "description": "End point `[x, y, z]` of the seed segment.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to",
+        "count"
+      ]
+    },
+    "StreamlinePlaneSeedSpec": {
+      "description": "Rectangular plane-grid seed generator (`{ \"plane\": { \"origin\": [...], \"normal\": [...], \"extent\": [w, h], \"count\": [nu, nv] } }`).",
+      "type": "object",
+      "properties": {
+        "count": {
+          "description": "Grid resolution `[nu, nv]` along the two in-plane axes (`nu >= 1`, `nv >= 1`).",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "extent": {
+          "description": "Optional width and height `[w, h]` of the seed grid on the plane. Defaults to `[0.5 * diag, 0.5 * diag]` when omitted.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "normal": {
+          "description": "Plane normal `[nx, ny, nz]` (must be non-zero; normalized automatically).",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "origin": {
+          "description": "Optional center `[x, y, z]` of the seed plane. Defaults to the center of the input dataset bounds when omitted.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "normal",
+        "count"
+      ]
+    },
+    "StreamlineSeedsSpec": {
+      "description": "Seed specification for streamline integration (`filters.<name>.seeds`).",
+      "oneOf": [
+        {
+          "description": "A single seed point `[x, y, z]`.",
+          "type": "object",
+          "properties": {
+            "point": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "point"
+          ]
+        },
+        {
+          "description": "An explicit list of seed points `[[x, y, z], ...]`.",
+          "type": "object",
+          "properties": {
+            "points": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "maxItems": 3,
+                "minItems": 3
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "points"
+          ]
+        },
+        {
+          "description": "`count` seed points uniformly spaced along the segment from `from` to `to`.",
+          "type": "object",
+          "properties": {
+            "line": {
+              "$ref": "#/$defs/StreamlineLineSeedSpec"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "line"
+          ]
+        },
+        {
+          "description": "A `count[0] * count[1]` rectangular grid of seed points on a plane.",
+          "type": "object",
+          "properties": {
+            "plane": {
+              "$ref": "#/$defs/StreamlinePlaneSeedSpec"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "plane"
+          ]
         }
       ]
     },

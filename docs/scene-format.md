@@ -45,7 +45,8 @@ Every filter has `type` and `input`. Arrays on the input are carried to the outp
 "cut": { "type": "slice", "input": "flow", "origin": [1.0, 0.5, 0.5], "normal": [1.0, 0.0, 0.0] },
 "iso": { "type": "contour", "input": "flow", "field": "velocity:magnitude", "values": [0.5, 1.0, 1.5] },
 "half": { "type": "clip", "input": "flow", "origin": [1.0, 0.5, 0.5], "normal": [1.0, 0.0, 0.0], "keep": "back", "mode": "exact" },
-"band": { "type": "threshold", "input": "flow", "field": "pressure", "min": 100.0, "max": 200.0 }
+"band": { "type": "threshold", "input": "flow", "field": "pressure", "min": 100.0, "max": 200.0 },
+"traces": { "type": "streamlines", "input": "flow", "vectors": "velocity", "seeds": { "line": { "from": [0.1, 0.1, 0.5], "to": [0.1, 0.9, 0.5], "count": 16 } }, "direction": "both", "integrator": "rk45", "tube_radius": 0.02 }
 ```
 
 | `type` | Milestone | Fields |
@@ -55,7 +56,7 @@ Every filter has `type` and `input`. Arrays on the input are carried to the outp
 | `contour` | M2 | `field` (array reference, scalar or component), `values` (list of numbers) |
 | `clip` | M2 | `origin`, `normal`, `keep` (`"front"` default or `"back"`), `mode` (`"exact"` default or `"crinkle"`) |
 | `threshold` | M2 | `field`, `min`, `max` (either may be omitted for one-sided) |
-| `streamlines` | M4 | `vectors`, `seeds` (`{"point": [...]}`, `{"line": {"from": [...], "to": [...], "count": n}}` or `{"plane": {...}}`), `max_length`, `direction` (`"forward"`, `"backward"`, `"both"`) |
+| `streamlines` | M4 | `vectors` (3-component vector array reference), `seeds` (`{"point": [...]}`, `{"points": [[...], ...]}`, `{"line": {"from": [...], "to": [...], "count": n}}`, or `{"plane": {"origin": [...], "normal": [...], "extent": [w, h], "count": [nu, nv]}}`), `max_length` (optional, `> 0`), `step_size` (optional, `> 0`), `direction` (`"forward"` default, `"backward"`, `"both"`), `integrator` (`"rk45"` default or `"rk4"`), `tube_radius` (optional, `> 0`) |
 | `glyphs` | M4 | `vectors`, `shape` (`"arrow"`, `"cone"`, `"sphere"`), `scale_by` (`"magnitude"` or a number), `every` (stride) |
 | `resample` | M4 | `dimensions` ([nx, ny, nz]); output used by the `volume` representation |
 
