@@ -13,13 +13,18 @@
 //! ```
 //! use tetraglass_core::{SyntheticCellLayout, SyntheticGridSpec};
 //! use tetraglass_filters::{
-//!     ClipKeep, ClipMode, ClipParams, ContourParams, SliceParams, ThresholdParams,
+//!     ClipKeep, ClipMode, ClipParams, ContourParams, SliceParams, TetLocator, ThresholdParams,
 //!     clip, contour, extract_tet_view_surface, linearize_default, slice, threshold,
 //! };
 //!
 //! let grid = SyntheticGridSpec::new(4, 4, 4, SyntheticCellLayout::Hexahedra).generate()?;
 //! let view = linearize_default(&grid)?;
 //! assert_eq!(view.num_tets(), grid.num_cells() * 6);
+//!
+//! // BVH cell locator for 3D point location and field interpolation
+//! let locator = TetLocator::new(&view);
+//! let hit = locator.locate([0.25, 0.5, 0.75]).expect("point inside domain");
+//! assert!(hit.source_cell_id < grid.num_cells() as u32);
 //!
 //! // Plane slice across the linearized tetrahedral view
 //! let cut_surface = slice(&view, &SliceParams::new([0.0, 0.0, 1.0]))?;
@@ -44,6 +49,7 @@ mod basis;
 mod clip;
 mod contour;
 mod linearize;
+mod locator;
 mod marching_tets;
 mod slice;
 mod surface;
@@ -54,6 +60,10 @@ pub use contour::{
     ContourComponent, ContourParams, contour, contour_grid, contour_with_chunk_size,
 };
 pub use linearize::{DEFAULT_SUBDIVISIONS, LinearizeParams, linearize, linearize_default};
+pub use locator::{
+    BvhNode, DEFAULT_LOCATOR_CHUNK_SIZE, DEFAULT_LOCATOR_TOLERANCE, DEFAULT_MAX_LEAF_TETS,
+    TetLocation, TetLocator, tet_barycentric_coordinates,
+};
 pub use marching_tets::{
     DEFAULT_TET_CHUNK_SIZE, EdgeKey, clip_crinkle_tets_with_chunk_size, clip_tets_with_chunk_size,
     extract_isosurface, extract_isosurfaces_with_chunk_size,

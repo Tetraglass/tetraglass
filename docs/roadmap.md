@@ -2,7 +2,7 @@
 
 Milestones run in order. `/next-task` picks the first unticked task of the first unfinished milestone. Each task should fit one or two evening sessions; split bigger ones into lettered sub-tasks (M2.3a, M2.3b) before starting. Dates are estimates at roughly 8 to 10 hours a week.
 
-Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 complete (2026-10-24); M3 in progress.**
+Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 complete (2026-10-24); M3 complete (2026-10-25); M4 in progress.**
 
 ---
 
@@ -55,7 +55,7 @@ Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 complete (2026-
 - [x] **M2.10 Documentation.** mdBook guide (getting started, embedding, scene format, filters), rustdoc examples, gallery covering every filter.
 - [x] **M2.11 Gate and release 0.1.** `/milestone-gate` (`docs/milestones/m2-gate.md`, completed 2026-10-24).
 
-## M3 Web and export (Aug–Oct 2027)
+## M3 Web and export (Aug–Oct 2027 — Completed 2026-10-25)
 
 **Gate:** one CFD result shown both in Cycles (via `render --engine cycles`) and in the browser.
 
@@ -72,7 +72,7 @@ Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 complete (2026-
 
 **Gate:** release 0.2 with a stable scene schema.
 
-- [ ] **M4.1 Cell locator.** BVH over linearized tets for point location.
+- [x] **M4.1 Cell locator.** BVH over linearized tets for point location.
 - [ ] **M4.2 Streamlines.** Point, line and plane seeds; RK4, then adaptive RK45; lines and tubes.
 - [ ] **M4.3 Glyphs.** Instanced arrows, cones and spheres, oriented and scaled by a vector.
 - [ ] **M4.4 Volume rendering.** Resample to a regular grid; GPU ray marching; transfer function editor in the viewer.

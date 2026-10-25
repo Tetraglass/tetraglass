@@ -13,8 +13,9 @@ use tetraglass_core::{
     m2_benchmark_tet_spec,
 };
 use tetraglass_filters::{
-    ClipKeep, ClipMode, ClipParams, ContourParams, SliceParams, ThresholdParams, clip, contour,
-    extract_external_surface, extract_tet_view_surface, linearize_default, slice, threshold,
+    ClipKeep, ClipMode, ClipParams, ContourParams, SliceParams, TetLocator, ThresholdParams, clip,
+    contour, extract_external_surface, extract_tet_view_surface, linearize_default, slice,
+    threshold,
 };
 
 fn main() {
@@ -28,6 +29,8 @@ fn main() {
         assert_eq!(surf.num_faces(), small.expected_boundary_faces());
         let view = linearize_default(&grid).expect("linearize small synthetic mesh");
         assert_eq!(view.num_tets(), small.num_cells());
+        let locator = TetLocator::new(&view);
+        assert!(locator.locate([0.5, 0.5, 0.5]).is_some());
         let cut = slice(&view, &SliceParams::new([0.0, 0.0, 1.0])).expect("slice small mesh");
         assert!(cut.num_triangles() > 0);
         return;
@@ -169,6 +172,40 @@ fn main() {
         clipped_crinkle_surf.num_triangles(),
         threshed.num_tets(),
         threshed_surf.num_triangles(),
+    );
+
+    // BVH cell locator build and point location on 600k tets (`M4.1`)
+    let t_bvh_build = Instant::now();
+    let locator = TetLocator::new(&tet_lin);
+    let bvh_build_ms = t_bvh_build.elapsed().as_secs_f64() * 1000.0;
+
+    let mut sample_pts = Vec::with_capacity(10_000);
+    for i in 0..10_000 {
+        let u = (f64::from(i) + 0.5) / 10_000.0;
+        let x = 0.05 + 0.90 * u;
+        let y = 0.50 + 0.40 * (u * 20.0).sin();
+        let z = 0.50 + 0.40 * (u * 20.0).cos();
+        sample_pts.push([x, y, z]);
+    }
+
+    let t_bvh_query = Instant::now();
+    let batch_hits = locator.locate_many(&sample_pts);
+    let bvh_batch_ms = t_bvh_query.elapsed().as_secs_f64() * 1000.0;
+    assert!(batch_hits.iter().all(Option::is_some));
+
+    let t_bvh_hint = Instant::now();
+    let mut hint = None;
+    for &pt in &sample_pts {
+        let hit = locator
+            .locate_with_hint(pt, hint)
+            .expect("locate helical point");
+        hint = Some(hit.tet_index);
+    }
+    let bvh_hint_ms = t_bvh_hint.elapsed().as_secs_f64() * 1000.0;
+
+    println!(
+        "[BVH Cell Locator 600k tets] build: {bvh_build_ms:.2} ms ({} nodes) | 10k batch locate: {bvh_batch_ms:.2} ms | 10k hinted walk: {bvh_hint_ms:.2} ms",
+        locator.num_nodes(),
     );
 
     assert!(

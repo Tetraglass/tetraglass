@@ -62,8 +62,8 @@ pub fn signed_tet_volume(p0: [f64; 3], p1: [f64; 3], p2: [f64; 3], p3: [f64; 3])
 pub struct TetView {
     points: Arc<[[f64; 3]]>,
     bounds: Option<BoundingBox>,
-    tets: Vec<[u32; 4]>,
-    tet_source_cells: Vec<u32>,
+    tets: Arc<[[u32; 4]]>,
+    tet_source_cells: Arc<[u32]>,
     point_data: Attributes,
     cell_data: Attributes,
 }
@@ -78,12 +78,14 @@ impl TetView {
     /// - `cell_data.expected_tuples()` must equal `tets.len()`.
     pub fn new(
         points: impl Into<Arc<[[f64; 3]]>>,
-        tets: Vec<[u32; 4]>,
-        tet_source_cells: Vec<u32>,
+        tets: impl Into<Arc<[[u32; 4]]>>,
+        tet_source_cells: impl Into<Arc<[u32]>>,
         point_data: Attributes,
         cell_data: Attributes,
     ) -> Result<Self, CoreError> {
         let points: Arc<[[f64; 3]]> = points.into();
+        let tets: Arc<[[u32; 4]]> = tets.into();
+        let tet_source_cells: Arc<[u32]> = tet_source_cells.into();
         let num_points = points.len();
         if u32::try_from(num_points).is_err() {
             return Err(CoreError::IndexOverflow {
@@ -176,10 +178,22 @@ impl TetView {
         &self.tets
     }
 
+    /// Returns a cheap clone of the reference-counted tetrahedron connectivity buffer.
+    #[must_use]
+    pub fn tets_arc(&self) -> Arc<[[u32; 4]]> {
+        Arc::clone(&self.tets)
+    }
+
     /// Returns the originating source cell index in the input [`UnstructuredGrid`] for each tetrahedron.
     #[must_use]
     pub fn tet_source_cells(&self) -> &[u32] {
         &self.tet_source_cells
+    }
+
+    /// Returns a cheap clone of the reference-counted originating source cell index buffer.
+    #[must_use]
+    pub fn tet_source_cells_arc(&self) -> Arc<[u32]> {
+        Arc::clone(&self.tet_source_cells)
     }
 
     /// Returns the point [`Attributes`].
@@ -234,7 +248,7 @@ impl TetView {
     #[must_use]
     pub fn total_volume(&self) -> f64 {
         let mut vol = 0.0;
-        for &[i0, i1, i2, i3] in &self.tets {
+        for &[i0, i1, i2, i3] in self.tets.iter() {
             vol += signed_tet_volume(
                 self.points[i0 as usize],
                 self.points[i1 as usize],
