@@ -360,3 +360,11 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: D-020 (supported Blender versions are Blender 4.2 LTS and Blender 5.x LTS; `blender/` stays in this repository under GPL-3.0-or-later).
 - Dependencies added: none.
 - Follow-ups: M3.7 Cycles from the CLI (`/blender-bridge`).
+
+## 2026-10-25 — M3.7 Cycles from the CLI (`crates/tetraglass-cli`)
+
+- Done: implemented `tetraglass render <scene.json> [-o <out.png>] [--engine cycles] [--samples <n>] [--device <dev>] [--save-blend <path.blend>] [--blender-path <bin>] [--blender-scripts <dir>] [--timeout <secs>]` in `crates/tetraglass-cli/src/main.rs` (`run_cycles_render`, `discover_blender_binary`, `discover_blender_render_script`, `probe_blender_binary`, `extract_progress_field`). Discovers an installed Blender executable (`--blender-path`, `TETRAGLASS_BLENDER_PATH`, `BLENDER_PATH`, `PATH`, and standard installation locations) and locates `blender/render.py` at runtime without embedding GPL scripts (`D-011`, `.agents/rules/blender-gpl.md`). Writes the evaluated scene bundle to a temporary directory, spawns headless Blender with a configurable timeout, streams `PROGRESS` lines to stderr in real time, cleans up the temporary bundle, and outputs the JSON `RenderSummary` enriched with `blender_version`, `cycles_samples`, `cycles_device`, and `save_blend`.
+- Tests: `render_cycles_command_discovers_blender_streams_progress_saves_blend_and_prints_json_summary` in `crates/tetraglass-cli/tests/cli.rs`.
+- Decisions: none (enforces `D-011` and `D-020`).
+- Dependencies added: none.
+- Follow-ups: M3.8 Gate (`/milestone-gate`).

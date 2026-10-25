@@ -2,18 +2,26 @@
 //!
 //! See `docs/design-plan.md` and `docs/scene-format.md` for command usage and JSON outputs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::env;
 use std::fmt::Write as _;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tetraglass_core::{
     Attributes, BoundingBox, CellType, ScalarType, TimeSeries, UnstructuredGrid,
 };
 use tetraglass_egui as _;
-use tetraglass_export::{write_scene_bundle_output, write_scene_glb_output};
+use tetraglass_export::{
+    export_evaluated_scene_to_bundle, write_bundle_dir, write_scene_bundle_output,
+    write_scene_glb_output,
+};
 use tetraglass_io::{
     IoError, MeshFormat, detect_format_from_bytes, detect_format_from_extension, read_msh_series,
     read_pvd_series_with_loader, read_vtu_series,
@@ -24,10 +32,11 @@ use tetraglass_render::{
     Renderer, ScalarComponent, SurfaceStyle,
 };
 use tetraglass_scene::{
-    ArrayAssociation, BackgroundSpec, ColorbarSpec, ColormapName, DEFAULT_MSAA_SAMPLES,
-    DEFAULT_OUTPUT_SIZE, DatasetMetadata, EvaluatedColoring, EvaluatedRepresentation,
-    EvaluatedScene, RenderEngine, RepresentationStyle, ResolvedComponent, Scene, SceneEvaluator,
-    ValidationIssue, ValidationReport, scene_json_schema_string, validate_scene_with_metadata,
+    ArrayAssociation, BackgroundSpec, ColorbarSpec, ColormapName, DEFAULT_CYCLES_SAMPLES,
+    DEFAULT_MSAA_SAMPLES, DEFAULT_OUTPUT_SIZE, DatasetMetadata, EvaluatedColoring,
+    EvaluatedRepresentation, EvaluatedScene, RenderEngine, RepresentationStyle, ResolvedComponent,
+    Scene, SceneEvaluator, ValidationIssue, ValidationReport, scene_json_schema_string,
+    validate_scene_with_metadata,
 };
 use tetraglass_viewer::{ViewerOptions, run_viewer};
 
@@ -96,7 +105,7 @@ fn help_text() -> String {
         "tetraglass {}\n\n\
          Usage:\n  \
          tetraglass inspect <file> [--json]\n  \
-         tetraglass render <scene.json> [-o <out.png>] [--engine <raster|cycles>]\n  \
+         tetraglass render <scene.json> [-o <out.png>] [--engine <raster|cycles>] [--samples <n>] [--device <dev>] [--save-blend <path.blend>]\n  \
          tetraglass validate <scene.json> [--json]\n  \
          tetraglass view <scene.json|mesh> [--frames <n>]\n  \
          tetraglass export <scene.json> -o <out.glb|dir> [--format <gltf|bundle>] [--all-steps]\n  \
@@ -614,19 +623,47 @@ struct RenderSummary {
     time: f64,
     representations: Vec<RenderRepresentationSummary>,
     camera: RenderCameraSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blender_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cycles_samples: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cycles_device: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    save_blend: Option<String>,
+}
+
+const DEFAULT_CYCLES_TIMEOUT_SECS: u64 = 300;
+static CYCLES_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone)]
+struct CyclesRunResult {
+    blender_version: String,
+    active_device: String,
+    samples: u32,
+    saved_blend: Option<String>,
 }
 
 fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
     let mut scene_arg: Option<&str> = None;
     let mut output_override: Option<&str> = None;
     let mut engine_override: Option<RenderEngine> = None;
+    let mut samples_override: Option<u32> = None;
+    let mut device_override: Option<&str> = None;
+    let mut save_blend_override: Option<&str> = None;
+    let mut blender_path_override: Option<&str> = None;
+    let mut blender_scripts_override: Option<&str> = None;
+    let mut timeout_secs: u64 = DEFAULT_CYCLES_TIMEOUT_SECS;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--help" | "-h" => {
                 return Ok(
-                    "Usage: tetraglass render <scene.json> [-o <out.png>] [--engine <raster|cycles>]"
+                    "Usage: tetraglass render <scene.json> [-o <out.png>] [--engine <raster|cycles>] \
+                     [--samples <n>] [--device <auto|cpu|gpu|metal|optix|cuda|hip>] \
+                     [--save-blend <path.blend>] [--blender-path <bin>] [--blender-scripts <dir>] \
+                     [--timeout <secs>]"
                         .to_string(),
                 );
             }
@@ -656,6 +693,76 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
                         )));
                     }
                 };
+            }
+            "--samples" => {
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    return Err(CliFailure::Message(
+                        "missing sample count after `--samples`".to_string(),
+                    ));
+                };
+                let parsed = val.parse::<u32>().map_err(|_| {
+                    CliFailure::Message(format!("invalid `--samples` value `{val}`"))
+                })?;
+                if parsed == 0 {
+                    return Err(CliFailure::Message(
+                        "`--samples` must be greater than 0".to_string(),
+                    ));
+                }
+                samples_override = Some(parsed);
+            }
+            "--device" => {
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    return Err(CliFailure::Message(
+                        "missing device name after `--device`".to_string(),
+                    ));
+                };
+                device_override = Some(val.as_str());
+            }
+            "--save-blend" => {
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    return Err(CliFailure::Message(
+                        "missing `.blend` path after `--save-blend`".to_string(),
+                    ));
+                };
+                save_blend_override = Some(val.as_str());
+            }
+            "--blender-path" => {
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    return Err(CliFailure::Message(
+                        "missing executable path after `--blender-path`".to_string(),
+                    ));
+                };
+                blender_path_override = Some(val.as_str());
+            }
+            "--blender-scripts" => {
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    return Err(CliFailure::Message(
+                        "missing directory path after `--blender-scripts`".to_string(),
+                    ));
+                };
+                blender_scripts_override = Some(val.as_str());
+            }
+            "--timeout" => {
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    return Err(CliFailure::Message(
+                        "missing seconds value after `--timeout`".to_string(),
+                    ));
+                };
+                let parsed = val.parse::<u64>().map_err(|_| {
+                    CliFailure::Message(format!("invalid `--timeout` seconds `{val}`"))
+                })?;
+                if parsed == 0 {
+                    return Err(CliFailure::Message(
+                        "`--timeout` must be greater than 0".to_string(),
+                    ));
+                }
+                timeout_secs = parsed;
             }
             other if other.starts_with('-') => {
                 return Err(CliFailure::Message(format!(
@@ -717,12 +824,6 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
             .map_or(RenderEngine::Raster, |o| o.engine)
     });
 
-    if engine == RenderEngine::Cycles {
-        return Err(CliFailure::Message(
-            "Cycles rendering arrives in milestone M3 (use `--engine raster`)".to_string(),
-        ));
-    }
-
     // Load all sources referenced in the scene as lazy TimeSeries.
     let mut evaluator = SceneEvaluator::new();
     for (name, source) in &scene.sources {
@@ -741,48 +842,83 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
         max: [1.0, 1.0, 1.0],
     });
     let camera = build_camera_from_scene(&scene, bounds);
-    let background_srgb = resolve_background_srgb(&scene.view.background);
 
-    // Render offscreen via wgpu HeadlessContext.
-    let ctx = HeadlessContext::new().map_err(|e| CliFailure::Message(e.to_string()))?;
-    let renderer = Renderer::new(ctx.device(), ctx.queue(), DEFAULT_COLOR_FORMAT, msaa)
-        .map_err(|e| CliFailure::Message(e.to_string()))?;
-    let target = OffscreenTarget::new(ctx.device(), size[0], size[1], DEFAULT_COLOR_FORMAT, msaa)
-        .map_err(|e| CliFailure::Message(e.to_string()))?;
+    let cycles_result = if engine == RenderEngine::Cycles {
+        let scene_cycles = scene.output.as_ref().and_then(|o| o.cycles.as_ref());
+        let samples = samples_override
+            .or_else(|| scene_cycles.map(|c| c.samples))
+            .unwrap_or(DEFAULT_CYCLES_SAMPLES);
+        let device = device_override
+            .map(ToOwned::to_owned)
+            .or_else(|| scene_cycles.map(|c| c.device.clone()))
+            .unwrap_or_else(|| "auto".to_string());
+        let save_blend_path = if let Some(blend_str) = save_blend_override {
+            Some(PathBuf::from(blend_str))
+        } else {
+            scene_cycles
+                .and_then(|c| c.save_blend.as_deref())
+                .map(|rel| resolve_relative_path(base_dir, rel))
+        };
 
-    let dataset_center = bounds.center();
-    let mut gpu_surfaces: Vec<GpuSurface> = Vec::with_capacity(evaluated.representations.len());
-    for rep in &evaluated.representations {
-        let style = build_surface_style(rep);
-        let gpu_surf = renderer
-            .upload_surface_with_center(ctx.device(), &rep.surface, dataset_center, &style)
+        Some(run_cycles_render(
+            &scene,
+            &evaluated,
+            base_dir,
+            &output_path,
+            size,
+            samples,
+            &device,
+            save_blend_path.as_deref(),
+            blender_path_override,
+            blender_scripts_override,
+            timeout_secs,
+        )?)
+    } else {
+        let background_srgb = resolve_background_srgb(&scene.view.background);
+
+        // Render offscreen via wgpu HeadlessContext.
+        let ctx = HeadlessContext::new().map_err(|e| CliFailure::Message(e.to_string()))?;
+        let renderer = Renderer::new(ctx.device(), ctx.queue(), DEFAULT_COLOR_FORMAT, msaa)
             .map_err(|e| CliFailure::Message(e.to_string()))?;
-        gpu_surfaces.push(gpu_surf);
-    }
+        let target =
+            OffscreenTarget::new(ctx.device(), size[0], size[1], DEFAULT_COLOR_FORMAT, msaa)
+                .map_err(|e| CliFailure::Message(e.to_string()))?;
 
-    let gpu_refs: Vec<&GpuSurface> = gpu_surfaces.iter().collect();
-    let annotations = build_annotations_from_scene(&scene, &evaluated);
-    let mut encoder = ctx.device().create_command_encoder(&Default::default());
-    renderer
-        .render_with_annotations(
-            ctx.device(),
-            &mut encoder,
-            ctx.queue(),
-            &target,
-            &camera,
-            background_srgb,
-            &gpu_refs,
-            &annotations,
-        )
-        .map_err(|e| CliFailure::Message(e.to_string()))?;
-    ctx.queue().submit(std::iter::once(encoder.finish()));
+        let dataset_center = bounds.center();
+        let mut gpu_surfaces: Vec<GpuSurface> = Vec::with_capacity(evaluated.representations.len());
+        for rep in &evaluated.representations {
+            let style = build_surface_style(rep);
+            let gpu_surf = renderer
+                .upload_surface_with_center(ctx.device(), &rep.surface, dataset_center, &style)
+                .map_err(|e| CliFailure::Message(e.to_string()))?;
+            gpu_surfaces.push(gpu_surf);
+        }
 
-    let image = ctx
-        .readback_target(&target)
-        .map_err(|e| CliFailure::Message(e.to_string()))?;
-    image
-        .save_png(&output_path)
-        .map_err(|e| CliFailure::Message(e.to_string()))?;
+        let gpu_refs: Vec<&GpuSurface> = gpu_surfaces.iter().collect();
+        let annotations = build_annotations_from_scene(&scene, &evaluated);
+        let mut encoder = ctx.device().create_command_encoder(&Default::default());
+        renderer
+            .render_with_annotations(
+                ctx.device(),
+                &mut encoder,
+                ctx.queue(),
+                &target,
+                &camera,
+                background_srgb,
+                &gpu_refs,
+                &annotations,
+            )
+            .map_err(|e| CliFailure::Message(e.to_string()))?;
+        ctx.queue().submit(std::iter::once(encoder.finish()));
+
+        let image = ctx
+            .readback_target(&target)
+            .map_err(|e| CliFailure::Message(e.to_string()))?;
+        image
+            .save_png(&output_path)
+            .map_err(|e| CliFailure::Message(e.to_string()))?;
+        None
+    };
 
     let rep_summaries: Vec<RenderRepresentationSummary> = evaluated
         .representations
@@ -825,9 +961,330 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
             zoom: camera.zoom,
             view_angle: camera.view_angle_deg,
         },
+        blender_version: cycles_result.as_ref().map(|r| r.blender_version.clone()),
+        cycles_samples: cycles_result.as_ref().map(|r| r.samples),
+        cycles_device: cycles_result.as_ref().map(|r| r.active_device.clone()),
+        save_blend: cycles_result.and_then(|r| r.saved_blend),
     };
 
     serde_json::to_string_pretty(&summary).map_err(|e| CliFailure::Message(e.to_string()))
+}
+
+#[allow(clippy::too_many_arguments)] // Reason: CLI render entrypoint passes resolved scene, output, device, and runtime paths directly
+fn run_cycles_render(
+    scene: &Scene,
+    evaluated: &EvaluatedScene,
+    scene_base_dir: &Path,
+    output_path: &Path,
+    size: [u32; 2],
+    samples: u32,
+    device: &str,
+    save_blend_path: Option<&Path>,
+    explicit_blender_path: Option<&str>,
+    explicit_scripts_dir: Option<&str>,
+    timeout_secs: u64,
+) -> Result<CyclesRunResult, CliFailure> {
+    let (blender_bin, probed_version) = discover_blender_binary(explicit_blender_path)?;
+    let render_script = discover_blender_render_script(explicit_scripts_dir, scene_base_dir)?;
+
+    let archive = export_evaluated_scene_to_bundle(scene, evaluated)
+        .map_err(|e| CliFailure::Message(format!("bundle export failed: {e}")))?;
+
+    let nonce = CYCLES_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let temp_bundle_dir = env::temp_dir().join(format!(
+        "tetraglass-cycles-bundle-{}-{nanos}-{nonce}",
+        std::process::id()
+    ));
+
+    write_bundle_dir(&temp_bundle_dir, &archive).map_err(|e| {
+        CliFailure::Message(format!(
+            "failed to write temporary bundle `{}`: {e}",
+            temp_bundle_dir.display()
+        ))
+    })?;
+
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            let _ = std::fs::remove_dir_all(&temp_bundle_dir);
+            CliFailure::Message(format!(
+                "cannot create output directory `{}`: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    let mut cmd = Command::new(&blender_bin);
+    cmd.arg("--background")
+        .arg("--factory-startup")
+        .arg("--python")
+        .arg(&render_script)
+        .arg("--")
+        .arg("--bundle")
+        .arg(&temp_bundle_dir)
+        .arg("--out")
+        .arg(output_path)
+        .arg("--samples")
+        .arg(samples.to_string())
+        .arg("--device")
+        .arg(device)
+        .arg("--width")
+        .arg(size[0].to_string())
+        .arg("--height")
+        .arg(size[1].to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    if let Some(blend_path) = save_blend_path {
+        cmd.arg("--save-blend").arg(blend_path);
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&temp_bundle_dir);
+            return Err(CliFailure::Message(format!(
+                "failed to launch Blender (`{}`): {e}",
+                blender_bin.display()
+            )));
+        }
+    };
+
+    let (tx, rx) = mpsc::channel::<String>();
+    if let Some(stdout) = child.stdout.take() {
+        let tx_out = tx.clone();
+        thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().map_while(Result::ok) {
+                let _ = tx_out.send(line);
+            }
+        });
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let tx_err = tx.clone();
+        thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                let _ = tx_err.send(line);
+            }
+        });
+    }
+    drop(tx);
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut recent_lines: VecDeque<String> = VecDeque::with_capacity(30);
+    let mut active_device = device.to_uppercase();
+    let mut reported_version = probed_version;
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_dir_all(&temp_bundle_dir);
+            let tail = Vec::from(recent_lines).join("\n");
+            return Err(CliFailure::Message(format!(
+                "Blender Cycles render timed out after {timeout_secs}s.\nLast output lines:\n{tail}"
+            )));
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let wait_slice = remaining.min(Duration::from_millis(200));
+
+        match rx.recv_timeout(wait_slice) {
+            Ok(line) => {
+                if line.starts_with("PROGRESS ") {
+                    eprintln!("{line}");
+                    if let Some(dev) = extract_progress_field(&line, "device") {
+                        active_device = dev;
+                    }
+                    if let Some(ver) = extract_progress_field(&line, "blender_version") {
+                        reported_version = ver;
+                    }
+                }
+                if recent_lines.len() >= 25 {
+                    recent_lines.pop_front();
+                }
+                recent_lines.push_back(line);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let status = child.wait().map_err(|e| {
+        let _ = std::fs::remove_dir_all(&temp_bundle_dir);
+        CliFailure::Message(format!("failed waiting on Blender process: {e}"))
+    });
+    let _ = std::fs::remove_dir_all(&temp_bundle_dir);
+    let status = status?;
+
+    if !status.success() {
+        let tail = Vec::from(recent_lines).join("\n");
+        return Err(CliFailure::Message(format!(
+            "Blender exited with status {status}.\nLast output lines:\n{tail}"
+        )));
+    }
+
+    if !output_path.is_file() {
+        let tail = Vec::from(recent_lines).join("\n");
+        return Err(CliFailure::Message(format!(
+            "Blender finished with exit code 0, but output image `{}` was not created.\nLast output lines:\n{tail}",
+            output_path.display()
+        )));
+    }
+
+    Ok(CyclesRunResult {
+        blender_version: reported_version,
+        active_device,
+        samples,
+        saved_blend: save_blend_path.map(|p| p.display().to_string()),
+    })
+}
+
+fn extract_progress_field(line: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    let idx = line.find(&prefix)?;
+    let rest = &line[idx + prefix.len()..];
+    if let Some(quoted) = rest.strip_prefix('"') {
+        let end = quoted.find('"')?;
+        Some(quoted[..end].to_string())
+    } else {
+        let token = rest.split_whitespace().next()?;
+        Some(token.to_string())
+    }
+}
+
+fn discover_blender_binary(explicit_path: Option<&str>) -> Result<(PathBuf, String), CliFailure> {
+    if let Some(explicit) = explicit_path {
+        let candidate = PathBuf::from(explicit);
+        return probe_blender_binary(&candidate).ok_or_else(|| {
+            CliFailure::Message(format!(
+                "Blender executable not found or failed to run at `--blender-path {explicit}`. \
+                 Install Blender 4.2 LTS or 5.x LTS, or pass a valid path via `--blender-path` or `TETRAGLASS_BLENDER_PATH`."
+            ))
+        });
+    }
+
+    for env_key in ["TETRAGLASS_BLENDER_PATH", "BLENDER_PATH"] {
+        if let Ok(val) = env::var(env_key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                let candidate = PathBuf::from(trimmed);
+                if let Some(found) = probe_blender_binary(&candidate) {
+                    return Ok(found);
+                }
+                return Err(CliFailure::Message(format!(
+                    "Blender executable configured in `{env_key}={trimmed}` could not be executed. \
+                     Check that `{trimmed}` exists and is an executable Blender binary."
+                )));
+            }
+        }
+    }
+
+    let candidates = [
+        PathBuf::from("blender"),
+        PathBuf::from("/opt/homebrew/bin/blender"),
+        PathBuf::from("/usr/local/bin/blender"),
+        PathBuf::from("/Applications/Blender.app/Contents/MacOS/Blender"),
+        PathBuf::from("/usr/bin/blender"),
+        PathBuf::from("/snap/bin/blender"),
+    ];
+    for candidate in candidates {
+        if let Some(found) = probe_blender_binary(&candidate) {
+            return Ok(found);
+        }
+    }
+
+    Err(CliFailure::Message(
+        "Blender executable not found on `PATH` or standard installation locations. \
+         Install Blender (4.2 LTS or 5.x LTS) or set `TETRAGLASS_BLENDER_PATH` / `--blender-path <bin>`."
+            .to_string(),
+    ))
+}
+
+fn probe_blender_binary(candidate: &Path) -> Option<(PathBuf, String)> {
+    let out = Command::new(candidate)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let first_line = stdout.lines().next()?.trim();
+    if !first_line.starts_with("Blender") {
+        return None;
+    }
+    let version = first_line
+        .strip_prefix("Blender")
+        .map_or(first_line, str::trim)
+        .to_string();
+    Some((candidate.to_path_buf(), version))
+}
+
+fn discover_blender_render_script(
+    explicit_dir: Option<&str>,
+    scene_base_dir: &Path,
+) -> Result<PathBuf, CliFailure> {
+    if let Some(explicit) = explicit_dir {
+        let p = PathBuf::from(explicit);
+        let candidate = if p.is_file() { p } else { p.join("render.py") };
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        return Err(CliFailure::Message(format!(
+            "Blender script `render.py` not found at `--blender-scripts {explicit}` (`{}`)",
+            candidate.display()
+        )));
+    }
+
+    if let Ok(env_dir) = env::var("TETRAGLASS_BLENDER_SCRIPTS") {
+        let trimmed = env_dir.trim();
+        if !trimmed.is_empty() {
+            let p = PathBuf::from(trimmed);
+            let candidate = if p.is_file() { p } else { p.join("render.py") };
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+            return Err(CliFailure::Message(format!(
+                "Blender script `render.py` not found at `TETRAGLASS_BLENDER_SCRIPTS={trimmed}` (`{}`)",
+                candidate.display()
+            )));
+        }
+    }
+
+    let mut search_paths: Vec<PathBuf> = vec![
+        PathBuf::from("blender/render.py"),
+        scene_base_dir.join("blender/render.py"),
+        scene_base_dir.join("../blender/render.py"),
+    ];
+
+    if let Ok(exe_path) = env::current_exe() {
+        let mut cur = exe_path.parent();
+        for _ in 0..5 {
+            if let Some(dir) = cur {
+                search_paths.push(dir.join("blender/render.py"));
+                cur = dir.parent();
+            }
+        }
+    }
+
+    for candidate in search_paths {
+        if candidate.is_file() {
+            return Ok(candidate.canonicalize().unwrap_or(candidate));
+        }
+    }
+
+    Err(CliFailure::Message(
+        "could not locate `blender/render.py` at runtime; pass `--blender-scripts <dir>` or set `TETRAGLASS_BLENDER_SCRIPTS`"
+            .to_string(),
+    ))
 }
 
 fn build_annotations_from_scene(scene: &Scene, evaluated: &EvaluatedScene) -> Annotations {

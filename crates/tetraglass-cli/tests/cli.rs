@@ -789,3 +789,104 @@ fn export_command_writes_single_glb_and_time_series_manifest() {
     assert!(series_bundle_dir.join("manifest.json").is_file());
     assert_eq!(series_bundle_summary["files"].as_array().unwrap().len(), 3);
 }
+
+#[test]
+fn render_cycles_command_discovers_blender_streams_progress_saves_blend_and_prints_json_summary() {
+    let root = workspace_root();
+    let out_dir = root.join("target/cli-cycles-tests");
+    let _ = std::fs::remove_dir_all(&out_dir);
+    std::fs::create_dir_all(&out_dir).expect("create cli-cycles-tests dir");
+
+    // 1. Verify clear error reporting when `--blender-path` points to a non-existent binary.
+    let bad_blender_out = tetraglass_bin()
+        .arg("render")
+        .arg(root.join("gallery/slice.json"))
+        .arg("-o")
+        .arg(out_dir.join("never.png"))
+        .arg("--engine")
+        .arg("cycles")
+        .arg("--blender-path")
+        .arg("/nonexistent/path/to/blender")
+        .output()
+        .expect("run `tetraglass render --engine cycles` with invalid blender path");
+    assert!(!bad_blender_out.status.success());
+    let bad_stderr = String::from_utf8_lossy(&bad_blender_out.stderr);
+    assert!(
+        bad_stderr.contains("Blender executable not found"),
+        "unexpected stderr: {bad_stderr}"
+    );
+
+    // 2. Check if Blender is installed on this machine; if so, run a full Cycles render via the CLI.
+    let candidate_bins = [
+        std::env::var("TETRAGLASS_BLENDER_PATH").ok(),
+        std::env::var("BLENDER_PATH").ok(),
+        Some("blender".to_string()),
+        Some("/opt/homebrew/bin/blender".to_string()),
+        Some("/Applications/Blender.app/Contents/MacOS/Blender".to_string()),
+    ];
+    let has_blender = candidate_bins.into_iter().flatten().any(|bin| {
+        Command::new(bin)
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| out.status.success())
+    });
+    if !has_blender {
+        return;
+    }
+
+    let cycles_png = out_dir.join("slice_cycles.png");
+    let cycles_blend = out_dir.join("slice_cycles.blend");
+    let cycles_out = tetraglass_bin()
+        .arg("render")
+        .arg(root.join("gallery/slice.json"))
+        .arg("-o")
+        .arg(&cycles_png)
+        .arg("--engine")
+        .arg("cycles")
+        .arg("--samples")
+        .arg("4")
+        .arg("--device")
+        .arg("cpu")
+        .arg("--save-blend")
+        .arg(&cycles_blend)
+        .output()
+        .expect("run `tetraglass render --engine cycles`");
+    let stdout = String::from_utf8_lossy(&cycles_out.stdout);
+    let stderr = String::from_utf8_lossy(&cycles_out.stderr);
+    assert!(
+        cycles_out.status.success(),
+        "`tetraglass render --engine cycles` failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    // Verify `PROGRESS` lines were streamed to stderr.
+    assert!(stderr.contains("PROGRESS stage=import status=starting"));
+    assert!(stderr.contains("PROGRESS stage=import status=done"));
+    assert!(stderr.contains("PROGRESS stage=cycles device=CPU samples=4"));
+    assert!(stderr.contains("PROGRESS stage=save_blend"));
+    assert!(stderr.contains("PROGRESS stage=render frame=0"));
+    assert!(stderr.contains("PROGRESS stage=complete"));
+
+    // Verify JSON summary matches `RenderSummary` plus `blender_version`, `cycles_samples`, `cycles_device`, `save_blend`.
+    let summary: serde_json::Value =
+        serde_json::from_slice(&cycles_out.stdout).expect("parse Cycles render JSON summary");
+    assert_eq!(summary["engine"], "cycles");
+    assert_eq!(summary["size"], serde_json::json!([800, 600]));
+    assert_eq!(summary["cycles_samples"], 4);
+    assert_eq!(summary["cycles_device"], "CPU");
+    assert!(
+        summary["blender_version"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty()),
+        "expected non-empty blender_version in summary: {summary}"
+    );
+    assert_eq!(
+        summary["save_blend"].as_str(),
+        Some(cycles_blend.display().to_string().as_str())
+    );
+    assert_eq!(summary["representations"].as_array().unwrap().len(), 2);
+
+    assert!(cycles_blend.is_file(), "expected saved .blend file");
+    let rendered = RenderedImage::load_png(&cycles_png).expect("load Cycles rendered PNG");
+    assert_eq!(rendered.width(), 800);
+    assert_eq!(rendered.height(), 600);
+}
