@@ -1152,3 +1152,60 @@ fn inspect_validate_and_render_legacy_vtk_files() {
     assert_eq!(img.width(), 320);
     assert_eq!(img.height(), 240);
 }
+
+#[test]
+fn render_command_supports_path_tracer_engine_and_ssao_flag() {
+    let root = workspace_root();
+    let out_dir = root.join("target/cli-pt-ssao-tests");
+    let _ = std::fs::remove_dir_all(&out_dir);
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let pt_png = out_dir.join("threshold_path_traced.png");
+    let pt_out = tetraglass_bin()
+        .arg("render")
+        .arg(root.join("gallery/threshold.json"))
+        .arg("-o")
+        .arg(&pt_png)
+        .arg("--engine")
+        .arg("path-tracer")
+        .arg("--samples")
+        .arg("8")
+        .output()
+        .expect("run `tetraglass render --engine path-tracer`");
+    assert!(
+        pt_out.status.success(),
+        "`render --engine path-tracer` failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&pt_out.stdout),
+        String::from_utf8_lossy(&pt_out.stderr)
+    );
+    let pt_summary: serde_json::Value =
+        serde_json::from_slice(&pt_out.stdout).expect("parse path-tracer JSON summary");
+    assert_eq!(pt_summary["engine"], "path-tracer");
+    assert_eq!(pt_summary["path_trace_samples"], 8);
+    let pt_img = RenderedImage::load_png(&pt_png).expect("load path-traced PNG");
+    assert_eq!(pt_img.width(), 800);
+    assert_eq!(pt_img.height(), 600);
+
+    let ssao_png = out_dir.join("threshold_ssao.png");
+    let ssao_out = tetraglass_bin()
+        .arg("render")
+        .arg(root.join("gallery/threshold.json"))
+        .arg("-o")
+        .arg(&ssao_png)
+        .arg("--ssao")
+        .output()
+        .expect("run `tetraglass render --ssao`");
+    assert!(
+        ssao_out.status.success(),
+        "`render --ssao` failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&ssao_out.stdout),
+        String::from_utf8_lossy(&ssao_out.stderr)
+    );
+    let ssao_summary: serde_json::Value =
+        serde_json::from_slice(&ssao_out.stdout).expect("parse ssao JSON summary");
+    assert_eq!(ssao_summary["engine"], "raster");
+    assert_eq!(ssao_summary["ssao"], true);
+    let ssao_img = RenderedImage::load_png(&ssao_png).expect("load SSAO PNG");
+    assert_eq!(ssao_img.width(), 800);
+    assert_eq!(ssao_img.height(), 600);
+}

@@ -468,3 +468,16 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-002, D-007, D-010, and D-014).
 - Dependencies added: none.
 - Follow-ups: M5.3b Progressive path tracer in the viewer and CLI.
+
+## 2026-10-26 — M5.3b Progressive path tracer in the viewer and CLI
+
+- Integrated the compute-shader progressive path tracer into `tetraglass-egui`:
+  - Extended `ViewportState` (`crates/tetraglass-egui/src/lib.rs`) with `path_tracing_enabled`, `set_path_tracing_enabled`, `path_trace_config`, `set_path_trace_config`, `path_trace_accumulated_samples`, and `is_path_trace_converged`, and re-exported `PathTraceConfig as ViewportPathTraceConfig`.
+  - Updated `ViewportPrepareCallback::prepare` to lazily build and upload `GpuPathTraceScene` from the active primary and additional surfaces when `path_tracing_enabled` is true, dispatch `PathTracer::step_with_overlays` (preserving wireframe edges and 2D annotations), and request continuous egui repaints while `!path_tracer.is_converged()`.
+- Integrated interactive path-tracing controls into `tetraglass-viewer` (`crates/tetraglass-viewer/src/lib.rs`):
+  - Added `ViewerDocument` and `ViewerSession` path-tracing state and validation methods (`set_path_trace_config`, `set_path_trace_samples`, `set_path_trace_bounces`, `set_path_trace_light_softness`).
+  - Added a `"Progressive path tracer"` checkbox, sliders for `"Target samples"`, `"Max bounces"`, and `"Light softness"`, and a live convergence status counter (`"Path tracer: {accum} / {target} spp (converging... | converged)"`) in the left control panel.
+- Extended `tetraglass render` in `tetraglass-cli` (`crates/tetraglass-cli/src/main.rs`) with `--engine path-tracer` (using `TriangleBvh`, `GpuPathTraceScene`, and `PathTracer::render_converged` with wireframe and 2D annotation overlays) and `--ssao` (enabling `SsaoConfig` in raster mode) without altering the frozen `v1` scene schema.
+- Added offscreen progressive accumulation tests in `crates/tetraglass-egui/tests/viewport_offscreen.rs`, unit tests in `crates/tetraglass-viewer/src/lib.rs`, and CLI integration tests in `crates/tetraglass-cli/tests/cli.rs`, and visually verified `threshold_path_traced.png` and `threshold_ssao.png`.
+- Verification: `cargo xtask verify` passed (format, clippy `-D warnings`, all workspace unit/integration/visual regression tests, `wasm32-unknown-unknown` build, and `cargo deny check`).
+- Follow-ups: M5.4 Persistent Blender worker and live link.

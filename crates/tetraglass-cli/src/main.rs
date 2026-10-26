@@ -28,8 +28,9 @@ use tetraglass_io::{
 };
 use tetraglass_render::{
     Annotations, Camera, ColorBy, ColorbarAnnotation, ColorbarPlacement, ColormapKind,
-    DEFAULT_COLOR_FORMAT, DEFAULT_COLORBAR_TICKS, GpuSurface, HeadlessContext, OffscreenTarget,
-    Renderer, ScalarComponent, SurfaceStyle,
+    DEFAULT_COLOR_FORMAT, DEFAULT_COLORBAR_TICKS, GpuPathTraceScene, GpuSurface, HeadlessContext,
+    OffscreenTarget, PathTraceConfig, PathTraceInput, PathTracer, Renderer, ScalarComponent,
+    SsaoConfig, SurfaceStyle, TriangleBvh,
 };
 use tetraglass_scene::{
     ArrayAssociation, BackgroundSpec, ColorbarSpec, ColormapName, DEFAULT_CYCLES_SAMPLES,
@@ -105,7 +106,7 @@ fn help_text() -> String {
         "tetraglass {}\n\n\
          Usage:\n  \
          tetraglass inspect <file> [--json]\n  \
-         tetraglass render <scene.json> [-o <out.png>] [--engine <raster|cycles>] [--samples <n>] [--device <dev>] [--save-blend <path.blend>] [--all-steps] [--from-step <n>] [--to-step <n>]\n  \
+         tetraglass render <scene.json> [-o <out.png>] [--engine <raster|cycles|path-tracer>] [--samples <n>] [--ssao] [--device <dev>] [--save-blend <path.blend>] [--all-steps] [--from-step <n>] [--to-step <n>]\n  \
          tetraglass validate <scene.json> [--json]\n  \
          tetraglass view <scene.json|mesh> [--frames <n>]\n  \
          tetraglass export <scene.json> -o <out.glb|dir> [--format <gltf|bundle>] [--all-steps]\n  \
@@ -620,12 +621,29 @@ struct RenderFrameSummary {
     image: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum CliRenderEngine {
+    Raster,
+    Cycles,
+    PathTracer,
+}
+
+impl From<RenderEngine> for CliRenderEngine {
+    fn from(engine: RenderEngine) -> Self {
+        match engine {
+            RenderEngine::Raster => Self::Raster,
+            RenderEngine::Cycles => Self::Cycles,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct RenderSummary {
     image: String,
     size: [u32; 2],
     msaa: u32,
-    engine: RenderEngine,
+    engine: CliRenderEngine,
     time_step: usize,
     time: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -640,9 +658,14 @@ struct RenderSummary {
     cycles_device: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     save_blend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_trace_samples: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssao: Option<bool>,
 }
 
 const DEFAULT_CYCLES_TIMEOUT_SECS: u64 = 300;
+const DEFAULT_PATH_TRACE_SAMPLES: u32 = 32;
 static CYCLES_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
@@ -656,8 +679,9 @@ struct CyclesRunResult {
 fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
     let mut scene_arg: Option<&str> = None;
     let mut output_override: Option<&str> = None;
-    let mut engine_override: Option<RenderEngine> = None;
+    let mut engine_override: Option<CliRenderEngine> = None;
     let mut samples_override: Option<u32> = None;
+    let mut ssao_flag = false;
     let mut device_override: Option<&str> = None;
     let mut save_blend_override: Option<&str> = None;
     let mut blender_path_override: Option<&str> = None;
@@ -672,8 +696,8 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
         match args[i].as_str() {
             "--help" | "-h" => {
                 return Ok(
-                    "Usage: tetraglass render <scene.json> [-o <out.png>] [--engine <raster|cycles>] \
-                     [--samples <n>] [--device <auto|cpu|gpu|metal|optix|cuda|hip>] \
+                    "Usage: tetraglass render <scene.json> [-o <out.png>] [--engine <raster|cycles|path-tracer>] \
+                     [--samples <n>] [--ssao] [--device <auto|cpu|gpu|metal|optix|cuda|hip>] \
                      [--save-blend <path.blend>] [--all-steps] [--from-step <n>] [--to-step <n>] \
                      [--blender-path <bin>] [--blender-scripts <dir>] [--timeout <secs>]"
                         .to_string(),
@@ -719,19 +743,23 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
                 i += 1;
                 let Some(val) = args.get(i) else {
                     return Err(CliFailure::Message(
-                        "missing engine name after `--engine` (expected `raster` or `cycles`)"
+                        "missing engine name after `--engine` (expected `raster`, `cycles`, or `path-tracer`)"
                             .to_string(),
                     ));
                 };
                 engine_override = match val.as_str() {
-                    "raster" => Some(RenderEngine::Raster),
-                    "cycles" => Some(RenderEngine::Cycles),
+                    "raster" => Some(CliRenderEngine::Raster),
+                    "cycles" => Some(CliRenderEngine::Cycles),
+                    "path-tracer" | "pathtracer" => Some(CliRenderEngine::PathTracer),
                     other => {
                         return Err(CliFailure::Message(format!(
-                            "unknown render engine `{other}`; expected `raster` or `cycles`"
+                            "unknown render engine `{other}`; expected `raster`, `cycles`, or `path-tracer`"
                         )));
                     }
                 };
+            }
+            "--ssao" => {
+                ssao_flag = true;
             }
             "--samples" => {
                 i += 1;
@@ -868,7 +896,7 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
         scene
             .output
             .as_ref()
-            .map_or(RenderEngine::Raster, |o| o.engine)
+            .map_or(CliRenderEngine::Raster, |o| CliRenderEngine::from(o.engine))
     });
 
     // Load all sources referenced in the scene as lazy TimeSeries.
@@ -949,7 +977,8 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
     });
     let camera = build_camera_from_scene(&scene, bounds);
 
-    let cycles_result = if engine == RenderEngine::Cycles {
+    let mut path_trace_samples_used: Option<u32> = None;
+    let cycles_result = if engine == CliRenderEngine::Cycles {
         let scene_cycles = scene.output.as_ref().and_then(|o| o.cycles.as_ref());
         let samples = samples_override
             .or_else(|| scene_cycles.map(|c| c.samples))
@@ -986,38 +1015,80 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
 
         // Render offscreen via wgpu HeadlessContext.
         let ctx = HeadlessContext::new().map_err(|e| CliFailure::Message(e.to_string()))?;
-        let renderer = Renderer::new(ctx.device(), ctx.queue(), DEFAULT_COLOR_FORMAT, msaa)
+        let mut renderer = Renderer::new(ctx.device(), ctx.queue(), DEFAULT_COLOR_FORMAT, msaa)
             .map_err(|e| CliFailure::Message(e.to_string()))?;
+        if ssao_flag {
+            renderer.set_ssao(SsaoConfig::enabled());
+        }
         let target =
             OffscreenTarget::new(ctx.device(), size[0], size[1], DEFAULT_COLOR_FORMAT, msaa)
                 .map_err(|e| CliFailure::Message(e.to_string()))?;
 
+        let mut path_tracer = if engine == CliRenderEngine::PathTracer {
+            let pt_samples = samples_override.unwrap_or(DEFAULT_PATH_TRACE_SAMPLES);
+            path_trace_samples_used = Some(pt_samples);
+            let mut pt = PathTracer::new(ctx.device(), DEFAULT_COLOR_FORMAT, msaa)
+                .map_err(|e| CliFailure::Message(e.to_string()))?;
+            pt.set_config(PathTraceConfig::new(pt_samples));
+            Some(pt)
+        } else {
+            None
+        };
+
         let dataset_center = bounds.center();
         for (ev, frame_path) in evaluated_steps.iter().zip(&frame_paths) {
+            let mut styles: Vec<SurfaceStyle> = Vec::with_capacity(ev.representations.len());
             let mut gpu_surfaces: Vec<GpuSurface> = Vec::with_capacity(ev.representations.len());
             for rep in &ev.representations {
                 let style = build_surface_style(rep);
                 let gpu_surf = renderer
                     .upload_surface_with_center(ctx.device(), &rep.surface, dataset_center, &style)
                     .map_err(|e| CliFailure::Message(e.to_string()))?;
+                styles.push(style);
                 gpu_surfaces.push(gpu_surf);
             }
 
             let gpu_refs: Vec<&GpuSurface> = gpu_surfaces.iter().collect();
             let annotations = build_annotations_from_scene(&scene, ev);
             let mut encoder = ctx.device().create_command_encoder(&Default::default());
-            renderer
-                .render_with_annotations(
+            if let Some(pt) = path_tracer.as_mut() {
+                let pt_inputs: Vec<PathTraceInput<'_>> = ev
+                    .representations
+                    .iter()
+                    .zip(&styles)
+                    .map(|(rep, style)| PathTraceInput {
+                        surface: &rep.surface,
+                        style,
+                    })
+                    .collect();
+                let bvh = TriangleBvh::build(&pt_inputs, dataset_center)
+                    .map_err(|e| CliFailure::Message(e.to_string()))?;
+                let pt_scene = GpuPathTraceScene::from_bvh(ctx.device(), &bvh);
+                pt.render_converged(
                     ctx.device(),
                     &mut encoder,
                     ctx.queue(),
                     &target,
+                    &pt_scene,
                     &camera,
                     background_srgb,
-                    &gpu_refs,
-                    &annotations,
+                    Some((&renderer, gpu_refs.as_slice(), &annotations)),
                 )
                 .map_err(|e| CliFailure::Message(e.to_string()))?;
+            } else {
+                renderer
+                    .render_with_annotations(
+                        ctx.device(),
+                        &mut encoder,
+                        ctx.queue(),
+                        &target,
+                        &camera,
+                        background_srgb,
+                        &gpu_refs,
+                        &annotations,
+                    )
+                    .map_err(|e| CliFailure::Message(e.to_string()))?;
+            }
             ctx.queue().submit(std::iter::once(encoder.finish()));
 
             let image = ctx
@@ -1104,6 +1175,8 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
         cycles_samples: cycles_result.as_ref().map(|r| r.samples),
         cycles_device: cycles_result.as_ref().map(|r| r.active_device.clone()),
         save_blend: cycles_result.and_then(|r| r.saved_blend),
+        path_trace_samples: path_trace_samples_used,
+        ssao: ssao_flag.then_some(true),
     };
 
     serde_json::to_string_pretty(&summary).map_err(|e| CliFailure::Message(e.to_string()))

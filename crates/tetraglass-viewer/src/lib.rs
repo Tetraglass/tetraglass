@@ -309,6 +309,8 @@ pub struct ViewerDocument {
     opacity: f64,
     transfer_function: Vec<[f64; 2]>,
     ssao: ViewportSsaoConfig,
+    path_tracing_enabled: bool,
+    path_trace_config: ViewportPathTraceConfig,
     watcher: Option<SceneFileWatcher>,
     last_reload_error: Option<String>,
     reload_count: usize,
@@ -368,6 +370,8 @@ impl ViewerDocument {
             opacity: 1.0,
             transfer_function: vec![[0.0, 0.0], [1.0, 1.0]],
             ssao: ViewportSsaoConfig::default(),
+            path_tracing_enabled: false,
+            path_trace_config: ViewportPathTraceConfig::default(),
             watcher,
             last_reload_error: None,
             reload_count: 0,
@@ -405,6 +409,8 @@ impl ViewerDocument {
             opacity: 1.0,
             transfer_function: vec![[0.0, 0.0], [1.0, 1.0]],
             ssao: ViewportSsaoConfig::default(),
+            path_tracing_enabled: false,
+            path_trace_config: ViewportPathTraceConfig::default(),
             watcher: None,
             last_reload_error: None,
             reload_count: 0,
@@ -490,6 +496,8 @@ impl ViewerDocument {
             opacity: 1.0,
             transfer_function: vec![[0.0, 0.0], [1.0, 1.0]],
             ssao: ViewportSsaoConfig::default(),
+            path_tracing_enabled: false,
+            path_trace_config: ViewportPathTraceConfig::default(),
             watcher: None,
             last_reload_error: None,
             reload_count: 0,
@@ -555,6 +563,8 @@ impl ViewerDocument {
             opacity: 1.0,
             transfer_function: vec![[0.0, 0.0], [1.0, 1.0]],
             ssao: ViewportSsaoConfig::default(),
+            path_tracing_enabled: false,
+            path_trace_config: ViewportPathTraceConfig::default(),
             watcher: None,
             last_reload_error: None,
             reload_count: 0,
@@ -1090,6 +1100,78 @@ impl ViewerDocument {
         Ok(true)
     }
 
+    /// Returns whether progressive path tracing is enabled on this document (`M5.3b`).
+    #[must_use]
+    pub const fn path_tracing_enabled(&self) -> bool {
+        self.path_tracing_enabled
+    }
+
+    /// Enables or disables progressive path tracing (`M5.3b`).
+    pub fn set_path_tracing_enabled(&mut self, enabled: bool) -> bool {
+        if self.path_tracing_enabled == enabled {
+            return false;
+        }
+        self.path_tracing_enabled = enabled;
+        true
+    }
+
+    /// Returns the active [`ViewportPathTraceConfig`] (`M5.3b`).
+    #[must_use]
+    pub const fn path_trace_config(&self) -> ViewportPathTraceConfig {
+        self.path_trace_config
+    }
+
+    /// Updates the [`ViewportPathTraceConfig`] on this document (`M5.3b`).
+    pub fn set_path_trace_config(
+        &mut self,
+        config: ViewportPathTraceConfig,
+    ) -> Result<bool, ViewerError> {
+        if !(1..=1024).contains(&config.samples_per_pixel) {
+            return Err(ViewerError::Validation(format!(
+                "path_trace samples_per_pixel `{}` must be in [1, 1024]",
+                config.samples_per_pixel
+            )));
+        }
+        if !(1..=8).contains(&config.max_bounces) {
+            return Err(ViewerError::Validation(format!(
+                "path_trace max_bounces `{}` must be in [1, 8]",
+                config.max_bounces
+            )));
+        }
+        if !config.light_softness.is_finite() || !(0.0..=0.5).contains(&config.light_softness) {
+            return Err(ViewerError::Validation(format!(
+                "path_trace light_softness `{}` must be finite and in [0.0, 0.5]",
+                config.light_softness
+            )));
+        }
+        if self.path_trace_config == config {
+            return Ok(false);
+        }
+        self.path_trace_config = config;
+        Ok(true)
+    }
+
+    /// Sets the target sample count per pixel in `[1, 1024]` (`M5.3b`).
+    pub fn set_path_trace_samples(&mut self, samples_per_pixel: u32) -> Result<bool, ViewerError> {
+        let mut cfg = self.path_trace_config;
+        cfg.samples_per_pixel = samples_per_pixel;
+        self.set_path_trace_config(cfg)
+    }
+
+    /// Sets the maximum path bounce depth in `[1, 8]` (`M5.3b`).
+    pub fn set_path_trace_bounces(&mut self, max_bounces: u32) -> Result<bool, ViewerError> {
+        let mut cfg = self.path_trace_config;
+        cfg.max_bounces = max_bounces;
+        self.set_path_trace_config(cfg)
+    }
+
+    /// Sets the directional light softness radius in `[0.0, 0.5]` (`M5.3b`).
+    pub fn set_path_trace_light_softness(&mut self, softness: f32) -> Result<bool, ViewerError> {
+        let mut cfg = self.path_trace_config;
+        cfg.light_softness = softness;
+        self.set_path_trace_config(cfg)
+    }
+
     /// Returns the most recent hot-reload error message, if the last reload attempt failed.
     #[must_use]
     pub fn last_reload_error(&self) -> Option<&str> {
@@ -1547,6 +1629,8 @@ impl ViewerSession {
         viewport.set_background_srgb(bg);
         viewport.set_annotations(annotations);
         viewport.set_ssao(doc.ssao());
+        viewport.set_path_trace_config(doc.path_trace_config());
+        viewport.set_path_tracing_enabled(doc.path_tracing_enabled());
 
         let (clip_base_hull, clip_base_tet_view, clip_state) = match doc.resolve_clip_volume()? {
             Some((hull, tet_view, state)) => (Some(hull), Some(tet_view), state),
@@ -2244,6 +2328,10 @@ impl ViewerSession {
             .set_background_srgb(self.doc.background_srgb());
         self.viewport.set_annotations(self.doc.annotations());
         self.viewport.set_ssao(self.doc.ssao());
+        self.viewport
+            .set_path_trace_config(self.doc.path_trace_config());
+        self.viewport
+            .set_path_tracing_enabled(self.doc.path_tracing_enabled());
         Ok(())
     }
 
@@ -2257,6 +2345,48 @@ impl ViewerSession {
     pub fn set_ssao(&mut self, ssao: ViewportSsaoConfig) {
         let _ = self.doc.set_ssao(ssao);
         self.viewport.set_ssao(self.doc.ssao());
+    }
+
+    /// Returns whether progressive path tracing is enabled on the session (`M5.3b`).
+    #[must_use]
+    pub fn path_tracing_enabled(&self) -> bool {
+        self.viewport.path_tracing_enabled()
+    }
+
+    /// Enables or disables progressive path tracing on both the document and the GPU viewport (`M5.3b`).
+    pub fn set_path_tracing_enabled(&mut self, enabled: bool) {
+        let _ = self.doc.set_path_tracing_enabled(enabled);
+        self.viewport
+            .set_path_tracing_enabled(self.doc.path_tracing_enabled());
+    }
+
+    /// Returns the active [`ViewportPathTraceConfig`] on the session (`M5.3b`).
+    #[must_use]
+    pub fn path_trace_config(&self) -> ViewportPathTraceConfig {
+        self.viewport.path_trace_config()
+    }
+
+    /// Updates the [`ViewportPathTraceConfig`] on both the document and the GPU viewport (`M5.3b`).
+    pub fn set_path_trace_config(
+        &mut self,
+        config: ViewportPathTraceConfig,
+    ) -> Result<(), ViewerError> {
+        let _ = self.doc.set_path_trace_config(config)?;
+        self.viewport
+            .set_path_trace_config(self.doc.path_trace_config());
+        Ok(())
+    }
+
+    /// Returns the number of progressively accumulated samples per pixel (`M5.3b`).
+    #[must_use]
+    pub fn path_trace_accumulated_samples(&self) -> u32 {
+        self.viewport.path_trace_accumulated_samples()
+    }
+
+    /// Returns `true` when the progressive path tracer has reached its target sample count (`M5.3b`).
+    #[must_use]
+    pub fn is_path_trace_converged(&self) -> bool {
+        self.viewport.is_path_trace_converged()
     }
 
     /// Renders the viewer UI (left control panel, time slider, field/colormap pickers, hot-reload status,
@@ -2406,6 +2536,8 @@ impl ViewerSession {
         let mut axes_changed_to: Option<bool> = None;
         let mut opacity_changed_to: Option<f64> = None;
         let mut ssao_changed_to: Option<ViewportSsaoConfig> = None;
+        let mut path_tracing_enabled_changed_to: Option<bool> = None;
+        let mut path_trace_config_changed_to: Option<ViewportPathTraceConfig> = None;
         let mut transfer_function_changed_to: Option<Vec<[f64; 2]>> = None;
         let mut trigger_reload = false;
         let mut trigger_load_url = false;
@@ -2631,6 +2763,55 @@ impl ViewerSession {
                     {
                         ssao_changed_to = Some(ssao_cfg);
                     }
+                }
+
+                let mut pt_enabled = self.doc.path_tracing_enabled();
+                if ui
+                    .checkbox(&mut pt_enabled, "Progressive path tracer")
+                    .changed()
+                {
+                    path_tracing_enabled_changed_to = Some(pt_enabled);
+                }
+                if pt_enabled {
+                    let mut pt_cfg = self.doc.path_trace_config();
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut pt_cfg.samples_per_pixel, 1..=256)
+                                .text("Target samples")
+                                .show_value(true),
+                        )
+                        .changed()
+                    {
+                        path_trace_config_changed_to = Some(pt_cfg);
+                    }
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut pt_cfg.max_bounces, 1..=8)
+                                .text("Max bounces")
+                                .show_value(true),
+                        )
+                        .changed()
+                    {
+                        path_trace_config_changed_to = Some(pt_cfg);
+                    }
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut pt_cfg.light_softness, 0.0..=0.35)
+                                .text("Light softness")
+                                .show_value(true),
+                        )
+                        .changed()
+                    {
+                        path_trace_config_changed_to = Some(pt_cfg);
+                    }
+                    let accum = self.viewport.path_trace_accumulated_samples();
+                    let target = pt_cfg.samples_per_pixel;
+                    let status = if self.viewport.is_path_trace_converged() {
+                        "converged"
+                    } else {
+                        "converging..."
+                    };
+                    ui.small(format!("Path tracer: {accum} / {target} spp ({status})"));
                 }
 
                 if let Some([lo, hi]) = self.viewport.effective_range() {
@@ -3031,6 +3212,18 @@ impl ViewerSession {
             && self.doc.set_ssao(new_ssao)
         {
             self.viewport.set_ssao(self.doc.ssao());
+        }
+        if let Some(new_pt_enabled) = path_tracing_enabled_changed_to
+            && self.doc.set_path_tracing_enabled(new_pt_enabled)
+        {
+            self.viewport
+                .set_path_tracing_enabled(self.doc.path_tracing_enabled());
+        }
+        if let Some(new_pt_cfg) = path_trace_config_changed_to
+            && let Ok(true) = self.doc.set_path_trace_config(new_pt_cfg)
+        {
+            self.viewport
+                .set_path_trace_config(self.doc.path_trace_config());
         }
         if let Some(new_tf) = transfer_function_changed_to
             && let Ok(true) = self.doc.set_transfer_function(new_tf)
@@ -3778,15 +3971,45 @@ fn format_probe_value(pv: &PickProbeValue) -> String {
     }
 }
 
-/// Re-exported clip-plane, SSAO, and pick result types (`M2.7`, `M2.8`, `M5.2`).
+/// Re-exported clip-plane, SSAO, path-tracing, and pick result types (`M2.7`, `M2.8`, `M5.2`, `M5.3b`).
 pub use tetraglass_egui::{
-    ViewportClipKeep, ViewportClipPlane, ViewportPickProbeValue, ViewportPickResult,
-    ViewportSsaoConfig,
+    ViewportClipKeep, ViewportClipPlane, ViewportPathTraceConfig, ViewportPickProbeValue,
+    ViewportPickResult, ViewportSsaoConfig,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn viewer_document_path_trace_controls_validate_and_update() {
+        let mut doc = ViewerDocument::default_demo().expect("default demo document");
+        assert!(!doc.path_tracing_enabled());
+        assert_eq!(doc.path_trace_config().samples_per_pixel, 32);
+        assert_eq!(doc.path_trace_config().max_bounces, 3);
+
+        assert!(doc.set_path_tracing_enabled(true));
+        assert!(doc.path_tracing_enabled());
+        assert!(!doc.set_path_tracing_enabled(true));
+
+        assert!(doc.set_path_trace_samples(128).expect("set valid samples"));
+        assert_eq!(doc.path_trace_config().samples_per_pixel, 128);
+        assert!(doc.set_path_trace_samples(0).is_err());
+        assert!(doc.set_path_trace_samples(2048).is_err());
+
+        assert!(doc.set_path_trace_bounces(4).expect("set valid bounces"));
+        assert_eq!(doc.path_trace_config().max_bounces, 4);
+        assert!(doc.set_path_trace_bounces(0).is_err());
+        assert!(doc.set_path_trace_bounces(16).is_err());
+
+        assert!(
+            doc.set_path_trace_light_softness(0.12)
+                .expect("set valid softness")
+        );
+        assert!((doc.path_trace_config().light_softness - 0.12).abs() < 1e-6);
+        assert!(doc.set_path_trace_light_softness(-0.05).is_err());
+        assert!(doc.set_path_trace_light_softness(0.9).is_err());
+    }
 
     #[test]
     fn viewer_document_ssao_controls_validate_and_update() {

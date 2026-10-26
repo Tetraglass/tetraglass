@@ -49,9 +49,10 @@ use egui::{
 use egui_wgpu::wgpu;
 use tetraglass_core::{BoundingBox, SurfaceMesh};
 use tetraglass_render::{
-    Annotations, Camera, ColorBy, DEFAULT_COLOR_FORMAT, GpuSurface, OffscreenTarget,
-    PendingPixelPick, PickTarget, RawPickHit, RenderError, Renderer, ScalarComponent,
-    ShaderClipPlane, SsaoConfig, SurfacePickResult, SurfaceStyle, probe_surface_triangle,
+    Annotations, Camera, ColorBy, DEFAULT_COLOR_FORMAT, GpuPathTraceScene, GpuSurface,
+    OffscreenTarget, PathTraceConfig, PathTraceInput, PathTracer, PendingPixelPick, PickTarget,
+    RawPickHit, RenderError, Renderer, ScalarComponent, ShaderClipPlane, SsaoConfig,
+    SurfacePickResult, SurfaceStyle, probe_surface_triangle,
 };
 
 /// A selectable coloring option for a [`SurfaceMesh`] in a UI field picker.
@@ -141,6 +142,11 @@ fn append_array_options(
 
 struct ViewportGpuInner {
     renderer: Renderer,
+    path_tracer: PathTracer,
+    path_tracing_enabled: bool,
+    pt_scene: Option<GpuPathTraceScene>,
+    pt_scene_dirty: bool,
+    repaint_ctx: Option<egui::Context>,
     target: OffscreenTarget,
     pick_target: PickTarget,
     cpu_surface: Option<Arc<SurfaceMesh>>,
@@ -320,6 +326,7 @@ impl ViewportState {
         let initial_width = 64;
         let initial_height = 64;
         let renderer = Renderer::new(device, queue, DEFAULT_COLOR_FORMAT, sample_count)?;
+        let path_tracer = PathTracer::new(device, DEFAULT_COLOR_FORMAT, sample_count)?;
         let target = OffscreenTarget::new(
             device,
             initial_width,
@@ -336,6 +343,11 @@ impl ViewportState {
 
         let inner = ViewportGpuInner {
             renderer,
+            path_tracer,
+            path_tracing_enabled: false,
+            pt_scene: None,
+            pt_scene_dirty: true,
+            repaint_ctx: None,
             target,
             pick_target,
             cpu_surface: None,
@@ -415,6 +427,7 @@ impl ViewportState {
             guard.cpu_surface = Some(surface);
             guard.gpu_surface = Some(gpu_surface);
             guard.extra_surfaces.clear();
+            guard.pt_scene_dirty = true;
             guard.last_pick = None;
             guard.pending_pick_px = None;
             guard.in_flight_pick = None;
@@ -442,6 +455,7 @@ impl ViewportState {
                 uploaded.push((surf, gpu_surf, style));
             }
             guard.extra_surfaces = uploaded;
+            guard.pt_scene_dirty = true;
         }
         Ok(())
     }
@@ -479,12 +493,14 @@ impl ViewportState {
                 renderer,
                 gpu_surface,
                 style: current_style,
+                pt_scene_dirty,
                 ..
             } = &mut *guard;
             if let Some(gpu_surf) = gpu_surface.as_mut() {
                 renderer.update_surface_style(queue, gpu_surf, surface, &style)?;
             }
             *current_style = style;
+            *pt_scene_dirty = true;
         }
         Ok(())
     }
@@ -571,6 +587,61 @@ impl ViewportState {
         }
     }
 
+    /// Returns `true` if the built-in progressive compute [`PathTracer`] is enabled (`M5.3b`).
+    #[must_use]
+    pub fn path_tracing_enabled(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|g| g.path_tracing_enabled)
+            .unwrap_or(false)
+    }
+
+    /// Enables or disables progressive compute path tracing in the viewport (`M5.3b`).
+    pub fn set_path_tracing_enabled(&mut self, enabled: bool) {
+        if let Ok(mut guard) = self.inner.lock()
+            && guard.path_tracing_enabled != enabled
+        {
+            guard.path_tracing_enabled = enabled;
+            if enabled {
+                guard.path_tracer.reset_accumulation();
+            }
+        }
+    }
+
+    /// Returns the active [`PathTraceConfig`] on the viewport's [`PathTracer`] (`M5.3b`).
+    #[must_use]
+    pub fn path_trace_config(&self) -> PathTraceConfig {
+        self.inner
+            .lock()
+            .map(|g| g.path_tracer.config())
+            .unwrap_or_default()
+    }
+
+    /// Updates the [`PathTraceConfig`] on the viewport's [`PathTracer`] (`M5.3b`).
+    pub fn set_path_trace_config(&mut self, config: PathTraceConfig) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.path_tracer.set_config(config);
+        }
+    }
+
+    /// Returns the number of samples per pixel accumulated so far by the progressive [`PathTracer`] (`M5.3b`).
+    #[must_use]
+    pub fn path_trace_accumulated_samples(&self) -> u32 {
+        self.inner
+            .lock()
+            .map(|g| g.path_tracer.accumulated_samples())
+            .unwrap_or(0)
+    }
+
+    /// Returns `true` if the progressive [`PathTracer`] has reached its target `samples_per_pixel` (`M5.3b`).
+    #[must_use]
+    pub fn is_path_trace_converged(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|g| g.path_tracer.is_converged())
+            .unwrap_or(false)
+    }
+
     /// Updates only the 16-byte GPU shader clip-plane uniform on the uploaded surface(s) (`M2.8`, `D-019`).
     ///
     /// Pass `Some(plane)` while interactively dragging a clip plane for instant 60 FPS feedback,
@@ -588,6 +659,8 @@ impl ViewportState {
                     .renderer
                     .set_surface_clip_plane(queue, gpu, clip_plane);
             }
+            guard.style.clip_plane = clip_plane;
+            guard.pt_scene_dirty = true;
         }
     }
 
@@ -756,22 +829,84 @@ impl egui_wgpu::CallbackTrait for ViewportPrepareCallback {
                     }
                 }
             }
-            let surfaces: Vec<&GpuSurface> = guard
-                .gpu_surface
-                .iter()
-                .chain(guard.extra_surfaces.iter().map(|(_, g, _)| g))
-                .collect();
-            if let Err(err) = guard.renderer.render_with_annotations(
-                device,
-                egui_encoder,
-                queue,
-                &guard.target,
-                &guard.camera,
-                guard.background_srgb,
-                &surfaces,
-                &guard.annotations,
-            ) {
-                log::error!("tetraglass-egui offscreen prepare failed: {err}");
+            if guard.path_tracing_enabled {
+                if guard.pt_scene.is_none() || guard.pt_scene_dirty {
+                    let center = guard
+                        .gpu_surface
+                        .as_ref()
+                        .map_or([0.0, 0.0, 0.0], GpuSurface::dataset_center);
+                    let mut inputs: Vec<PathTraceInput<'_>> = Vec::new();
+                    if let Some(ref cpu_surf) = guard.cpu_surface {
+                        inputs.push(PathTraceInput::new(cpu_surf, &guard.style));
+                    }
+                    for (cpu_surf, _, style) in &guard.extra_surfaces {
+                        inputs.push(PathTraceInput::new(cpu_surf, style));
+                    }
+                    match guard.path_tracer.upload_surfaces(device, &inputs, center) {
+                        Ok(scene) => {
+                            guard.pt_scene = Some(scene);
+                            guard.pt_scene_dirty = false;
+                        }
+                        Err(err) => {
+                            log::error!("tetraglass-egui path trace BVH upload failed: {err}");
+                        }
+                    }
+                }
+
+                let ViewportGpuInner {
+                    renderer,
+                    path_tracer,
+                    pt_scene,
+                    target,
+                    gpu_surface,
+                    extra_surfaces,
+                    camera,
+                    background_srgb,
+                    annotations,
+                    repaint_ctx,
+                    ..
+                } = &mut *guard;
+
+                if let Some(scene) = pt_scene.as_ref() {
+                    let surfaces: Vec<&GpuSurface> = gpu_surface
+                        .iter()
+                        .chain(extra_surfaces.iter().map(|(_, g, _)| g))
+                        .collect();
+                    if let Err(err) = path_tracer.step_with_overlays(
+                        device,
+                        egui_encoder,
+                        queue,
+                        target,
+                        scene,
+                        camera,
+                        *background_srgb,
+                        Some((renderer, &surfaces, annotations)),
+                    ) {
+                        log::error!("tetraglass-egui path trace step failed: {err}");
+                    } else if !path_tracer.is_converged()
+                        && let Some(ctx) = repaint_ctx.as_ref()
+                    {
+                        ctx.request_repaint();
+                    }
+                }
+            } else {
+                let surfaces: Vec<&GpuSurface> = guard
+                    .gpu_surface
+                    .iter()
+                    .chain(guard.extra_surfaces.iter().map(|(_, g, _)| g))
+                    .collect();
+                if let Err(err) = guard.renderer.render_with_annotations(
+                    device,
+                    egui_encoder,
+                    queue,
+                    &guard.target,
+                    &guard.camera,
+                    guard.background_srgb,
+                    &surfaces,
+                    &guard.annotations,
+                ) {
+                    log::error!("tetraglass-egui offscreen prepare failed: {err}");
+                }
             }
         }
         Vec::new()
@@ -864,6 +999,15 @@ impl<'a> ViewportWidget<'a> {
             .ensure_target_size(device, egui_renderer, width_px, height_px)?;
 
         let camera_changed = handle_camera_input(ui, &response, rect, self.state);
+
+        if let Ok(mut guard) = self.state.inner.lock() {
+            guard.repaint_ctx = Some(ui.ctx().clone());
+            if guard.path_tracing_enabled
+                && (camera_changed || resized || !guard.path_tracer.is_converged())
+            {
+                ui.ctx().request_repaint();
+            }
+        }
 
         if response.clicked()
             && let Some(pos) = response.interact_pointer_pos()
@@ -1018,11 +1162,11 @@ fn handle_camera_input(
     changed
 }
 
-/// Re-exported colormap, style, clip-plane, SSAO, and pick types for convenience when configuring [`ViewportState`].
+/// Re-exported colormap, style, clip-plane, SSAO, path-tracer, and pick types for convenience when configuring [`ViewportState`].
 pub use tetraglass_render::{
     Camera as ViewportCamera, ColorBy as ViewportColorBy, ColormapKind as ViewportColormap,
-    PickProbeValue as ViewportPickProbeValue, ScalarComponent as ViewportScalarComponent,
-    ShaderClipKeep as ViewportClipKeep, ShaderClipPlane as ViewportClipPlane,
-    SsaoConfig as ViewportSsaoConfig, SurfacePickResult as ViewportPickResult,
-    SurfaceStyle as ViewportSurfaceStyle,
+    PathTraceConfig as ViewportPathTraceConfig, PickProbeValue as ViewportPickProbeValue,
+    ScalarComponent as ViewportScalarComponent, ShaderClipKeep as ViewportClipKeep,
+    ShaderClipPlane as ViewportClipPlane, SsaoConfig as ViewportSsaoConfig,
+    SurfacePickResult as ViewportPickResult, SurfaceStyle as ViewportSurfaceStyle,
 };

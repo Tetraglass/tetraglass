@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use egui_wgpu::wgpu;
 use tetraglass_egui::{
     ViewportClipKeep, ViewportClipPlane, ViewportColorBy, ViewportColormap,
-    ViewportScalarComponent, ViewportSsaoConfig, ViewportState, ViewportSurfaceStyle,
-    ViewportWidget, available_field_options,
+    ViewportPathTraceConfig, ViewportScalarComponent, ViewportSsaoConfig, ViewportState,
+    ViewportSurfaceStyle, ViewportWidget, available_field_options,
 };
 use tetraglass_filters::extract_external_surface;
 use tetraglass_io::read_vtu_from_path;
@@ -256,6 +256,45 @@ fn viewport_widget_resizes_and_runs_prepare_callback_in_egui_wgpu() {
     assert_eq!(viewport.ssao(), ssao_cfg);
     viewport.set_ssao(ViewportSsaoConfig::default());
     assert!(!viewport.ssao().enabled);
+
+    // Enable progressive path tracing and verify stationary accumulation in `prepare`.
+    assert!(!viewport.path_tracing_enabled());
+    let pt_cfg = ViewportPathTraceConfig::new(4)
+        .with_samples_per_frame(2)
+        .with_max_bounces(2);
+    viewport.set_path_trace_config(pt_cfg);
+    viewport.set_path_tracing_enabled(true);
+    assert!(viewport.path_tracing_enabled());
+    assert_eq!(viewport.path_trace_config(), pt_cfg);
+    assert_eq!(viewport.path_trace_accumulated_samples(), 0);
+    assert!(!viewport.is_path_trace_converged());
+
+    for expected_samples in [2u32, 4u32] {
+        use egui_wgpu::CallbackTrait as _;
+        let cb = viewport.prepare_callback();
+        let mut cb_resources = egui_wgpu::CallbackResources::default();
+        let mut enc = headless
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let screen_desc = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [320, 240],
+            pixels_per_point: 1.0,
+        };
+        let extra = cb.prepare(
+            headless.device(),
+            headless.queue(),
+            &screen_desc,
+            &mut enc,
+            &mut cb_resources,
+        );
+        headless
+            .queue()
+            .submit(extra.into_iter().chain(std::iter::once(enc.finish())));
+        assert_eq!(viewport.path_trace_accumulated_samples(), expected_samples);
+    }
+    assert!(viewport.is_path_trace_converged());
+    viewport.set_path_tracing_enabled(false);
+    assert!(!viewport.path_tracing_enabled());
 
     // Switch style to vector magnitude and verify range updates.
     let vec_style = ViewportSurfaceStyle {
