@@ -93,7 +93,7 @@ Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 complete (2026-
 - [x] **M5.4 Persistent Blender worker and live link.** Socket worker mode in `blender/render.py` and client support in `tetraglass-cli` / `tetraglass-viewer` to keep a Blender session warm across renders and push live camera/scene updates (`/blender-bridge`).
 - [x] **M5.5 Gate.** `/milestone-gate` (`docs/milestones/m5-gate.md`, completed 2026-10-26).
 
-## M6 Ergonomics, parallel I/O and array filters (from Jun 2028)
+## M6 Ergonomics, parallel I/O and array filters (from Jun 2028 — Completed 2026-10-26)
 
 **Gate:** release 0.3 with the `tetraglass` umbrella crate and fluent Rust `SceneBuilder` API, `"points"` representation rendering, `.pvtu` partitioned VTK reader, and `warp_by_vector` / `calculator` filters.
 
@@ -101,4 +101,4 @@ Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 complete (2026-
 - [x] **M6.2 Screen-space `"points"` representation rendering.** Implement screen-space point-cloud rendering (`draw_points`, `point_size`) in `tetraglass-render` supporting solid, point-scalar, and cell-scalar coloring, depth testing, WBOIT transparency, and GPU picking; wire `RepresentationStyle::Points` and `Representation::point_size` in `tetraglass-cli` and `tetraglass-viewer`; add `gallery/points.json` with a visual regression baseline (`/render-check`).
 - [x] **M6.3 Parallel VTK XML (`.pvtu`) partitioned unstructured grid reader.** Pure-Rust `.pvtu` reader (`read_pvtu_with_loader`, `read_pvtu_from_path`) in `tetraglass-io` parsing `<PUnstructuredGrid>` metadata and piece `<Piece Source="..."/>` references, merging partitioned piece `UnstructuredGrid`s with ghost-cell (`vtkGhostType`) filtering, wired into `tetraglass-io`, `tetraglass-cli`, and `tetraglass-viewer` (`/add-reader`, `/make-test-data`).
 - [x] **M6.4 `warp_by_vector` and `calculator` array filters.** Implement `warp_by_vector` (displacing mesh/tet coordinates by `scale_factor * vector_field`) and `calculator` (evaluating mathematical scalar/vector expressions over point and cell arrays into a derived `DataArray`) in `tetraglass-filters` (`/add-filter`).
-- [ ] **M6.5 Gate and release 0.3.** `/milestone-gate` (`docs/milestones/m6-gate.md`, `CHANGELOG.md`).
+- [x] **M6.5 Gate and release 0.3.** `/milestone-gate` (`docs/milestones/m6-gate.md`, `CHANGELOG.md`, completed 2026-10-26).

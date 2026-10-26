@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-10-26
+
+### Added
+
+- **Umbrella `tetraglass` crate & fluent Rust `SceneBuilder` API (`tetraglass`, `tetraglass-scene`):**
+  - New `tetraglass` umbrella crate (`crates/tetraglass`) re-exporting `core`, `io`, `filters`, `scene`, `export`, `render`, `egui`, and `viewer` behind optional feature flags (`default = ["io", "filters", "scene", "export", "render", "egui"]`, `viewer`, `full`) along with `tetraglass::prelude` (`D-017`).
+  - Typed fluent Rust builder API (`Scene::builder()`, `SceneBuilder`, `DatasetRef`, `SurfaceFilter`, `SliceFilter`, `ContourFilter`, `ClipFilter`, `ThresholdFilter`, `StreamlinesFilter`, `GlyphsFilter`, `ResampleFilter`, `RepresentationBuilder`, `CameraBuilder`, `OutputBuilder`) in `tetraglass-scene`.
+- **Legacy VTK (`.vtk`) & Parallel VTK XML (`.pvtu`) readers (`tetraglass-io`, `tetraglass-cli`, `tetraglass-viewer`):**
+  - Pure-Rust legacy VTK DataFile reader (`read_vtk`, `read_vtk_series`, `read_vtk_from_path`, `MeshFormat::VtkLegacy`) supporting versions `2.0`–`5.1` in `ASCII` and big-endian `BINARY` encodings, classic 4.x `CELLS` and 5.x `OFFSETS`/`CONNECTIVITY`, `CELL_TYPES`, `FACES`/`FACEOFFSETS` polyhedra, and `POINT_DATA`/`CELL_DATA` (`SCALARS`, `VECTORS`, `NORMALS`, `TENSORS`, `FIELD`).
+  - Pure-Rust Parallel VTK XML `.pvtu` reader (`parse_pvtu_manifest`, `read_pvtu_with_loader`, `read_pvtu_series_with_loader`, `read_pvtu_from_path`, `read_pvtu_series_from_path`, `PvtuManifest`, `PvtuPiece`, `MeshFormat::Pvtu`) with `vtkGhostType` ghost-cell and ghost-point filtering, shared partition-interface vertex welding across pieces, polyhedron face-stream remapping, and `.pvd` time-series `.pvtu` step support.
+- **Screen-space `"points"` representation, SSAO & compute-shader progressive path tracer (`tetraglass-render`, `tetraglass-egui`, `tetraglass-viewer`, `tetraglass-cli`):**
+  - Instanced screen-space circular sphere-impostor point-cloud rendering (`SurfaceStyle::{draw_points, point_size}`, `GpuSurface::{point_count, draw_points, point_size}`) supporting solid, point-scalar, and cell-scalar coloring, view-space sphere-impostor lighting, depth testing, WBOIT transparency, shader clip-plane culling, GPU ID buffer picking, interactive `"Point size"` controls in `tetraglass-viewer`, and `gallery/points.json`.
+  - Screen-space ambient occlusion (`ssao.wgsl`, `SsaoConfig`, `Renderer::set_ssao_config`) reconstructing view-space positions and normals from the hardware depth buffer with a 16-sample rotated hemisphere kernel and depth-aware bilateral blur, plus `--ssao` in `tetraglass render` and interactive SSAO controls in `tetraglass-egui` and `tetraglass-viewer`.
+  - 12-bucket SAH linear `TriangleBvh` and compute-shader progressive path tracer (`path_tracer.wgsl`, `PathTracer`, `PathTraceConfig`, `GpuPathTraceScene`) with multi-bounce cosine-weighted indirect lighting, soft area-light shadow rays, sky-dome illumination, progressive temporal accumulation when the camera is stationary in `tetraglass-egui` and `tetraglass-viewer`, and `tetraglass render --engine path-tracer [--samples <n>]` (`D-010`).
+- **Persistent Blender worker & live camera link (`blender/`, `tetraglass-export`, `tetraglass-cli`, `tetraglass-viewer`):**
+  - Persistent worker server mode (`blender/render.py --serve <host:port|ipc:dir>`) and in-place camera/view updater (`update_camera_and_view` in `blender/importer.py`) keeping a warm headless Blender session across renders without re-importing `.tgbin` meshes.
+  - `BlenderWorkerClient` and `BlenderWorkerProcess` in `tetraglass-export`, `tetraglass render --engine cycles --worker <addr>` in `tetraglass-cli`, and live-link camera syncing (`ViewerSession::push_live_camera_to_worker`) in `tetraglass-viewer`.
+- **`warp_by_vector` & `calculator` array filters (`tetraglass-filters`):**
+  - `warp_by_vector` (`WarpByVectorParams`, `warp_by_vector`, `warp_by_vector_with_chunk_size`, `warp_by_vector_grid`, `warp_unstructured_grid`) displacing vertex coordinates in `f64` by `scale_factor * vector_field` while preserving connectivity and attributes zero-copy via `Arc`.
+  - `calculator` (`CalculatorAssociation`, `CalculatorParams`, `calculator`, `calculator_with_chunk_size`, `evaluate_calculator`, `calculator_grid`, `calculator_unstructured_grid`) evaluating scalar and 3-vector mathematical expressions over point/cell arrays and spatial coordinates (`x`, `y`, `z`, `coords`) into a derived `f64` `DataArray`.
+
+### Changed
+
+- Updated `tetraglass-scene` streamline surface extraction to emit station points (`polylines.to_line_surface()`) when `RepresentationStyle::Points` is selected.
+- Extended `cargo xtask wasm-check` to verify the `tetraglass` umbrella crate on `wasm32-unknown-unknown`.
+
+### Fixed
+
+- Enabled GPU ID buffer picking and CPU vertex probing (`probe_surface_triangle`) on 0-triangle point-cloud and polyline surfaces when `draw_points` is active.
+
 ## [0.2.0] - 2026-10-26
 
 ### Added

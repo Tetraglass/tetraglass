@@ -525,3 +525,11 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Dependencies added: none.
 - Follow-ups: M6.5 Gate and release 0.3 (`/milestone-gate`).
 
+## 2026-10-26: M6.5 Gate, Release 0.3.0 Preparation & Milestone M6 Retrospective (`docs/milestones/m6-gate.md`)
+- Done: bumped workspace and internal crate versions to `0.3.0` in `Cargo.toml`; authored the `[0.3.0]` release notes in `CHANGELOG.md`; rendered the M6 gate demonstration figure (`docs/milestones/m6-points.png`); verified `cargo package --no-verify --offline` across all 10 workspace crates (`tetraglass-core`, `tetraglass-io`, `tetraglass-filters`, `tetraglass-scene`, `tetraglass-render`, `tetraglass-egui`, `tetraglass-export`, `tetraglass-viewer`, `tetraglass`, `tetraglass-cli`), `cargo doc --workspace --no-deps`, and `cargo xtask verify`; and recorded the gate evidence in `docs/milestones/m6-gate.md`.
+- Retrospective:
+  - **Planned vs. actual:** Milestone M6 (`M6.1` Umbrella `tetraglass` crate and fluent `SceneBuilder`, `M6.2` Screen-space `"points"` representation rendering, `M6.3` Parallel VTK XML `.pvtu` reader, `M6.4` `warp_by_vector` and `calculator` filters, and `M6.5` Gate & Release 0.3.0) completed in 5 focused steps with zero scope cuts and zero external dependencies added.
+  - **What worked well:** Adding `.pvtu` partitioned mesh loading with automatic `vtkGhostType` filtering and shared interface vertex welding allows multi-rank MPI solver outputs to work seamlessly with external surface extraction and marching-tetrahedra filters without internal partition seams, while keeping the frozen `v1` scene schema 100% backwards-compatible.
+- Follow-ups: All planned roadmap tasks across Milestones `M0`–`M6` are complete; awaiting human approval before running `cargo publish` and tagging `v0.3.0`.
+
+
