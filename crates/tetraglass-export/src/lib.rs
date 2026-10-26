@@ -32,13 +32,15 @@
 pub mod bundle;
 pub mod colormap;
 pub mod gltf;
+pub mod worker;
 
 pub use bundle::{
     BUNDLE_FORMAT_ID, BUNDLE_FORMAT_VERSION, BundleArchive, BundleBackground, BundleCamera,
     BundleColormap, BundleLights, BundleManifest, BundleMaterialHints, BundleMeshData,
     BundleMeshFileRef, BundleObject, BundleTimeStep, TGBIN_FLAGS_DEFAULT, TGBIN_HEADER_BYTES,
     TGBIN_MAGIC, TGBIN_VERSION, decode_tgbin, encode_tgbin, export_evaluated_scene_to_bundle,
-    export_evaluated_steps_to_bundle, export_scene_to_bundle,
+    export_evaluated_steps_to_bundle, export_scene_to_bundle, resolve_bundle_background,
+    resolve_bundle_camera_and_lights,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use bundle::{
@@ -59,6 +61,12 @@ pub use gltf::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use gltf::{GltfWriteSummary, write_evaluated_scene_glb, write_scene_glb_output};
+#[cfg(not(target_arch = "wasm32"))]
+pub use worker::{BlenderWorkerClient, BlenderWorkerProcess};
+pub use worker::{
+    BlenderWorkerRenderRequest, BlenderWorkerRequest, BlenderWorkerResponse,
+    DEFAULT_WORKER_TIMEOUT_SECS,
+};
 
 use thiserror::Error;
 
@@ -87,6 +95,10 @@ pub enum ExportError {
     /// Malformed or unsupported Tetraglass bundle (`manifest.json` or `.tgbin`) data.
     #[error("invalid Tetraglass bundle: {0}")]
     InvalidBundle(String),
+
+    /// Persistent Blender worker communication or runtime error (`M5.4`).
+    #[error("Blender worker error: {0}")]
+    Worker(String),
 
     /// Filesystem I/O error on native targets.
     #[cfg(not(target_arch = "wasm32"))]

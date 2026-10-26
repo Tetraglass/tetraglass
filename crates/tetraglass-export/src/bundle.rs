@@ -896,7 +896,9 @@ fn resolve_combined_bounds(evaluated_steps: &[EvaluatedScene]) -> BoundingBox {
     })
 }
 
-fn resolve_bundle_camera_and_lights(
+/// Resolves the [`BundleCamera`] and [`BundleLights`] for `scene` relative to `bounds` and `dataset_center` (`M3.5`, `M5.4`).
+#[must_use]
+pub fn resolve_bundle_camera_and_lights(
     scene: &Scene,
     bounds: BoundingBox,
     dataset_center: [f64; 3],
@@ -1018,7 +1020,9 @@ fn resolve_bundle_camera_and_lights(
     (camera, lights)
 }
 
-fn resolve_bundle_background(bg: &BackgroundSpec) -> BundleBackground {
+/// Resolves a [`BackgroundSpec`] into a [`BundleBackground`] (`M3.5`, `M5.4`).
+#[must_use]
+pub fn resolve_bundle_background(bg: &BackgroundSpec) -> BundleBackground {
     match bg {
         BackgroundSpec::Solid(color) => {
             let rgb = color.resolve_rgb().unwrap_or([1.0, 1.0, 1.0]);

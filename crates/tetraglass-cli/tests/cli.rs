@@ -836,15 +836,15 @@ fn render_cycles_command_discovers_blender_streams_progress_saves_blend_and_prin
         Some("/opt/homebrew/bin/blender".to_string()),
         Some("/Applications/Blender.app/Contents/MacOS/Blender".to_string()),
     ];
-    let has_blender = candidate_bins.into_iter().flatten().any(|bin| {
+    let blender_bin = candidate_bins.into_iter().flatten().find(|bin| {
         Command::new(bin)
             .arg("--version")
             .output()
             .is_ok_and(|out| out.status.success())
     });
-    if !has_blender {
+    let Some(blender_bin) = blender_bin else {
         return;
-    }
+    };
 
     let cycles_png = out_dir.join("slice_cycles.png");
     let cycles_blend = out_dir.join("slice_cycles.blend");
@@ -901,6 +901,44 @@ fn render_cycles_command_discovers_blender_streams_progress_saves_blend_and_prin
     let rendered = RenderedImage::load_png(&cycles_png).expect("load Cycles rendered PNG");
     assert_eq!(rendered.width(), 800);
     assert_eq!(rendered.height(), 600);
+
+    // 3. Verify `tetraglass render --engine cycles --worker <addr>` (`M5.4`).
+    let mut worker = tetraglass_export::BlenderWorkerProcess::spawn(
+        &blender_bin,
+        root.join("blender/render.py"),
+        "127.0.0.1:0",
+        std::time::Duration::from_secs(30),
+    )
+    .expect("spawn persistent Blender worker for CLI test");
+    let worker_png = out_dir.join("slice_cycles_worker.png");
+    let worker_out = tetraglass_bin()
+        .arg("render")
+        .arg(root.join("gallery/slice.json"))
+        .arg("-o")
+        .arg(&worker_png)
+        .arg("--engine")
+        .arg("cycles")
+        .arg("--samples")
+        .arg("2")
+        .arg("--device")
+        .arg("cpu")
+        .arg("--worker")
+        .arg(worker.addr())
+        .output()
+        .expect("run `tetraglass render --engine cycles --worker`");
+    assert!(
+        worker_out.status.success(),
+        "`render --engine cycles --worker` failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&worker_out.stdout),
+        String::from_utf8_lossy(&worker_out.stderr)
+    );
+    let worker_summary: serde_json::Value =
+        serde_json::from_slice(&worker_out.stdout).expect("parse worker Cycles JSON summary");
+    assert_eq!(worker_summary["engine"], "cycles");
+    assert_eq!(worker_summary["cycles_samples"], 2);
+    assert_eq!(worker_summary["cycles_device"], "CPU");
+    assert!(worker_png.is_file());
+    worker.shutdown().expect("shutdown CLI test worker");
 }
 
 #[test]
@@ -1020,15 +1058,15 @@ fn render_command_exports_animation_png_sequence_via_raster_and_cycles() {
         Some("/opt/homebrew/bin/blender".to_string()),
         Some("/Applications/Blender.app/Contents/MacOS/Blender".to_string()),
     ];
-    let has_blender = candidate_bins.into_iter().flatten().any(|bin| {
+    let blender_bin = candidate_bins.into_iter().flatten().find(|bin| {
         Command::new(bin)
             .arg("--version")
             .output()
             .is_ok_and(|out| out.status.success())
     });
-    if !has_blender {
+    let Some(_blender_bin) = blender_bin else {
         return;
-    }
+    };
 
     let cycles_pattern = out_dir.join("cycles_frame_%04d.png");
     let cycles_out = tetraglass_bin()

@@ -1584,6 +1584,10 @@ pub struct ViewerSession {
     async_url_tx: mpsc::Sender<Result<FetchedUrlBundle, String>>,
     async_url_rx: mpsc::Receiver<Result<FetchedUrlBundle, String>>,
     active_tf_point: Option<usize>,
+    blender_worker_addr: String,
+    blender_live_link_enabled: bool,
+    last_pushed_camera: Option<ViewportCamera>,
+    last_worker_status: Option<String>,
 }
 
 impl std::fmt::Debug for ViewerSession {
@@ -1666,6 +1670,10 @@ impl ViewerSession {
             async_url_tx,
             async_url_rx,
             active_tf_point: None,
+            blender_worker_addr: String::new(),
+            blender_live_link_enabled: false,
+            last_pushed_camera: None,
+            last_worker_status: None,
         })
     }
 
@@ -2389,6 +2397,168 @@ impl ViewerSession {
         self.viewport.is_path_trace_converged()
     }
 
+    /// Returns the configured persistent Blender worker `host:port` address (`M5.4`).
+    #[must_use]
+    pub fn blender_worker_addr(&self) -> &str {
+        &self.blender_worker_addr
+    }
+
+    /// Sets the persistent Blender worker `host:port` address (`M5.4`).
+    pub fn set_blender_worker_addr(&mut self, addr: impl Into<String>) {
+        self.blender_worker_addr = addr.into();
+    }
+
+    /// Returns whether automatic camera live-link syncing to the Blender worker is enabled (`M5.4`).
+    #[must_use]
+    pub const fn blender_live_link_enabled(&self) -> bool {
+        self.blender_live_link_enabled
+    }
+
+    /// Enables or disables automatic camera live-link syncing to the Blender worker (`M5.4`).
+    pub fn set_blender_live_link_enabled(&mut self, enabled: bool) {
+        self.blender_live_link_enabled = enabled;
+        if !enabled {
+            self.last_pushed_camera = None;
+        }
+    }
+
+    /// Builds the line-delimited JSON `"update_camera"` payload for the live viewport camera and active step (`M5.4`).
+    #[must_use]
+    pub fn build_live_worker_camera_payload(&self) -> serde_json::Value {
+        let cam = self.viewport.camera();
+        let eye = cam.eye_position();
+        let (_, up, _) = cam.basis();
+        let (clip_start, clip_end) = cam.near_far_f64();
+        let half_fov = 0.5 * cam.view_angle_deg.clamp(1.0, 170.0).to_radians();
+        let ortho_scale = 2.0 * cam.effective_distance() * half_fov.tan();
+        let dataset_center = self
+            .doc
+            .evaluated()
+            .camera_bounds
+            .map_or([0.0, 0.0, 0.0], |b| b.center());
+        let pos = [f64::from(eye[0]), f64::from(eye[1]), f64::from(eye[2])];
+        let focal = cam.focal_point;
+        serde_json::json!({
+            "command": "update_camera",
+            "camera": {
+                "position": pos,
+                "world_position": [
+                    pos[0] + dataset_center[0],
+                    pos[1] + dataset_center[1],
+                    pos[2] + dataset_center[2]
+                ],
+                "focal_point": focal,
+                "world_focal_point": [
+                    focal[0] + dataset_center[0],
+                    focal[1] + dataset_center[1],
+                    focal[2] + dataset_center[2]
+                ],
+                "up": [f64::from(up[0]), f64::from(up[1]), f64::from(up[2])],
+                "projection": self.doc.scene().view.camera.projection,
+                "view_angle_deg": cam.view_angle_deg,
+                "ortho_scale": ortho_scale,
+                "clip_start": clip_start,
+                "clip_end": clip_end
+            },
+            "step": self.doc.current_time_step()
+        })
+    }
+
+    /// Pushes the live viewport camera and active step to a persistent Blender worker (`blender/render.py --serve <addr>`) (`M5.4`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn push_live_camera_to_worker(
+        &mut self,
+        worker_addr: &str,
+    ) -> Result<serde_json::Value, ViewerError> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::{TcpStream, ToSocketAddrs};
+
+        let trimmed = worker_addr.trim();
+        if trimmed.is_empty() {
+            return Err(ViewerError::Validation(
+                "Blender worker address is empty (expected `host:port` or `ipc:<dir>`)".to_string(),
+            ));
+        }
+        let payload = self.build_live_worker_camera_payload();
+        let mut line =
+            serde_json::to_string(&payload).map_err(|e| ViewerError::Validation(e.to_string()))?;
+        line.push('\n');
+
+        let timeout = Duration::from_secs(5);
+        let resp_line = if let Some(ipc_path) = trimmed.strip_prefix("ipc:") {
+            let ipc_dir = Path::new(ipc_path);
+            fs::create_dir_all(ipc_dir)?;
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let req_id = format!("viewer_{}_{nanos}", std::process::id());
+            let tmp_req = ipc_dir.join(format!(".req_{req_id}.json.tmp"));
+            let final_req = ipc_dir.join(format!("req_{req_id}.json"));
+            let final_resp = ipc_dir.join(format!("resp_{req_id}.json"));
+            fs::write(&tmp_req, line.as_bytes())?;
+            fs::rename(&tmp_req, &final_req)?;
+            let start = MonotonicInstant::now();
+            loop {
+                if final_resp.is_file() {
+                    let text = fs::read_to_string(&final_resp)?;
+                    let _ = fs::remove_file(&final_resp);
+                    break text;
+                }
+                if MonotonicInstant::now().duration_since(start) >= timeout {
+                    let _ = fs::remove_file(&final_req);
+                    return Err(ViewerError::Validation(format!(
+                        "timed out waiting for Blender worker response in `{}`",
+                        ipc_dir.display()
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        } else {
+            let sock_addr = trimmed
+                .to_socket_addrs()
+                .map_err(|e| {
+                    ViewerError::Validation(format!(
+                        "invalid Blender worker address `{trimmed}`: {e}"
+                    ))
+                })?
+                .next()
+                .ok_or_else(|| {
+                    ViewerError::Validation(format!(
+                        "could not resolve Blender worker address `{trimmed}`"
+                    ))
+                })?;
+
+            let mut stream = TcpStream::connect_timeout(&sock_addr, timeout)?;
+            let _ = stream.set_read_timeout(Some(timeout));
+            let _ = stream.set_write_timeout(Some(timeout));
+
+            stream.write_all(line.as_bytes())?;
+            stream.flush()?;
+
+            let mut reader = BufReader::new(stream);
+            let mut buf = String::new();
+            let n = reader.read_line(&mut buf)?;
+            if n == 0 {
+                return Err(ViewerError::Validation(
+                    "Blender worker closed connection without replying".to_string(),
+                ));
+            }
+            buf
+        };
+        let resp: serde_json::Value = serde_json::from_str(resp_line.trim())
+            .map_err(|e| ViewerError::Validation(e.to_string()))?;
+        if resp.get("status").and_then(|v| v.as_str()) != Some("ok") {
+            let err_msg = resp
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown Blender worker error");
+            return Err(ViewerError::Validation(err_msg.to_string()));
+        }
+        self.last_pushed_camera = Some(self.viewport.camera());
+        self.last_worker_status = Some(format!("Synced camera to {trimmed}"));
+        Ok(resp)
+    }
+
     /// Renders the viewer UI (left control panel, time slider, field/colormap pickers, hot-reload status,
     /// and central 3D [`ViewportWidget`]) using an [`egui_wgpu::RenderState`].
     pub fn show_ui_with_render_state(
@@ -3103,6 +3273,39 @@ impl ViewerSession {
                 });
                 if self.last_shared_link.is_some() {
                     ui.small("Copied shareable link to clipboard.");
+                }
+
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    ui.add_space(4.0);
+                    ui.label("Blender worker live link (host:port):");
+                    let mut trigger_push_worker = false;
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.blender_worker_addr)
+                                .desired_width(155.0)
+                                .hint_text("127.0.0.1:55123"),
+                        );
+                        if ui.button("Push camera").clicked() {
+                            trigger_push_worker = true;
+                        }
+                    });
+                    ui.checkbox(
+                        &mut self.blender_live_link_enabled,
+                        "Live sync camera on orbit",
+                    );
+                    if let Some(status) = &self.last_worker_status {
+                        ui.small(status);
+                    }
+                    let addr = self.blender_worker_addr.clone();
+                    let cam_changed = self.last_pushed_camera != Some(self.viewport.camera());
+                    let should_push = trigger_push_worker
+                        || (self.blender_live_link_enabled
+                            && !addr.trim().is_empty()
+                            && cam_changed);
+                    if should_push && let Err(err) = self.push_live_camera_to_worker(&addr) {
+                        self.last_worker_status = Some(format!("Worker error: {err}"));
+                    }
                 }
 
                 // --- Value probe section ---

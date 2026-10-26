@@ -471,4 +471,197 @@ fn blender_scripts_spdx_headers_addon_registration_and_headless_cycles_render() 
             frame_path.display()
         );
     }
+
+    // 7. Spawn a persistent Blender worker (`M5.4`), load `slice_bundle_dir`, render once,
+    //    push a live camera update (`push_live_scene_view`) without re-importing meshes,
+    //    render a second time in the same warm session, and verify the outputs differ.
+    let mut worker = tetraglass_export::BlenderWorkerProcess::spawn(
+        &blender_bin,
+        blender_dir.join("render.py"),
+        "127.0.0.1:0",
+        std::time::Duration::from_secs(30),
+    )
+    .expect("spawn persistent Blender worker");
+    assert!(!worker.addr().is_empty());
+    assert!(!worker.blender_version().is_empty());
+
+    let client = worker.client();
+    let ping_resp = client.ping().expect("ping persistent Blender worker");
+    assert!(ping_resp.is_ok());
+    assert!(ping_resp.loaded_bundle.is_none());
+
+    let load_resp = client
+        .load_bundle(&slice_bundle_dir)
+        .expect("load slice bundle in worker");
+    assert!(load_resp.is_ok());
+    assert!(load_resp.loaded_bundle.is_some());
+
+    let worker_png_1 = root.join("target/bundle-export-tests/worker_slice_cam1.png");
+    let worker_png_2 = root.join("target/bundle-export-tests/worker_slice_cam2.png");
+    let _ = fs::remove_file(&worker_png_1);
+    let _ = fs::remove_file(&worker_png_2);
+
+    let mut render_req_1 = tetraglass_export::BlenderWorkerRenderRequest::new(
+        worker_png_1.display().to_string(),
+        2,
+        "cpu",
+    );
+    render_req_1.width = Some(160);
+    render_req_1.height = Some(120);
+    let render_resp_1 = client
+        .render(&render_req_1)
+        .expect("render first view on warm worker");
+    assert!(render_resp_1.is_ok());
+    assert!(worker_png_1.is_file());
+
+    let mut orbited_scene = slice_scene.clone();
+    orbited_scene.view.camera.azimuth += 95.0;
+    orbited_scene.view.camera.elevation = -25.0;
+    let slice_eval_res = slice_eval
+        .evaluate_scene(&slice_scene)
+        .expect("evaluate slice scene");
+    let bounds = slice_eval_res.camera_bounds.expect("slice camera bounds");
+    let cam_resp = client
+        .push_live_scene_view(&orbited_scene, bounds, Some(0))
+        .expect("push live camera update to warm worker");
+    assert!(cam_resp.is_ok());
+
+    let mut render_req_2 = tetraglass_export::BlenderWorkerRenderRequest::new(
+        worker_png_2.display().to_string(),
+        2,
+        "cpu",
+    );
+    render_req_2.width = Some(160);
+    render_req_2.height = Some(120);
+    let render_resp_2 = client
+        .render(&render_req_2)
+        .expect("render second view on warm worker after live camera update");
+    assert!(render_resp_2.is_ok());
+    assert!(worker_png_2.is_file());
+
+    let bytes_1 = fs::read(&worker_png_1).expect("read worker_png_1");
+    let bytes_2 = fs::read(&worker_png_2).expect("read worker_png_2");
+    assert_ne!(
+        bytes_1, bytes_2,
+        "live camera update in persistent Blender worker must change rendered image"
+    );
+
+    worker
+        .shutdown()
+        .expect("shutdown persistent Blender worker");
+}
+
+#[test]
+fn blender_worker_client_protocol_round_trips_and_propagates_errors() {
+    use std::thread;
+    use std::time::{Duration, Instant};
+    use tetraglass_export::{
+        BlenderWorkerClient, BlenderWorkerRenderRequest, BlenderWorkerRequest,
+    };
+
+    let root = workspace_root();
+    let ipc_dir = root.join("target/bundle-export-tests/mock_worker_ipc");
+    let _ = fs::remove_dir_all(&ipc_dir);
+    fs::create_dir_all(&ipc_dir).expect("create mock ipc dir");
+    let addr = format!("ipc:{}", ipc_dir.display());
+
+    let server_dir = ipc_dir.clone();
+    let server_handle = thread::spawn(move || {
+        let mut handled = 0;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while handled < 4 && Instant::now() < deadline {
+            let mut entries: Vec<_> = fs::read_dir(&server_dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    name.starts_with("req_") && name.ends_with(".json")
+                })
+                .collect();
+            entries.sort_by_key(|e| e.file_name());
+            if entries.is_empty() {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            for entry in entries {
+                let path = entry.path();
+                let stem = path.file_stem().unwrap().to_string_lossy();
+                let req_id = &stem[4..];
+                let line = fs::read_to_string(&path).expect("read request file");
+                let _ = fs::remove_file(&path);
+                let req: BlenderWorkerRequest =
+                    serde_json::from_str(line.trim()).expect("parse request JSON");
+                let reply = match req {
+                    BlenderWorkerRequest::Ping => serde_json::json!({
+                        "status": "ok",
+                        "blender_version": "4.2.0-mock",
+                        "loaded_bundle": null
+                    }),
+                    BlenderWorkerRequest::UpdateCamera { camera, step, .. } => serde_json::json!({
+                        "status": "ok",
+                        "blender_version": "4.2.0-mock",
+                        "view": {
+                            "position": camera.position,
+                            "step": step
+                        }
+                    }),
+                    BlenderWorkerRequest::Render(r) => {
+                        if r.out == "fail.png" {
+                            serde_json::json!({
+                                "status": "error",
+                                "error": "simulated render failure"
+                            })
+                        } else {
+                            serde_json::json!({
+                                "status": "ok",
+                                "files": [r.out],
+                                "device": "CPU",
+                                "samples": r.samples,
+                                "blender_version": "4.2.0-mock"
+                            })
+                        }
+                    }
+                    BlenderWorkerRequest::Shutdown => serde_json::json!({
+                        "status": "ok",
+                        "shutting_down": true
+                    }),
+                    BlenderWorkerRequest::LoadBundle { bundle } => serde_json::json!({
+                        "status": "ok",
+                        "loaded_bundle": bundle
+                    }),
+                };
+                let mut out = serde_json::to_string(&reply).unwrap();
+                out.push('\n');
+                let resp_path = server_dir.join(format!("resp_{req_id}.json"));
+                fs::write(&resp_path, out.as_bytes()).unwrap();
+                handled += 1;
+            }
+        }
+    });
+
+    let client = BlenderWorkerClient::new(&addr);
+    let ping = client.ping().expect("mock ping");
+    assert_eq!(ping.blender_version.as_deref(), Some("4.2.0-mock"));
+
+    let ok_render = client
+        .render(&BlenderWorkerRenderRequest::new("ok.png", 8, "cpu"))
+        .expect("mock render ok");
+    assert_eq!(
+        ok_render.files.as_deref(),
+        Some(&["ok.png".to_string()][..])
+    );
+
+    let err_render = client.render(&BlenderWorkerRenderRequest::new("fail.png", 8, "cpu"));
+    assert!(err_render.is_err());
+    assert!(
+        err_render
+            .unwrap_err()
+            .to_string()
+            .contains("simulated render failure")
+    );
+
+    let shut = client.shutdown().expect("mock shutdown");
+    assert_eq!(shut.shutting_down, Some(true));
+
+    server_handle.join().expect("join mock worker server");
 }

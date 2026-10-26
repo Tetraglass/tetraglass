@@ -481,3 +481,10 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Added offscreen progressive accumulation tests in `crates/tetraglass-egui/tests/viewport_offscreen.rs`, unit tests in `crates/tetraglass-viewer/src/lib.rs`, and CLI integration tests in `crates/tetraglass-cli/tests/cli.rs`, and visually verified `threshold_path_traced.png` and `threshold_ssao.png`.
 - Verification: `cargo xtask verify` passed (format, clippy `-D warnings`, all workspace unit/integration/visual regression tests, `wasm32-unknown-unknown` build, and `cargo deny check`).
 - Follow-ups: M5.4 Persistent Blender worker and live link.
+
+## 2026-10-26: M5.4 Persistent Blender worker and live link
+- Done: added `update_camera_and_view` in `blender/importer.py` for in-place camera, headlight, background, resolution, and step updates without re-importing `.tgbin` meshes, and `--serve <host:port|ipc:dir>` persistent worker mode (`run_socket_worker`, `_run_ipc_dir_worker`, `_dispatch_worker_request`) in `blender/render.py` handling `ping`, `load_bundle`, `update_camera`, `render`, and `shutdown`; implemented `BlenderWorkerRequest`, `BlenderWorkerRenderRequest`, `BlenderWorkerResponse`, `BlenderWorkerClient`, and `BlenderWorkerProcess` in `crates/tetraglass-export/src/worker.rs`; added `--worker <addr>` to `tetraglass render --engine cycles` in `tetraglass-cli` and live-link camera syncing (`ViewerSession::{blender_worker_addr, set_blender_worker_addr, blender_live_link_enabled, set_blender_live_link_enabled, build_live_worker_camera_payload, push_live_camera_to_worker}`) in `tetraglass-viewer`.
+- Tests: `blender_worker_client_protocol_round_trips_and_propagates_errors` and persistent `BlenderWorkerProcess` live camera update + multi-render test in `crates/tetraglass-export/tests/bundle_export.rs` (visually verified `worker_slice_cam1.png` and `worker_slice_cam2.png`), plus `tetraglass render --engine cycles --worker` integration test in `crates/tetraglass-cli/tests/cli.rs`.
+- Decisions: none (implemented per D-002, D-011, and `.agents/rules/blender-gpl.md`).
+- Dependencies added: none.
+- Follow-ups: M5.5 Gate (`/milestone-gate`).

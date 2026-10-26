@@ -19,8 +19,8 @@ use tetraglass_core::{
 };
 use tetraglass_egui as _;
 use tetraglass_export::{
-    export_evaluated_steps_to_bundle, write_bundle_dir, write_scene_bundle_output,
-    write_scene_glb_output,
+    BlenderWorkerClient, BlenderWorkerRenderRequest, export_evaluated_steps_to_bundle,
+    write_bundle_dir, write_scene_bundle_output, write_scene_glb_output,
 };
 use tetraglass_io::{
     IoError, MeshFormat, detect_format_from_bytes, detect_format_from_extension, read_msh_series,
@@ -686,6 +686,7 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
     let mut save_blend_override: Option<&str> = None;
     let mut blender_path_override: Option<&str> = None;
     let mut blender_scripts_override: Option<&str> = None;
+    let mut worker_addr_override: Option<&str> = None;
     let mut timeout_secs: u64 = DEFAULT_CYCLES_TIMEOUT_SECS;
     let mut all_steps_flag = false;
     let mut from_step_override: Option<usize> = None;
@@ -699,7 +700,7 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
                     "Usage: tetraglass render <scene.json> [-o <out.png>] [--engine <raster|cycles|path-tracer>] \
                      [--samples <n>] [--ssao] [--device <auto|cpu|gpu|metal|optix|cuda|hip>] \
                      [--save-blend <path.blend>] [--all-steps] [--from-step <n>] [--to-step <n>] \
-                     [--blender-path <bin>] [--blender-scripts <dir>] [--timeout <secs>]"
+                     [--blender-path <bin>] [--blender-scripts <dir>] [--worker <host:port>] [--timeout <secs>]"
                         .to_string(),
                 );
             }
@@ -813,6 +814,15 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
                     ));
                 };
                 blender_scripts_override = Some(val.as_str());
+            }
+            "--worker" => {
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    return Err(CliFailure::Message(
+                        "missing `host:port` address after `--worker`".to_string(),
+                    ));
+                };
+                worker_addr_override = Some(val.as_str());
             }
             "--timeout" => {
                 i += 1;
@@ -1008,6 +1018,7 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
             save_blend_path.as_deref(),
             blender_path_override,
             blender_scripts_override,
+            worker_addr_override,
             timeout_secs,
         )?)
     } else {
@@ -1196,11 +1207,9 @@ fn run_cycles_render(
     save_blend_path: Option<&Path>,
     explicit_blender_path: Option<&str>,
     explicit_scripts_dir: Option<&str>,
+    explicit_worker_addr: Option<&str>,
     timeout_secs: u64,
 ) -> Result<CyclesRunResult, CliFailure> {
-    let (blender_bin, probed_version) = discover_blender_binary(explicit_blender_path)?;
-    let render_script = discover_blender_render_script(explicit_scripts_dir, scene_base_dir)?;
-
     let archive = export_evaluated_steps_to_bundle(scene, evaluated_steps)
         .map_err(|e| CliFailure::Message(format!("bundle export failed: {e}")))?;
 
@@ -1233,6 +1242,54 @@ fn run_cycles_render(
             })?;
         }
     }
+
+    if let Some(worker_addr) = explicit_worker_addr {
+        let client =
+            BlenderWorkerClient::new(worker_addr).with_timeout(Duration::from_secs(timeout_secs));
+        let mut req = BlenderWorkerRenderRequest::new(
+            output_path.display().to_string(),
+            samples,
+            device.to_string(),
+        );
+        req.bundle = Some(temp_bundle_dir.display().to_string());
+        req.width = Some(size[0]);
+        req.height = Some(size[1]);
+        req.save_blend = save_blend_path.map(|p| p.display().to_string());
+        if let Some((from_step, to_step)) = frame_range {
+            req.from_step = Some(from_step);
+            req.to_step = Some(to_step);
+        } else if let Some(first) = evaluated_steps.first() {
+            req.step = Some(first.time_step);
+        }
+        let resp = client.render(&req);
+        let _ = std::fs::remove_dir_all(&temp_bundle_dir);
+        let resp = resp.map_err(|e| CliFailure::Message(e.to_string()))?;
+        for out_file in expected_outputs {
+            if !out_file.is_file() {
+                return Err(CliFailure::Message(format!(
+                    "Blender worker reported success, but expected output image `{}` was not created",
+                    out_file.display()
+                )));
+            }
+        }
+        return Ok(CyclesRunResult {
+            blender_version: resp
+                .blender_version
+                .unwrap_or_else(|| "unknown".to_string()),
+            active_device: resp.device.unwrap_or_else(|| device.to_uppercase()),
+            samples: resp.samples.unwrap_or(samples),
+            saved_blend: save_blend_path.map(|p| p.display().to_string()),
+        });
+    }
+
+    let (blender_bin, probed_version) = discover_blender_binary(explicit_blender_path)
+        .inspect_err(|_| {
+            let _ = std::fs::remove_dir_all(&temp_bundle_dir);
+        })?;
+    let render_script = discover_blender_render_script(explicit_scripts_dir, scene_base_dir)
+        .inspect_err(|_| {
+            let _ = std::fs::remove_dir_all(&temp_bundle_dir);
+        })?;
 
     let mut cmd = Command::new(&blender_bin);
     cmd.arg("--background")

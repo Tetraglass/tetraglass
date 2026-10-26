@@ -302,12 +302,8 @@ def _configure_world_background(scene: Any, bg_spec: dict[str, Any]) -> None:
         cam_bg_node.inputs["Color"].default_value = srgb_rgb_to_linear_rgba(color_srgb, 1.0)
 
 
-def _configure_camera(
-    scene: Any, collection: Any, cam_spec: dict[str, Any]
-) -> Any:
-    import bpy
-
-    cam_data = bpy.data.cameras.new("TetraglassCamera")
+def _apply_camera_spec_to_object(cam_obj: Any, cam_spec: dict[str, Any]) -> None:
+    cam_data = cam_obj.data
     projection = cam_spec.get("projection", "perspective")
     if projection == "orthographic":
         cam_data.type = "ORTHO"
@@ -330,9 +326,17 @@ def _configure_camera(
     back = _normalize3((pos[0] - focal[0], pos[1] - focal[1], pos[2] - focal[2]))
     right = _normalize3(_cross3(up_hint, back))
     up = _normalize3(_cross3(back, right))
-
-    cam_obj = bpy.data.objects.new("TetraglassCamera", cam_data)
     cam_obj.matrix_world = _matrix_from_columns(right, up, back, pos)
+
+
+def _configure_camera(
+    scene: Any, collection: Any, cam_spec: dict[str, Any]
+) -> Any:
+    import bpy
+
+    cam_data = bpy.data.cameras.new("TetraglassCamera")
+    cam_obj = bpy.data.objects.new("TetraglassCamera", cam_data)
+    _apply_camera_spec_to_object(cam_obj, cam_spec)
     collection.objects.link(cam_obj)
     scene.camera = cam_obj
     return cam_obj
@@ -732,4 +736,69 @@ def import_bundle(
         "objects": imported_objects,
         "camera": camera_obj.name,
         "lights": [l.name for l in light_objs],
+    }
+
+
+def update_camera_and_view(
+    payload: dict[str, Any],
+    context: Any = None,
+) -> dict[str, Any]:
+    """Updates camera, headlight, background, image size, and active step in-place (`M5.4`).
+
+    `payload` may either be a `camera` dictionary directly or a dictionary containing
+    `camera`, `lights`, `background`, `image_size`, and/or `step`.
+    """
+    import bpy
+
+    scene = (
+        context.scene
+        if (context is not None and getattr(context, "scene", None))
+        else bpy.context.scene
+    )
+    collection = bpy.data.collections.get("Tetraglass")
+    if collection is None:
+        collection = bpy.data.collections.new("Tetraglass")
+        scene.collection.children.link(collection)
+
+    cam_spec = (
+        payload["camera"]
+        if isinstance(payload.get("camera"), dict)
+        else payload
+    )
+    cam_obj = scene.camera or bpy.data.objects.get("TetraglassCamera")
+    if cam_obj is None or getattr(cam_obj, "type", None) != "CAMERA":
+        cam_obj = _configure_camera(scene, collection, cam_spec)
+    else:
+        _apply_camera_spec_to_object(cam_obj, cam_spec)
+
+    # Keep headlight aligned with the new camera view vector when present.
+    pos = tuple(float(x) for x in cam_spec.get("position", [0.0, 0.0, 3.0]))
+    focal = tuple(float(x) for x in cam_spec.get("focal_point", [0.0, 0.0, 0.0]))
+    to_camera = _normalize3((pos[0] - focal[0], pos[1] - focal[1], pos[2] - focal[2]))
+    headlight_obj = bpy.data.objects.get("TetraglassHeadlight")
+    if headlight_obj is not None:
+        headlight_obj.matrix_world = _direction_to_sun_matrix(list(to_camera))
+
+    if isinstance(payload.get("background"), dict):
+        _configure_world_background(scene, payload["background"])
+
+    if isinstance(payload.get("image_size"), list) and len(payload["image_size"]) == 2:
+        scene.render.resolution_x = max(1, int(payload["image_size"][0]))
+        scene.render.resolution_y = max(1, int(payload["image_size"][1]))
+
+    if payload.get("step") is not None:
+        step_idx = int(payload["step"])
+        scene.frame_set(step_idx)
+        for obj in scene.objects:
+            if "tetraglass_step" in obj:
+                hidden = int(obj["tetraglass_step"]) != step_idx
+                obj.hide_render = hidden
+                obj.hide_viewport = hidden
+
+    return {
+        "camera": cam_obj.name,
+        "position": list(pos),
+        "focal_point": list(focal),
+        "resolution": [scene.render.resolution_x, scene.render.resolution_y],
+        "frame": scene.frame_current,
     }
