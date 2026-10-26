@@ -80,7 +80,7 @@ Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 complete (2026-
 - [x] **M4.4b GPU volume ray marching, transfer function editor, and gallery scene.** 3D scalar texture upload and front-to-back ray-marching pass with depth-buffer termination and 1D colormap + opacity transfer function in `tetraglass-render`; interactive transfer function curve editor in `tetraglass-viewer`; `gallery/volume.json` and visual regression baseline (`/author-scene`, `/render-check`).
 - [x] **M4.5 Animation export.** PNG sequences from the rasterizer and frame ranges through Cycles.
 - [x] **M4.6 Schema freeze.** Scene schema v1 final, migration tests from earlier drafts.
-- [ ] **M4.7 Gate and release 0.2.** `/milestone-gate`.
+- [x] **M4.7 Gate and release 0.2.** `/milestone-gate` (`docs/milestones/m4-gate.md`, completed 2026-10-26).
 
 ## M5 Path tracer and beyond (from Mar 2028)
 

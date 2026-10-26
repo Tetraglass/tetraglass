@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-10-26
+
+### Added
+
+- **Web viewer, shareable links & transparency (`tetraglass-viewer`, `tetraglass-render`):**
+  - `wasm32-unknown-unknown` WebGPU browser viewer (`web/index.html`, `ViewerSession`) with drag-and-drop and URL loading (`?scene=`, `?mesh=`, `?data=`) plus a clear diagnostic banner when `navigator.gpu` is unavailable (`D-007`).
+  - Self-contained `#scene=<base64url>` and `#scene_z=<deflate-base64url>` shareable URL fragment encoding/decoding (`encode_shareable_scene_fragment`, `parse_location_query`, `resolve_relative_url`, `ViewerSession::build_shareable_link`) with view-state overrides (`?field=`, `?colormap=`, `?step=`, `?az=`, `?el=`, `?zoom=`, `?opacity=`).
+  - Weighted Blended Order-Independent Transparency (WBOIT, McGuire & Bavoil 2013) in `tetraglass-render` (`oit_accum.wgsl`, `oit_resolve.wgsl`) with `Rgba16Float` accumulation, `R16Float` revealage, read-only opaque depth testing, and interactive opacity controls in `tetraglass-viewer`.
+- **glTF 2.0, renderer-neutral bundle export & Blender Cycles bridge (`tetraglass-export`, `blender/`, `tetraglass-cli`):**
+  - New `tetraglass-export` crate (`wasm32-unknown-unknown`-compatible) with Binary glTF 2.0 (`.glb`) exporters (`export_evaluated_scene_to_glb`, `export_time_series_to_glb_frames`, `parse_glb`) storing `f32` positions relative to `dataset_center` (`D-014`), baked linear-light RGBA vertex colors, and `[normalized_scalar, raw_scalar]` in `TEXCOORD_1`.
+  - Renderer-neutral v1 bundle exporter and reader (`docs/bundle-format.md`, `BundleArchive`, `encode_tgbin`, `decode_tgbin`, `export_evaluated_scene_to_bundle`, `export_evaluated_steps_to_bundle`, `export_scene_to_bundle`, `write_bundle_dir`, `read_bundle_dir`).
+  - GPL-3.0-or-later Blender 4.2 LTS / 5.x LTS add-on and headless Cycles render driver in `blender/` (`importer.py`, `render.py`, `__init__.py`, `blender_manifest.toml`) and CLI `tetraglass export` / `tetraglass render --engine cycles [--samples <n>] [--device <dev>] [--save-blend <path.blend>]` (`D-010`, `D-011`, `D-020`).
+- **BVH cell locator, streamlines, glyphs & volume rendering (`tetraglass-core`, `tetraglass-filters`, `tetraglass-render`, `tetraglass-viewer`):**
+  - `TetLocator` median-split BVH over `TetView` (`locate`, `locate_with_hint`, `locate_many`) with `f64` barycentric coordinate evaluation and point/cell attribute interpolation (`19.35 ms` build on `600,000` tets).
+  - `PolylineSet` (`to_tube_surface`, `to_line_surface`, `to_unstructured_grid`) in `tetraglass-core` and `streamlines` filter (`StreamlineParams`, `StreamlineSeeds::{Point, Points, Line, Plane}`, `StreamlineDirection::{Forward, Backward, Both}`, `StreamlineIntegrator::{Rk4, Rk45}`) in `tetraglass-filters` with `"tubes"`, `"lines"`, and `"wireframe"` styles and `gallery/streamlines.json`.
+  - `glyphs` filter (`GlyphShape::{Arrow, Cone, Sphere}`, `GlyphScaleMode::{Magnitude, Fixed}`, `GlyphAssociation`, `GlyphParams`, `glyph_instances`, `glyphs`) in `tetraglass-filters` with orthonormal orientation frames, stride subsampling (`every`), and `gallery/glyphs.json`.
+  - `RegularGrid` in `tetraglass-core` and `resample` filter (`ResampleParams`, `resample`, `resample_with_locator`) in `tetraglass-filters` sampling point and cell arrays onto a `[nx, ny, nz]` regular grid with domain occupancy mask (`inside_mask`).
+  - Front-to-back GPU volume ray marching (`volume.wgsl`, `GpuVolume`, `evaluate_transfer_function_lut`) in `tetraglass-render` with `Rgba16Float` 3D hardware trilinear filtering, continuous partial-step exit integration, opaque depth-buffer termination, 1D colormap + piecewise-linear `transfer_function` lookup, gradient-assisted 3-point lighting, interactive 2D transfer function curve editor in `tetraglass-viewer`, and `gallery/volume.json`.
+- **Animation export & scene schema v1 freeze (`tetraglass-scene`, `tetraglass-cli`):**
+  - Multi-frame PNG sequence export in `tetraglass render` from `scene.output.frames` (`FramesConfig`, `format_frame_filename`) or CLI flags `--all-steps`, `--from-step <n>`, and `--to-step <n>` across both `"raster"` and `"cycles"` engines.
+  - Frozen scene schema v1 (`SCENE_VERSION = 1`, `crates/tetraglass-cli/tests/snapshots/scene-v1.schema.json`) and deterministic draft-to-v1 migration helpers (`MigrationReport`, `migrate_scene_value`, `migrate_scene_json_str`, `Scene::from_draft_json_str`).
+
+### Changed
+
+- Switched `TetView::tets` and `TetView::tet_source_cells` in `tetraglass-core` to `Arc<[[u32; 4]]>` and `Arc<[u32]>` (`tets_arc`, `tet_source_cells_arc`) for zero-copy sharing with `TetLocator`.
+- Marked `docs/scene-format.md` as **final (version 1)** for release `0.2.0`.
+
+### Fixed
+
+- Eliminated boundary step-quantization banding in `volume.wgsl` by scaling the final ray segment (`seg_dt = min(dt, t_exit - t)`) before exiting the volume bounding box.
+
 ## [0.1.0] - 2026-10-24
 
 ### Added
