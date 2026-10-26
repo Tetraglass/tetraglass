@@ -24,7 +24,7 @@ use tetraglass_export::{
 };
 use tetraglass_io::{
     IoError, MeshFormat, detect_format_from_bytes, detect_format_from_extension, read_msh_series,
-    read_pvd_series_with_loader, read_vtk_series, read_vtu_series,
+    read_pvd_series_with_loader, read_pvtu_series_with_loader, read_vtk_series, read_vtu_series,
 };
 use tetraglass_render::{
     Annotations, Camera, ColorBy, ColorbarAnnotation, ColorbarPlacement, ColormapKind,
@@ -419,6 +419,7 @@ fn cell_type_label(ct: CellType) -> String {
 const fn mesh_format_label(format: MeshFormat) -> &'static str {
     match format {
         MeshFormat::Vtu => "vtu",
+        MeshFormat::Pvtu => "pvtu",
         MeshFormat::Pvd => "pvd",
         MeshFormat::VtkLegacy => "vtk",
         MeshFormat::Gmsh => "msh",
@@ -1742,23 +1743,40 @@ fn load_series_from_path(
 ) -> Result<(MeshFormat, TimeSeries<IoError>), CliFailure> {
     let bytes = std::fs::read(path)
         .map_err(|e| CliFailure::Message(format!("cannot read `{}`: {e}", path.display())))?;
-    let format = explicit_format
-        .or_else(|| {
-            path.extension()
-                .and_then(|e| e.to_str())
-                .and_then(detect_format_from_extension)
-        })
-        .or_else(|| detect_format_from_bytes(&bytes))
-        .ok_or_else(|| {
-            CliFailure::Message(format!(
+    let detected = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(detect_format_from_extension)
+        .or_else(|| detect_format_from_bytes(&bytes));
+    let format = match (explicit_format, detected) {
+        (Some(MeshFormat::Vtu), Some(MeshFormat::Pvtu)) => MeshFormat::Pvtu,
+        (Some(exp), _) => exp,
+        (None, Some(det)) => det,
+        (None, None) => {
+            return Err(CliFailure::Message(format!(
                 "cannot determine mesh format for `{}`",
                 path.display()
-            ))
-        })?;
+            )));
+        }
+    };
 
     match format {
         MeshFormat::Vtu => {
             let series = read_vtu_series(bytes).map_err(|e| {
+                CliFailure::Message(format!("failed to parse `{}`: {e}", path.display()))
+            })?;
+            Ok((format, series))
+        }
+        MeshFormat::Pvtu => {
+            let base_dir = path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf();
+            let series = read_pvtu_series_with_loader(bytes, move |rel_piece| {
+                let piece_path = resolve_relative_path(&base_dir, rel_piece);
+                Ok(std::fs::read(piece_path)?)
+            })
+            .map_err(|e| {
                 CliFailure::Message(format!("failed to parse `{}`: {e}", path.display()))
             })?;
             Ok((format, series))

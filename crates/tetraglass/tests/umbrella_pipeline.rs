@@ -129,3 +129,23 @@ fn umbrella_crate_builds_validates_evaluates_exports_and_renders_scene() {
     assert_eq!(rendered.width(), 320);
     assert_eq!(rendered.height(), 240);
 }
+
+#[test]
+fn umbrella_crate_reads_partitioned_pvtu_and_extracts_seamless_surface() {
+    let pvtu_path = workspace_root().join("testdata/vtk/hex_partitioned.pvtu");
+    let grid = tetraglass::io::read_pvtu_from_path(&pvtu_path).expect("read hex_partitioned.pvtu");
+    assert_eq!(grid.num_points(), 27);
+    assert_eq!(grid.num_cells(), 8);
+
+    // Because shared interface vertices at x = 1.0 are welded and ghost cells are stripped,
+    // external surface extraction produces the exact 24 outer quad faces (48 triangles) of [0, 2]^3
+    // with zero internal partition faces, and linearized tetrahedral volume is 8.0.
+    let surface =
+        tetraglass::filters::extract_external_surface(&grid).expect("extract external surface");
+    assert_eq!(surface.num_faces(), 24);
+    assert_eq!(surface.num_triangles(), 48);
+
+    let tet_view =
+        tetraglass::filters::linearize(&grid, &Default::default()).expect("linearize pvtu");
+    assert!((tet_view.total_volume() - 8.0).abs() < 1e-12);
+}

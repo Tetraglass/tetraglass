@@ -128,6 +128,28 @@ fn inspect_command_outputs_text_and_json() {
     assert_eq!(pvd_val["num_points"], 8);
     assert_eq!(pvd_val["num_cells"], 6);
     assert_eq!(pvd_val["time_steps"], serde_json::json!([0.0, 0.5, 1.0]));
+
+    // 5. Structured `--json` output on a Parallel VTK XML `.pvtu` file (`M6.3`)
+    let pvtu_path = workspace_root().join("testdata/vtk/hex_partitioned.pvtu");
+    let pvtu_out = tetraglass_bin()
+        .arg("inspect")
+        .arg(&pvtu_path)
+        .arg("--json")
+        .output()
+        .expect("run `tetraglass inspect --json` on .pvtu");
+    assert!(
+        pvtu_out.status.success(),
+        "inspect .pvtu failed: {}",
+        String::from_utf8_lossy(&pvtu_out.stderr)
+    );
+    let pvtu_val: serde_json::Value =
+        serde_json::from_slice(&pvtu_out.stdout).expect("parse pvtu inspect JSON");
+    assert_eq!(pvtu_val["format"], "pvtu");
+    assert_eq!(pvtu_val["num_points"], 27);
+    assert_eq!(pvtu_val["num_cells"], 8);
+    assert_eq!(pvtu_val["cell_types"]["hexahedron"], 8);
+    assert_eq!(pvtu_val["point_arrays"].as_array().unwrap().len(), 3);
+    assert_eq!(pvtu_val["cell_arrays"].as_array().unwrap().len(), 1);
 }
 
 #[test]

@@ -87,8 +87,9 @@ pub use tetraglass_core::{
 
 #[cfg(feature = "io")]
 pub use tetraglass_io::{
-    IoError, MeshFormat, detect_format_from_bytes, detect_format_from_extension, read_msh,
-    read_vtk, read_vtu, write_vtu_to_bytes,
+    IoError, MeshFormat, PvtuManifest, PvtuPiece, detect_format_from_bytes,
+    detect_format_from_extension, parse_pvtu_manifest, read_msh, read_pvtu_with_loader, read_vtk,
+    read_vtu, write_vtu_to_bytes,
 };
 
 #[cfg(feature = "filters")]
@@ -136,7 +137,9 @@ pub mod prelude {
     };
 
     #[cfg(feature = "io")]
-    pub use crate::{MeshFormat, read_msh, read_vtk, read_vtu, write_vtu_to_bytes};
+    pub use crate::{
+        MeshFormat, read_msh, read_pvtu_with_loader, read_vtk, read_vtu, write_vtu_to_bytes,
+    };
 
     #[cfg(feature = "filters")]
     pub use crate::{

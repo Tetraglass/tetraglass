@@ -510,3 +510,10 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-002, D-003, D-015, and `.agents/rules/gpu-rendering.md`).
 - Dependencies added: none.
 - Follow-ups: M6.3 Parallel VTK XML (`.pvtu`) partitioned unstructured grid reader.
+
+## 2026-10-26: M6.3 Parallel VTK XML (`.pvtu`) partitioned unstructured grid reader
+- Done: implemented the pure-Rust Parallel VTK XML (`.pvtu`, `<VTKFile type="PUnstructuredGrid">`) reader (`parse_pvtu_manifest`, `read_pvtu_with_loader`, `read_pvtu_series_with_loader`, `read_pvtu_from_path`, `read_pvtu_series_from_path`, `PvtuManifest`, `PvtuPiece`, `PvtuDataArrayMeta`, `MeshFormat::Pvtu`) in `tetraglass-io` (`crates/tetraglass-io/src/pvtu.rs`) with `vtkGhostType` ghost-cell and ghost-point filtering, shared partition-interface vertex welding across pieces, polyhedron face-stream remapping, and `.pvd` time-series `.pvtu` step support; generated `testdata/vtk/hex_partitioned.pvtu`, `hex_partitioned_0.vtu`, and `hex_partitioned_1.vtu` via `testdata/generate/generate_vtk.py`; wired `MeshFormat::Pvtu` into `tetraglass-io`, `tetraglass-scene`, `tetraglass-cli`, `tetraglass-viewer`, and `tetraglass`.
+- Tests: integration test suite in `crates/tetraglass-io/tests/pvtu.rs` (`detects_pvtu_format_from_extension_and_magic_bytes`, `parses_pvtu_manifest_metadata_and_pieces`, `reads_partitioned_pvtu_filters_ghost_cells_welds_interface_and_matches_single_vtu`, `merges_polyhedron_pieces_and_preserves_discontinuous_interface_nodes`, `rejects_truncated_and_malformed_pvtu_manifests_without_panicking`), manifest check in `crates/tetraglass-io/tests/testdata_manifest.rs`, and `tetraglass inspect --json` test on `hex_partitioned.pvtu` in `crates/tetraglass-cli/tests/cli.rs`.
+- Decisions: none (implemented per D-008 and D-018).
+- Dependencies added: none.
+- Follow-ups: M6.4 `warp_by_vector` and `calculator` array filters.

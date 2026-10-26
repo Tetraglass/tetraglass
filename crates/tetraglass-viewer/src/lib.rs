@@ -28,8 +28,9 @@ use tetraglass_egui::{
 };
 use tetraglass_filters::{ClipParams, clip, extract_tet_view_surface};
 use tetraglass_io::{
-    IoError, MeshFormat, detect_format_from_bytes, detect_format_from_extension, read_msh_series,
-    read_pvd_series_with_loader, read_vtk_series, read_vtu_series,
+    IoError, MeshFormat, detect_format_from_bytes, detect_format_from_extension,
+    parse_pvtu_manifest, read_msh_series, read_pvd_series_with_loader,
+    read_pvtu_series_with_loader, read_vtk_series, read_vtu_series,
 };
 use tetraglass_render::{
     Annotations, ColorbarAnnotation, ColorbarPlacement, DEFAULT_COLORBAR_TICKS, PickProbeValue,
@@ -1872,6 +1873,18 @@ impl ViewerSession {
                                     && let Ok(step_bytes) = fs::read(pvd_dir.join(&entry.file))
                                 {
                                     companion_files.insert(entry.file, step_bytes);
+                                }
+                            }
+                        } else if source.file.to_ascii_lowercase().ends_with(".pvtu")
+                            && let Ok(manifest) = parse_pvtu_manifest(&bytes)
+                        {
+                            let pvtu_dir =
+                                source_path.parent().unwrap_or(self.doc.base_dir.as_path());
+                            for piece in manifest.pieces {
+                                if !companion_files.contains_key(&piece.source)
+                                    && let Ok(piece_bytes) = fs::read(pvtu_dir.join(&piece.source))
+                                {
+                                    companion_files.insert(piece.source, piece_bytes);
                                 }
                             }
                         }
@@ -3736,22 +3749,36 @@ fn load_series_from_bytes(
     bytes: Vec<u8>,
     explicit_format: Option<MeshFormat>,
 ) -> Result<(MeshFormat, TimeSeries<IoError>), ViewerError> {
-    let format = explicit_format
-        .or_else(|| {
-            path.extension()
-                .and_then(|e| e.to_str())
-                .and_then(detect_format_from_extension)
-        })
-        .or_else(|| detect_format_from_bytes(&bytes))
-        .ok_or_else(|| {
-            ViewerError::MeshIo(IoError::UnsupportedFeature {
+    let detected = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(detect_format_from_extension)
+        .or_else(|| detect_format_from_bytes(&bytes));
+    let format = match (explicit_format, detected) {
+        (Some(MeshFormat::Vtu), Some(MeshFormat::Pvtu)) => MeshFormat::Pvtu,
+        (Some(exp), _) => exp,
+        (None, Some(det)) => det,
+        (None, None) => {
+            return Err(ViewerError::MeshIo(IoError::UnsupportedFeature {
                 offset: 0,
                 feature: format!("unknown mesh format for `{}`", path.display()),
-            })
-        })?;
+            }));
+        }
+    };
 
     match format {
         MeshFormat::Vtu => Ok((format, read_vtu_series(bytes)?)),
+        MeshFormat::Pvtu => {
+            let base_dir = path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf();
+            let series = read_pvtu_series_with_loader(bytes, move |rel_piece| {
+                let piece_path = resolve_relative_path(&base_dir, rel_piece);
+                Ok(fs::read(piece_path)?)
+            })?;
+            Ok((format, series))
+        }
         MeshFormat::VtkLegacy => Ok((format, read_vtk_series(bytes)?)),
         MeshFormat::Gmsh => Ok((format, read_msh_series(bytes)?)),
         MeshFormat::Pvd => {
@@ -3906,22 +3933,54 @@ fn load_series_from_store(
     store: &InMemoryFileStore,
     fallback_dir: Option<&Path>,
 ) -> Result<(MeshFormat, TimeSeries<IoError>), ViewerError> {
-    let format = explicit_format
-        .or_else(|| {
-            path.extension()
-                .and_then(|e| e.to_str())
-                .and_then(detect_format_from_extension)
-        })
-        .or_else(|| detect_format_from_bytes(&bytes))
-        .ok_or_else(|| {
-            ViewerError::MeshIo(IoError::UnsupportedFeature {
+    let detected = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(detect_format_from_extension)
+        .or_else(|| detect_format_from_bytes(&bytes));
+    let format = match (explicit_format, detected) {
+        (Some(MeshFormat::Vtu), Some(MeshFormat::Pvtu)) => MeshFormat::Pvtu,
+        (Some(exp), _) => exp,
+        (None, Some(det)) => det,
+        (None, None) => {
+            return Err(ViewerError::MeshIo(IoError::UnsupportedFeature {
                 offset: 0,
                 feature: format!("unknown mesh format for `{}`", path.display()),
-            })
-        })?;
+            }));
+        }
+    };
 
     match format {
         MeshFormat::Vtu => Ok((format, read_vtu_series(bytes)?)),
+        MeshFormat::Pvtu => {
+            let store_clone = store.clone();
+            let pvtu_dir = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(Path::to_path_buf)
+                .or_else(|| fallback_dir.map(Path::to_path_buf));
+            let series = read_pvtu_series_with_loader(bytes, move |rel_piece| {
+                if let Some(piece_bytes) = store_clone.get(rel_piece) {
+                    return Ok(piece_bytes.to_vec());
+                }
+                if let Some(ref base) = pvtu_dir {
+                    let candidate = resolve_relative_path(base, rel_piece);
+                    let candidate_str = candidate.to_string_lossy();
+                    if let Some(piece_bytes) = store_clone.get(&candidate_str) {
+                        return Ok(piece_bytes.to_vec());
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if candidate.exists() {
+                        return Ok(fs::read(candidate)?);
+                    }
+                }
+                Err(IoError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("missing PVTU piece `{rel_piece}` in file store"),
+                )))
+            })?;
+            Ok((format, series))
+        }
         MeshFormat::VtkLegacy => Ok((format, read_vtk_series(bytes)?)),
         MeshFormat::Gmsh => Ok((format, read_msh_series(bytes)?)),
         MeshFormat::Pvd => {

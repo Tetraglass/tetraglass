@@ -6,9 +6,13 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import TYPE_CHECKING
 import xml.etree.ElementTree as ET
 
-import vtk
+try:
+    import vtk
+except ModuleNotFoundError:  # pragma: no cover
+    vtk = None  # type: ignore[assignment]
 
 ROOT = Path(__file__).resolve().parent.parent
 VTK_DIR = ROOT / "vtk"
@@ -446,6 +450,157 @@ def write_series_pvd() -> None:
     (VTK_DIR / "series.pvd").write_text("\n".join(pvd_lines), encoding="utf-8")
 
 
+def write_partitioned_pvtu() -> None:
+    """Partition the 2x2x2 hex_linear block [0, 2]^3 into 2 pieces with GhostLevel=1."""
+    global_points: list[tuple[float, float, float]] = []
+    index_of: dict[tuple[int, int, int], int] = {}
+    for k in range(3):
+        for j in range(3):
+            for i in range(3):
+                index_of[(i, j, k)] = len(global_points)
+                global_points.append((float(i), float(j), float(k)))
+
+    global_cells: list[tuple[int, list[int]]] = []
+    for k in range(2):
+        for j in range(2):
+            for i in range(2):
+                conn = [
+                    index_of[(i, j, k)],
+                    index_of[(i + 1, j, k)],
+                    index_of[(i + 1, j + 1, k)],
+                    index_of[(i, j + 1, k)],
+                    index_of[(i, j, k + 1)],
+                    index_of[(i + 1, j, k + 1)],
+                    index_of[(i + 1, j + 1, k + 1)],
+                    index_of[(i, j + 1, k + 1)],
+                ]
+                global_cells.append((12, conn))
+
+    cx, cy, cz = domain_center(global_points)
+
+    # Piece 0 owns x in [0, 1] (cell_id 0, 2, 4, 6) and carries ghost cells (1, 3) with vtkGhostType=1.
+    # Piece 1 owns x in [1, 2] (cell_id 1, 3, 5, 7) and carries ghost cells (4, 6) with vtkGhostType=1.
+    piece_specs: list[tuple[str, list[tuple[int, int]]]] = [
+        ("hex_partitioned_0.vtu", [(0, 0), (2, 0), (4, 0), (6, 0), (1, 1), (3, 1)]),
+        ("hex_partitioned_1.vtu", [(1, 0), (3, 0), (5, 0), (7, 0), (4, 1), (6, 1)]),
+    ]
+
+    for piece_filename, cell_entries in piece_specs:
+        used_global_pts: list[int] = []
+        global_to_local: dict[int, int] = {}
+        for global_cid, _ in cell_entries:
+            _, conn = global_cells[global_cid]
+            for gpt in conn:
+                if gpt not in global_to_local:
+                    global_to_local[gpt] = len(used_global_pts)
+                    used_global_pts.append(gpt)
+
+        num_pts = len(used_global_pts)
+        num_cells = len(cell_entries)
+
+        linear_vals: list[str] = []
+        radius_vals: list[str] = []
+        velocity_vals: list[str] = []
+        point_vals: list[str] = []
+
+        for gpt in used_global_pts:
+            x, y, z = global_points[gpt]
+            lin = x + 2.0 * y + 3.0 * z
+            rad = math.sqrt((x - cx) ** 2 + (y - cy) ** 2 + (z - cz) ** 2)
+            linear_vals.append(f"{lin:g}")
+            radius_vals.append(f"{rad:.17g}")
+            velocity_vals.append(f"{-y:g} {x:g} 0")
+            point_vals.append(f"{x:g} {y:g} {z:g}")
+
+        conn_vals: list[str] = []
+        offset_vals: list[str] = []
+        type_vals: list[str] = []
+        cell_id_vals: list[str] = []
+        ghost_vals: list[str] = []
+
+        running_off = 0
+        for global_cid, ghost_val in cell_entries:
+            cell_type, conn = global_cells[global_cid]
+            local_conn = [global_to_local[gpt] for gpt in conn]
+            conn_vals.extend(str( pid) for pid in local_conn)
+            running_off += len(local_conn)
+            offset_vals.append(str(running_off))
+            type_vals.append(str(cell_type))
+            cell_id_vals.append(str(global_cid))
+            ghost_vals.append(str(ghost_val))
+
+        vtu_lines = [
+            '<?xml version="1.0"?>',
+            '<VTKFile type="UnstructuredGrid" version="1.0" byte_order="LittleEndian" header_type="UInt32">',
+            "  <UnstructuredGrid>",
+            f'    <Piece NumberOfPoints="{num_pts}" NumberOfCells="{num_cells}">',
+            "      <PointData>",
+            '        <DataArray type="Float64" Name="linear" format="ascii">',
+            "          " + " ".join(linear_vals),
+            "        </DataArray>",
+            '        <DataArray type="Float64" Name="radius" format="ascii">',
+            "          " + " ".join(radius_vals),
+            "        </DataArray>",
+            '        <DataArray type="Float64" Name="velocity" NumberOfComponents="3" format="ascii">',
+            "          " + " ".join(velocity_vals),
+            "        </DataArray>",
+            "      </PointData>",
+            "      <CellData>",
+            '        <DataArray type="Int32" Name="cell_id" format="ascii">',
+            "          " + " ".join(cell_id_vals),
+            "        </DataArray>",
+            '        <DataArray type="UInt8" Name="vtkGhostType" format="ascii">',
+            "          " + " ".join(ghost_vals),
+            "        </DataArray>",
+            "      </CellData>",
+            "      <Points>",
+            '        <DataArray type="Float64" Name="Points" NumberOfComponents="3" format="ascii">',
+            "          " + " ".join(point_vals),
+            "        </DataArray>",
+            "      </Points>",
+            "      <Cells>",
+            '        <DataArray type="Int64" Name="connectivity" format="ascii">',
+            "          " + " ".join(conn_vals),
+            "        </DataArray>",
+            '        <DataArray type="Int64" Name="offsets" format="ascii">',
+            "          " + " ".join(offset_vals),
+            "        </DataArray>",
+            '        <DataArray type="UInt8" Name="types" format="ascii">',
+            "          " + " ".join(type_vals),
+            "        </DataArray>",
+            "      </Cells>",
+            "    </Piece>",
+            "  </UnstructuredGrid>",
+            "</VTKFile>",
+            "",
+        ]
+        (VTK_DIR / piece_filename).write_text("\n".join(vtu_lines), encoding="utf-8")
+
+    pvtu_lines = [
+        '<?xml version="1.0"?>',
+        '<VTKFile type="PUnstructuredGrid" version="1.0" byte_order="LittleEndian" header_type="UInt32">',
+        '  <PUnstructuredGrid GhostLevel="1">',
+        "    <PPointData>",
+        '      <PDataArray type="Float64" Name="linear" NumberOfComponents="1"/>',
+        '      <PDataArray type="Float64" Name="radius" NumberOfComponents="1"/>',
+        '      <PDataArray type="Float64" Name="velocity" NumberOfComponents="3"/>',
+        "    </PPointData>",
+        "    <PCellData>",
+        '      <PDataArray type="Int32" Name="cell_id" NumberOfComponents="1"/>',
+        '      <PDataArray type="UInt8" Name="vtkGhostType" NumberOfComponents="1"/>',
+        "    </PCellData>",
+        "    <PPoints>",
+        '      <PDataArray type="Float64" Name="Points" NumberOfComponents="3"/>',
+        "    </PPoints>",
+        '    <Piece Source="hex_partitioned_0.vtu"/>',
+        '    <Piece Source="hex_partitioned_1.vtu"/>',
+        "  </PUnstructuredGrid>",
+        "</VTKFile>",
+        "",
+    ]
+    (VTK_DIR / "hex_partitioned.pvtu").write_text("\n".join(pvtu_lines), encoding="utf-8")
+
+
 def main() -> None:
     VTK_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -468,6 +623,7 @@ def main() -> None:
     write_vtu(build_hex_lagrange_p3(), VTK_DIR / "hex_lagrange_p3.vtu", mode="ascii")
     build_polyhedra_and_write(VTK_DIR / "polyhedra.vtu")
     write_series_pvd()
+    write_partitioned_pvtu()
 
 
 if __name__ == "__main__":

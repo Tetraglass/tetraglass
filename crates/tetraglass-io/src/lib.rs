@@ -22,6 +22,10 @@
 //!     Lagrange (`68..=73`), and polyhedra (`42`, inline `CELLS` face streams and `FACES`/`FACE_LOCATIONS`).
 //!   - Attributes: `POINT_DATA` and `CELL_DATA` (`SCALARS`, `VECTORS`, `NORMALS`, `TENSORS`,
 //!     `TENSORS6`, `TEXTURE_COORDINATES`, and `FIELD` data tables).
+//! - **Parallel VTK XML UnstructuredGrid (`.pvtu`):** [`parse_pvtu_manifest`],
+//!   [`read_pvtu_with_loader`], [`read_pvtu_series_with_loader`] (and [`read_pvtu_from_path`],
+//!   [`read_pvtu_series_from_path`] on native targets) merging partitioned `.vtu` pieces with
+//!   `vtkGhostType` ghost-cell filtering and shared interface vertex welding (`M6.3`).
 //! - **ParaView XML data collection (`.pvd`):** [`parse_pvd_entries`],
 //!   [`read_pvd_series_with_loader`] (and [`read_pvd_series_from_path`], [`read_pvd_from_path`]
 //!   on native targets) producing a lazy [`tetraglass_core::TimeSeries`].
@@ -64,6 +68,7 @@ use tetraglass_core::{StepLoader, TimeSeries};
 mod error;
 mod msh;
 mod pvd;
+mod pvtu;
 mod vtk;
 mod vtu;
 mod vtu_codec;
@@ -75,6 +80,12 @@ pub use msh::{read_msh_from_path, read_msh_series_from_path};
 pub use pvd::{PvdEntry, parse_pvd_entries, read_pvd_series_with_loader};
 #[cfg(not(target_arch = "wasm32"))]
 pub use pvd::{read_pvd_from_path, read_pvd_series_from_path};
+pub use pvtu::{
+    PvtuDataArrayMeta, PvtuManifest, PvtuPiece, parse_pvtu_manifest, read_pvtu_series_with_loader,
+    read_pvtu_with_loader,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use pvtu::{read_pvtu_from_path, read_pvtu_series_from_path};
 #[cfg(not(target_arch = "wasm32"))]
 pub use vtk::read_vtk_from_path;
 pub use vtk::{read_vtk, read_vtk_series};
@@ -89,7 +100,7 @@ pub fn read_vtu_series(bytes: impl Into<Arc<[u8]>>) -> Result<TimeSeries<IoError
     Ok(TimeSeries::from_boxed_steps(vec![(0.0, loader)])?)
 }
 
-/// Opens a `.vtu`, `.vtk`, `.pvd`, or `.msh` file from a native path as a lazy [`TimeSeries<IoError>`].
+/// Opens a `.vtu`, `.pvtu`, `.vtk`, `.pvd`, or `.msh` file from a native path as a lazy [`TimeSeries<IoError>`].
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_series_from_path(
     path: impl AsRef<Path>,
@@ -97,20 +108,41 @@ pub fn read_series_from_path(
 ) -> Result<(MeshFormat, TimeSeries<IoError>), IoError> {
     let path = path.as_ref();
     let bytes = std::fs::read(path)?;
-    let format = explicit_format
-        .or_else(|| {
-            path.extension()
-                .and_then(|e| e.to_str())
-                .and_then(detect_format_from_extension)
-        })
-        .or_else(|| detect_format_from_bytes(&bytes))
-        .ok_or_else(|| IoError::InvalidVtuStructure {
-            offset: 0,
-            reason: format!("cannot determine mesh format for `{}`", path.display()),
-        })?;
+    let detected = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(detect_format_from_extension)
+        .or_else(|| detect_format_from_bytes(&bytes));
+    let format = match (explicit_format, detected) {
+        (Some(MeshFormat::Vtu), Some(MeshFormat::Pvtu)) => MeshFormat::Pvtu,
+        (Some(exp), _) => exp,
+        (None, Some(det)) => det,
+        (None, None) => {
+            return Err(IoError::InvalidVtuStructure {
+                offset: 0,
+                reason: format!("cannot determine mesh format for `{}`", path.display()),
+            });
+        }
+    };
 
     match format {
         MeshFormat::Vtu => Ok((format, read_vtu_series(bytes)?)),
+        MeshFormat::Pvtu => {
+            let base_dir = path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf();
+            let series = read_pvtu_series_with_loader(bytes, move |rel_piece| {
+                let rel = Path::new(rel_piece);
+                let piece_path = if rel.is_absolute() || base_dir.as_os_str().is_empty() {
+                    rel.to_path_buf()
+                } else {
+                    base_dir.join(rel)
+                };
+                Ok(std::fs::read(piece_path)?)
+            })?;
+            Ok((format, series))
+        }
         MeshFormat::VtkLegacy => Ok((format, read_vtk_series(bytes)?)),
         MeshFormat::Gmsh => Ok((format, read_msh_series(bytes)?)),
         MeshFormat::Pvd => {
@@ -137,6 +169,8 @@ pub fn read_series_from_path(
 pub enum MeshFormat {
     /// VTK XML UnstructuredGrid (`.vtu`).
     Vtu,
+    /// Parallel VTK XML UnstructuredGrid (`.pvtu`).
+    Pvtu,
     /// ParaView XML data collection (`.pvd`).
     Pvd,
     /// Legacy VTK file (`.vtk`).
@@ -145,11 +179,13 @@ pub enum MeshFormat {
     Gmsh,
 }
 
-/// Detects the [`MeshFormat`] from a file extension (`vtu`, `pvd`, `vtk`, `msh`, case-insensitive).
+/// Detects the [`MeshFormat`] from a file extension (`vtu`, `pvtu`, `pvd`, `vtk`, `msh`, case-insensitive).
 #[must_use]
 pub fn detect_format_from_extension(ext: &str) -> Option<MeshFormat> {
     if ext.eq_ignore_ascii_case("vtu") {
         Some(MeshFormat::Vtu)
+    } else if ext.eq_ignore_ascii_case("pvtu") {
+        Some(MeshFormat::Pvtu)
     } else if ext.eq_ignore_ascii_case("pvd") {
         Some(MeshFormat::Pvd)
     } else if ext.eq_ignore_ascii_case("vtk") {
@@ -178,6 +214,12 @@ pub fn detect_format_from_bytes(bytes: &[u8]) -> Option<MeshFormat> {
         return Some(MeshFormat::VtkLegacy);
     }
     if prefix.windows(b"<VTKFile".len()).any(|w| w == b"<VTKFile") {
+        if prefix
+            .windows(b"PUnstructuredGrid".len())
+            .any(|w| w == b"PUnstructuredGrid")
+        {
+            return Some(MeshFormat::Pvtu);
+        }
         if prefix
             .windows(b"UnstructuredGrid".len())
             .any(|w| w == b"UnstructuredGrid")

@@ -168,7 +168,7 @@ impl From<SourceFormat> for MeshFormat {
 impl From<MeshFormat> for SourceFormat {
     fn from(format: MeshFormat) -> Self {
         match format {
-            MeshFormat::Vtu => Self::Vtu,
+            MeshFormat::Vtu | MeshFormat::Pvtu => Self::Vtu,
             MeshFormat::VtkLegacy => Self::Vtk,
             MeshFormat::Pvd => Self::Pvd,
             MeshFormat::Gmsh => Self::Msh,

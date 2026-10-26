@@ -18,6 +18,7 @@ use flate2::write::ZlibEncoder;
 use serde::{Deserialize, Serialize};
 use tetraglass_io::{
     IoError, MeshFormat, detect_format_from_bytes, detect_format_from_extension, parse_pvd_entries,
+    parse_pvtu_manifest,
 };
 use tetraglass_scene::{ColormapName, Scene};
 
@@ -306,6 +307,11 @@ impl InMemoryFileStore {
         }
         if let Some(idx) = files.iter().position(|f| {
             detect_mesh_format(Path::new(&f.name), &f.bytes, None) == Some(MeshFormat::Pvd)
+        }) {
+            return Some(idx);
+        }
+        if let Some(idx) = files.iter().position(|f| {
+            detect_mesh_format(Path::new(&f.name), &f.bytes, None) == Some(MeshFormat::Pvtu)
         }) {
             return Some(idx);
         }
@@ -1252,10 +1258,9 @@ where
                 ))
             })?;
             let explicit_format = source.format.map(MeshFormat::from);
-            let is_pvd =
-                detect_mesh_format(Path::new(&source.file), &source_bytes, explicit_format)
-                    == Some(MeshFormat::Pvd);
-            if is_pvd {
+            let detected =
+                detect_mesh_format(Path::new(&source.file), &source_bytes, explicit_format);
+            if detected == Some(MeshFormat::Pvd) {
                 let entries = parse_pvd_entries(&source_bytes)?;
                 for entry in entries {
                     let step_url = spec
@@ -1275,6 +1280,29 @@ where
                     })?;
                     companion_files.insert(&entry.file, step_bytes.clone());
                     companion_files.insert(&step_url, step_bytes);
+                }
+            } else if detected == Some(MeshFormat::Pvtu)
+                || detect_format_from_bytes(&source_bytes) == Some(MeshFormat::Pvtu)
+            {
+                let manifest = parse_pvtu_manifest(&source_bytes)?;
+                for piece in manifest.pieces {
+                    let piece_url = spec
+                        .data_urls
+                        .get(&piece.source)
+                        .or_else(|| spec.data_urls.get(&url_display_label(&piece.source)))
+                        .cloned()
+                        .unwrap_or_else(|| resolve_relative_url(&source_url, &piece.source));
+                    let piece_bytes = fetcher(&piece_url).map_err(|msg| {
+                        ViewerError::Io(std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!(
+                                "failed to load PVTU piece `{}` from `{piece_url}`: {msg}",
+                                piece.source
+                            ),
+                        ))
+                    })?;
+                    companion_files.insert(&piece.source, piece_bytes.clone());
+                    companion_files.insert(&piece_url, piece_bytes);
                 }
             }
             companion_files.insert(&source.file, source_bytes.clone());
@@ -1301,6 +1329,28 @@ where
             })?;
             companion_files.insert(&entry.file, step_bytes.clone());
             companion_files.insert(&step_url, step_bytes);
+        }
+    } else if detect_mesh_format(label_path, &primary_bytes, None) == Some(MeshFormat::Pvtu) {
+        let base_str = base_url.as_deref().unwrap_or("");
+        let manifest = parse_pvtu_manifest(&primary_bytes)?;
+        for piece in manifest.pieces {
+            let piece_url = spec
+                .data_urls
+                .get(&piece.source)
+                .or_else(|| spec.data_urls.get(&url_display_label(&piece.source)))
+                .cloned()
+                .unwrap_or_else(|| resolve_relative_url(base_str, &piece.source));
+            let piece_bytes = fetcher(&piece_url).map_err(|msg| {
+                ViewerError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!(
+                        "failed to load PVTU piece `{}` from `{piece_url}`: {msg}",
+                        piece.source
+                    ),
+                ))
+            })?;
+            companion_files.insert(&piece.source, piece_bytes.clone());
+            companion_files.insert(&piece_url, piece_bytes);
         }
     } else if detect_mesh_format(label_path, &primary_bytes, None).is_none() {
         return Err(ViewerError::MeshIo(IoError::UnsupportedFeature {

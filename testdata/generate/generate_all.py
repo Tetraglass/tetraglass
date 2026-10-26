@@ -152,6 +152,18 @@ def main() -> None:
             extra_arrays=("transient",),
         )
 
+    pvtu_path = vtk_dir / "hex_partitioned.pvtu"
+    assert pvtu_path.exists() and pvtu_path.stat().st_size < MAX_FILE_BYTES
+    pvtu_tree = ET.parse(pvtu_path)
+    pvtu_pieces = pvtu_tree.findall(".//PUnstructuredGrid/Piece")
+    assert len(pvtu_pieces) == 2, f"hex_partitioned.pvtu: expected 2 Piece entries, got {len(pvtu_pieces)}"
+    for piece_idx in range(2):
+        verify_vtu(
+            vtk_dir / f"hex_partitioned_{piece_idx}.vtu",
+            expected_points=24,
+            expected_cells=6,
+        )
+
     verify_msh(gmsh_dir / "tet2_v41.msh", expected_nodes=27, expected_cells=6)
     verify_msh(gmsh_dir / "tet2_v41_binary.msh", expected_nodes=27, expected_cells=6)
     verify_msh(gmsh_dir / "tet_v22.msh", expected_nodes=8, expected_cells=6)

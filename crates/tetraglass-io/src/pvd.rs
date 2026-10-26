@@ -26,8 +26,8 @@ use tetraglass_core::{StepLoader, TimeSeries, UnstructuredGrid};
 
 use crate::error::IoError;
 use crate::{
-    MeshFormat, detect_format_from_bytes, detect_format_from_extension, read_msh, read_vtk,
-    read_vtu,
+    MeshFormat, detect_format_from_bytes, detect_format_from_extension, read_msh,
+    read_pvtu_with_loader, read_vtk, read_vtu,
 };
 
 /// A single `<DataSet>` entry inside a ParaView `.pvd` `<Collection>`.
@@ -173,7 +173,7 @@ where
         let loader_cb = Arc::clone(&shared_loader);
         let step_loader: StepLoader<IoError> = Arc::new(move || {
             let step_bytes = loader_cb(&file)?;
-            parse_step_mesh_bytes(&file, &step_bytes)
+            parse_step_mesh_bytes(&file, &step_bytes, &*loader_cb)
         });
         steps.push((entry.timestep, step_loader));
     }
@@ -213,7 +213,14 @@ pub fn read_pvd_from_path(path: impl AsRef<Path>) -> Result<UnstructuredGrid, Io
     Ok((*first).clone())
 }
 
-fn parse_step_mesh_bytes(file_name: &str, bytes: &[u8]) -> Result<UnstructuredGrid, IoError> {
+fn parse_step_mesh_bytes<F>(
+    file_name: &str,
+    bytes: &[u8],
+    loader_cb: &F,
+) -> Result<UnstructuredGrid, IoError>
+where
+    F: Fn(&str) -> Result<Vec<u8>, IoError>,
+{
     let ext = file_name
         .rsplit_once('.')
         .map(|(_, e)| e)
@@ -224,6 +231,20 @@ fn parse_step_mesh_bytes(file_name: &str, bytes: &[u8]) -> Result<UnstructuredGr
 
     match format {
         MeshFormat::Vtu => read_vtu(bytes),
+        MeshFormat::Pvtu => {
+            let step_dir = file_name
+                .replace('\\', "/")
+                .rsplit_once('/')
+                .map(|(dir, _)| dir.to_string());
+            read_pvtu_with_loader(bytes, |rel_piece| {
+                if let Some(ref dir) = step_dir {
+                    let joined = format!("{dir}/{rel_piece}");
+                    loader_cb(&joined).or_else(|_| loader_cb(rel_piece))
+                } else {
+                    loader_cb(rel_piece)
+                }
+            })
+        }
         MeshFormat::VtkLegacy => read_vtk(bytes),
         MeshFormat::Gmsh => read_msh(bytes),
         other => Err(IoError::InvalidPvdStructure {

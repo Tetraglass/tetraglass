@@ -30,6 +30,8 @@ fn required_vtk_files_exist_and_contain_standard_fields() {
         "series_0.vtu",
         "series_1.vtu",
         "series_2.vtu",
+        "hex_partitioned_0.vtu",
+        "hex_partitioned_1.vtu",
     ];
 
     for name in vtu_files {
@@ -68,6 +70,12 @@ fn required_vtk_files_exist_and_contain_standard_fields() {
     assert!(pvd.contains("file=\"series_0.vtu\""));
     assert!(pvd.contains("file=\"series_1.vtu\""));
     assert!(pvd.contains("file=\"series_2.vtu\""));
+
+    let pvtu_path = vtk_dir.join("hex_partitioned.pvtu");
+    let pvtu = fs::read_to_string(&pvtu_path).expect("read hex_partitioned.pvtu");
+    assert!(pvtu.contains("<VTKFile type=\"PUnstructuredGrid\""));
+    assert!(pvtu.contains("Source=\"hex_partitioned_0.vtu\""));
+    assert!(pvtu.contains("Source=\"hex_partitioned_1.vtu\""));
 
     let legacy_vtk_files = [
         (

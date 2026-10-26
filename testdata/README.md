@@ -28,6 +28,9 @@ Every mesh carries four analytic fields:
 | `vtk/series_0.vtu` | Time step 0 (`t = 0.0`) of `series.pvd` with `transient = x + 2y + 3z + t` | `generate/generate_vtk.py` |
 | `vtk/series_1.vtu` | Time step 1 (`t = 0.5`) of `series.pvd` with `transient = x + 2y + 3z + t` | `generate/generate_vtk.py` |
 | `vtk/series_2.vtu` | Time step 2 (`t = 1.0`) of `series.pvd` with `transient = x + 2y + 3z + t` | `generate/generate_vtk.py` |
+| `vtk/hex_partitioned.pvtu` | Parallel VTK XML UnstructuredGrid (`GhostLevel="1"`) partitioning `hex_linear.vtu` into 2 pieces with `vtkGhostType` ghost cells | `generate/generate_vtk.py` |
+| `vtk/hex_partitioned_0.vtu` | Piece 0 (`x in [0, 1]`, 4 owned hexes + 2 ghost hexes with `vtkGhostType = 1`) of `hex_partitioned.pvtu` | `generate/generate_vtk.py` |
+| `vtk/hex_partitioned_1.vtu` | Piece 1 (`x in [1, 2]`, 4 owned hexes + 2 ghost hexes with `vtkGhostType = 1`) of `hex_partitioned.pvtu` | `generate/generate_vtk.py` |
 | `gmsh/tet2_v41.msh` | 6 second-order 10-node tetrahedra (Gmsh type 11, 27 nodes) on $[0, 1]^3$ in MSH 4.1 ASCII with `$NodeData` and `$ElementData` | `generate/generate_gmsh.py` |
 | `gmsh/tet2_v41_binary.msh` | Same 6 second-order tetrahedra as `tet2_v41.msh` in MSH 4.1 binary encoding with `$NodeData` and `$ElementData` | `generate/generate_gmsh.py` |
 | `gmsh/tet_v22.msh` | 6 linear 4-node tetrahedra (Gmsh type 4, 8 nodes) on $[0, 1]^3$ in MSH 2.2 ASCII with `$NodeData` and `$ElementData` | `generate/generate_gmsh.py` |
