@@ -307,6 +307,7 @@ pub struct ViewerDocument {
     show_colorbar: bool,
     show_axes: bool,
     opacity: f64,
+    transfer_function: Vec<[f64; 2]>,
     watcher: Option<SceneFileWatcher>,
     last_reload_error: Option<String>,
     reload_count: usize,
@@ -364,6 +365,7 @@ impl ViewerDocument {
             show_colorbar: false,
             show_axes: true,
             opacity: 1.0,
+            transfer_function: vec![[0.0, 0.0], [1.0, 1.0]],
             watcher,
             last_reload_error: None,
             reload_count: 0,
@@ -399,6 +401,7 @@ impl ViewerDocument {
             show_colorbar: false,
             show_axes: true,
             opacity: 1.0,
+            transfer_function: vec![[0.0, 0.0], [1.0, 1.0]],
             watcher: None,
             last_reload_error: None,
             reload_count: 0,
@@ -482,6 +485,7 @@ impl ViewerDocument {
             show_colorbar: false,
             show_axes: true,
             opacity: 1.0,
+            transfer_function: vec![[0.0, 0.0], [1.0, 1.0]],
             watcher: None,
             last_reload_error: None,
             reload_count: 0,
@@ -545,6 +549,7 @@ impl ViewerDocument {
             show_colorbar: false,
             show_axes: true,
             opacity: 1.0,
+            transfer_function: vec![[0.0, 0.0], [1.0, 1.0]],
             watcher: None,
             last_reload_error: None,
             reload_count: 0,
@@ -973,6 +978,61 @@ impl ViewerDocument {
         Ok(true)
     }
 
+    /// Returns whether the primary representation is a volume representation (`M4.4b`).
+    #[must_use]
+    pub fn is_volume_representation(&self) -> bool {
+        self.evaluated
+            .representations
+            .first()
+            .is_some_and(|r| r.volume.is_some())
+    }
+
+    /// Returns the active piecewise-linear opacity transfer function control points `[[t, alpha], ...]` (`M4.4b`).
+    #[must_use]
+    pub fn transfer_function(&self) -> &[[f64; 2]] {
+        &self.transfer_function
+    }
+
+    /// Updates the piecewise-linear opacity transfer function control points `[[t, alpha], ...]`
+    /// on the primary representation without re-running upstream filters (`M4.4b`).
+    pub fn set_transfer_function(&mut self, points: Vec<[f64; 2]>) -> Result<bool, ViewerError> {
+        if points.len() < 2 {
+            return Err(ViewerError::Validation(
+                "transfer_function must have at least 2 control points".to_string(),
+            ));
+        }
+        for &[t, alpha] in &points {
+            if !t.is_finite()
+                || !(0.0..=1.0).contains(&t)
+                || !alpha.is_finite()
+                || !(0.0..=1.0).contains(&alpha)
+            {
+                return Err(ViewerError::Validation(format!(
+                    "transfer_function point `[{t}, {alpha}]` must have finite coordinates in [0.0, 1.0]"
+                )));
+            }
+        }
+        for pair in points.windows(2) {
+            if pair[1][0] < pair[0][0] {
+                return Err(ViewerError::Validation(
+                    "transfer_function control points must have non-decreasing normalized positions"
+                        .to_string(),
+                ));
+            }
+        }
+        if self.transfer_function == points {
+            return Ok(false);
+        }
+        self.transfer_function.clone_from(&points);
+        if let Some(rep) = self.scene.view.show.first_mut() {
+            rep.transfer_function = Some(points);
+        }
+        self.evaluated = self
+            .evaluator
+            .evaluate_scene_at_time(&self.scene, TimeSelector::step(self.current_step))?;
+        Ok(true)
+    }
+
     /// Returns the most recent hot-reload error message, if the last reload attempt failed.
     #[must_use]
     pub fn last_reload_error(&self) -> Option<&str> {
@@ -1145,6 +1205,10 @@ impl ViewerDocument {
             self.use_log_scale = rep.log_scale;
             self.show_colorbar = rep.colorbar.is_enabled();
             self.opacity = rep.opacity;
+            self.transfer_function = rep
+                .transfer_function
+                .clone()
+                .unwrap_or_else(|| vec![[0.0, 0.0], [1.0, 1.0]]);
         }
         self.show_axes = self.scene.view.axes;
     }
@@ -1380,6 +1444,7 @@ pub struct ViewerSession {
     async_drop_rx: mpsc::Receiver<Result<Vec<DroppedFilePayload>, String>>,
     async_url_tx: mpsc::Sender<Result<FetchedUrlBundle, String>>,
     async_url_rx: mpsc::Receiver<Result<FetchedUrlBundle, String>>,
+    active_tf_point: Option<usize>,
 }
 
 impl std::fmt::Debug for ViewerSession {
@@ -1458,6 +1523,7 @@ impl ViewerSession {
             async_drop_rx,
             async_url_tx,
             async_url_rx,
+            active_tf_point: None,
         })
     }
 
@@ -2268,6 +2334,7 @@ impl ViewerSession {
         let mut colorbar_changed_to: Option<bool> = None;
         let mut axes_changed_to: Option<bool> = None;
         let mut opacity_changed_to: Option<f64> = None;
+        let mut transfer_function_changed_to: Option<Vec<[f64; 2]>> = None;
         let mut trigger_reload = false;
         let mut trigger_load_url = false;
         let mut trigger_reset_camera = false;
@@ -2466,6 +2533,161 @@ impl ViewerSession {
 
                 if let Some([lo, hi]) = self.viewport.effective_range() {
                     ui.label(format!("Range: [{lo:.4}, {hi:.4}]"));
+                }
+
+                // --- Transfer function editor (M4.4b) ---
+                if self.doc.is_volume_representation() {
+                    ui.separator();
+                    ui.label("Transfer function (opacity curve):");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.small("Presets:");
+                        if ui.small_button("Linear").clicked() {
+                            transfer_function_changed_to = Some(vec![[0.0, 0.0], [1.0, 1.0]]);
+                        }
+                        if ui.small_button("Soft").clicked() {
+                            transfer_function_changed_to =
+                                Some(vec![[0.0, 0.0], [0.35, 0.12], [0.7, 0.45], [1.0, 0.9]]);
+                        }
+                        if ui.small_button("High peak").clicked() {
+                            transfer_function_changed_to =
+                                Some(vec![[0.0, 0.0], [0.55, 0.05], [0.8, 0.45], [1.0, 1.0]]);
+                        }
+                        if ui.small_button("Mid band").clicked() {
+                            transfer_function_changed_to = Some(vec![
+                                [0.0, 0.0],
+                                [0.25, 0.05],
+                                [0.5, 0.85],
+                                [0.75, 0.05],
+                                [1.0, 0.0],
+                            ]);
+                        }
+                    });
+
+                    let mut pts = self.doc.transfer_function().to_vec();
+                    let (rect, resp) = ui.allocate_exact_size(
+                        egui::vec2(230.0, 88.0),
+                        egui::Sense::click_and_drag(),
+                    );
+                    let pad = 6.0_f32;
+                    let plot = rect.shrink(pad);
+                    let to_screen = |t: f64, a: f64| -> egui::Pos2 {
+                        egui::pos2(
+                            plot.left() + (t.clamp(0.0, 1.0) as f32) * plot.width(),
+                            plot.bottom() - (a.clamp(0.0, 1.0) as f32) * plot.height(),
+                        )
+                    };
+                    let from_screen = |pos: egui::Pos2| -> [f64; 2] {
+                        let t = ((pos.x - plot.left()) / plot.width().max(1.0)).clamp(0.0, 1.0);
+                        let a = ((plot.bottom() - pos.y) / plot.height().max(1.0)).clamp(0.0, 1.0);
+                        [f64::from(t), f64::from(a)]
+                    };
+
+                    if resp.drag_started()
+                        && let Some(pos) = resp.interact_pointer_pos()
+                    {
+                        let mut hit = None;
+                        let mut best_dist = 10.0_f32;
+                        for (idx, &[t, a]) in pts.iter().enumerate() {
+                            let d = to_screen(t, a).distance(pos);
+                            if d <= best_dist {
+                                best_dist = d;
+                                hit = Some(idx);
+                            }
+                        }
+                        if let Some(idx) = hit {
+                            self.active_tf_point = Some(idx);
+                        } else {
+                            let [t, a] = from_screen(pos);
+                            let insert_idx = pts
+                                .iter()
+                                .position(|p| p[0] > t)
+                                .unwrap_or(pts.len().saturating_sub(1))
+                                .clamp(1, pts.len().saturating_sub(1));
+                            pts.insert(insert_idx, [t, a]);
+                            self.active_tf_point = Some(insert_idx);
+                            transfer_function_changed_to = Some(pts.clone());
+                        }
+                    }
+
+                    if resp.dragged()
+                        && let (Some(idx), Some(pos)) =
+                            (self.active_tf_point, resp.interact_pointer_pos())
+                        && idx < pts.len()
+                    {
+                        let [raw_t, raw_a] = from_screen(pos);
+                        let last = pts.len() - 1;
+                        let new_t = if idx == 0 {
+                            0.0
+                        } else if idx == last {
+                            1.0
+                        } else {
+                            let lo = (pts[idx - 1][0] + 0.01).min(1.0);
+                            let hi = (pts[idx + 1][0] - 0.01).max(lo);
+                            raw_t.clamp(lo, hi)
+                        };
+                        pts[idx] = [new_t, raw_a];
+                        transfer_function_changed_to = Some(pts.clone());
+                    }
+
+                    if resp.drag_stopped() {
+                        self.active_tf_point = None;
+                    }
+
+                    if resp.secondary_clicked()
+                        && pts.len() > 2
+                        && let Some(pos) = resp.interact_pointer_pos()
+                    {
+                        let mut hit = None;
+                        let mut best_dist = 10.0_f32;
+                        for (idx, &[t, a]) in pts.iter().enumerate() {
+                            if idx > 0 && idx + 1 < pts.len() {
+                                let d = to_screen(t, a).distance(pos);
+                                if d <= best_dist {
+                                    best_dist = d;
+                                    hit = Some(idx);
+                                }
+                            }
+                        }
+                        if let Some(idx) = hit {
+                            pts.remove(idx);
+                            self.active_tf_point = None;
+                            transfer_function_changed_to = Some(pts.clone());
+                        }
+                    }
+
+                    let painter = ui.painter_at(rect);
+                    painter.rect_filled(rect, 3.0, egui::Color32::from_rgb(24, 28, 36));
+                    for step in [0.25_f32, 0.5, 0.75] {
+                        let y = plot.bottom() - step * plot.height();
+                        painter.line_segment(
+                            [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
+                            egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 52, 66)),
+                        );
+                    }
+                    let screen_pts: Vec<egui::Pos2> =
+                        pts.iter().map(|&[t, a]| to_screen(t, a)).collect();
+                    for seg in screen_pts.windows(2) {
+                        painter.line_segment(
+                            [seg[0], seg[1]],
+                            egui::Stroke::new(2.0, egui::Color32::from_rgb(90, 200, 250)),
+                        );
+                    }
+                    for (idx, &p) in screen_pts.iter().enumerate() {
+                        let fill = if self.active_tf_point == Some(idx) {
+                            egui::Color32::from_rgb(255, 210, 90)
+                        } else {
+                            egui::Color32::WHITE
+                        };
+                        painter.circle_filled(p, 4.0, fill);
+                        painter.circle_stroke(
+                            p,
+                            4.0,
+                            egui::Stroke::new(1.2, egui::Color32::from_rgb(20, 30, 45)),
+                        );
+                    }
+                    ui.small(
+                        "Drag points to edit; click to add; right-click interior point to remove.",
+                    );
                 }
 
                 // --- Interactive clip section (M2.8) ---
@@ -2668,10 +2890,15 @@ impl ViewerSession {
         }
 
         let mut style_or_annotations_dirty = false;
+        let mut volume_field_reupload = false;
         if let Some(new_field_idx) = field_changed_to
             && let Ok(true) = self.doc.set_field_index(new_field_idx)
         {
-            style_or_annotations_dirty = true;
+            if self.doc.is_volume_representation() {
+                volume_field_reupload = true;
+            } else {
+                style_or_annotations_dirty = true;
+            }
         }
         if let Some(new_cmap) = colormap_changed_to
             && let Ok(true) = self.doc.set_colormap(new_cmap)
@@ -2698,7 +2925,16 @@ impl ViewerSession {
         {
             style_or_annotations_dirty = true;
         }
-        if style_or_annotations_dirty
+        if let Some(new_tf) = transfer_function_changed_to
+            && let Ok(true) = self.doc.set_transfer_function(new_tf)
+        {
+            style_or_annotations_dirty = true;
+        }
+        if volume_field_reupload {
+            if let Err(err) = self.sync_viewport_after_doc_change(device, queue, true, false) {
+                log::error!("Failed to re-upload volume field: {err}");
+            }
+        } else if style_or_annotations_dirty
             && let Err(err) = self.sync_viewport_after_doc_change(device, queue, false, false)
         {
             log::error!("Failed to update viewport style: {err}");
@@ -3280,10 +3516,12 @@ pub fn build_surface_style(rep: &EvaluatedRepresentation) -> ViewportSurfaceStyl
         rep.edge_color[2],
         rep.opacity as f32,
     ];
+    let is_volume = rep.volume.is_some();
     let (draw_surface, draw_edges) = match rep.style {
         RepresentationStyle::Wireframe => (false, true),
-        RepresentationStyle::SurfaceWithEdges => (true, true),
-        _ => (true, false),
+        RepresentationStyle::SurfaceWithEdges => (!is_volume, true),
+        RepresentationStyle::Volume => (false, false),
+        _ => (!is_volume, false),
     };
     match &rep.coloring {
         None => ViewportSurfaceStyle {
@@ -3296,6 +3534,8 @@ pub fn build_surface_style(rep: &EvaluatedRepresentation) -> ViewportSurfaceStyl
             draw_edges,
             edge_color_srgb,
             clip_plane: None,
+            volume_grid: rep.volume.clone(),
+            transfer_function: rep.transfer_function.clone(),
         },
         Some(c) => ViewportSurfaceStyle {
             color_by: build_color_by(c),
@@ -3307,6 +3547,8 @@ pub fn build_surface_style(rep: &EvaluatedRepresentation) -> ViewportSurfaceStyl
             draw_edges,
             edge_color_srgb,
             clip_plane: None,
+            volume_grid: rep.volume.clone(),
+            transfer_function: rep.transfer_function.clone(),
         },
     }
 }
@@ -3439,3 +3681,75 @@ fn format_probe_value(pv: &PickProbeValue) -> String {
 pub use tetraglass_egui::{
     ViewportClipKeep, ViewportClipPlane, ViewportPickProbeValue, ViewportPickResult,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn volume_document_updates_transfer_function_without_recomputing_filter() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .to_path_buf();
+        let json = r#"{
+            "version": 1,
+            "sources": {
+                "mesh": { "file": "testdata/vtk/hex_linear.vtu" }
+            },
+            "filters": {
+                "vol": {
+                    "type": "resample",
+                    "input": "mesh",
+                    "dimensions": [12, 12, 12]
+                }
+            },
+            "view": {
+                "show": [
+                    {
+                        "input": "vol",
+                        "style": "volume",
+                        "color_by": "linear",
+                        "transfer_function": [[0.0, 0.0], [0.5, 0.25], [1.0, 0.9]]
+                    }
+                ]
+            }
+        }"#;
+        let scene = Scene::from_json_str(json).expect("parse volume scene");
+        let mut doc = ViewerDocument::from_scene(scene, &root).expect("load ViewerDocument");
+        assert!(doc.is_volume_representation());
+        assert_eq!(
+            doc.transfer_function(),
+            &[[0.0, 0.0], [0.5, 0.25], [1.0, 0.9]]
+        );
+
+        let initial_vol = doc
+            .evaluated()
+            .representations
+            .first()
+            .and_then(|r| r.volume.clone())
+            .expect("initial volume grid");
+
+        let new_pts = vec![[0.0, 0.0], [0.3, 0.15], [0.7, 0.6], [1.0, 1.0]];
+        assert!(
+            doc.set_transfer_function(new_pts.clone())
+                .expect("update transfer function")
+        );
+        assert_eq!(doc.transfer_function(), new_pts.as_slice());
+        assert_eq!(
+            doc.active_surface_style().transfer_function.as_deref(),
+            Some(new_pts.as_slice())
+        );
+        let updated_vol = doc
+            .evaluated()
+            .representations
+            .first()
+            .and_then(|r| r.volume.clone())
+            .expect("updated volume grid");
+        assert!(
+            Arc::ptr_eq(&initial_vol, &updated_vol),
+            "updating transfer function must reuse cached RegularGrid without re-running resample"
+        );
+    }
+}

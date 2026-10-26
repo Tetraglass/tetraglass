@@ -549,3 +549,171 @@ fn weighted_blended_oit_is_order_independent_and_composites_over_opaque_geometry
         }
     }
 }
+
+#[test]
+fn volume_ray_marching_modulates_transfer_function_and_terminates_at_opaque_depth() {
+    use std::sync::Arc;
+    use tetraglass_filters::{
+        LinearizeParams, ResampleParams, SliceParams, linearize, resample, slice,
+    };
+
+    let root = workspace_root();
+    let vtu_path = root.join("testdata/vtk/hex_linear.vtu");
+    let mesh = read_vtu_from_path(&vtu_path).expect("read hex_linear.vtu");
+    let shell = extract_external_surface(&mesh).expect("extract shell");
+    let bounds = shell.bounds().expect("shell bounds");
+    let dataset_center = bounds.center();
+    let tet_view = linearize(&mesh, &LinearizeParams::default()).expect("linearize hex_linear");
+    let grid = Arc::new(
+        resample(
+            &tet_view,
+            &ResampleParams {
+                dimensions: [20, 20, 20],
+                bounds: None,
+            },
+        )
+        .expect("resample hex_linear"),
+    );
+    let slice_x = slice(
+        &tet_view,
+        &SliceParams {
+            origin: Some(dataset_center),
+            normal: [1.0, 0.0, 0.0],
+        },
+    )
+    .expect("slice x");
+
+    let camera = Camera::fit_bounds(bounds, 35.0, 24.0);
+    let ctx = HeadlessContext::new().expect("headless wgpu context");
+    let bg = [0.08, 0.09, 0.12, 1.0];
+
+    for sample_count in [1u32, 4u32] {
+        let renderer = Renderer::new(
+            ctx.device(),
+            ctx.queue(),
+            DEFAULT_COLOR_FORMAT,
+            sample_count,
+        )
+        .expect("create renderer");
+        let target =
+            OffscreenTarget::new(ctx.device(), 256, 256, DEFAULT_COLOR_FORMAT, sample_count)
+                .expect("create target");
+
+        let render_surfaces = |surfaces: &[&tetraglass_render::GpuSurface]| -> RenderedImage {
+            let mut encoder = ctx
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            renderer
+                .render(&mut encoder, ctx.queue(), &target, &camera, bg, surfaces)
+                .expect("render surfaces");
+            ctx.queue().submit(std::iter::once(encoder.finish()));
+            ctx.readback_target(&target).expect("readback")
+        };
+
+        let img_empty = render_surfaces(&[]);
+
+        // 1. Zero-opacity transfer function produces background-identical image.
+        let gpu_vol_zero = renderer
+            .upload_surface_with_center(
+                ctx.device(),
+                &shell,
+                dataset_center,
+                &SurfaceStyle {
+                    color_by: ColorBy::point("linear"),
+                    colormap: ColormapKind::Viridis,
+                    draw_surface: false,
+                    volume_grid: Some(Arc::clone(&grid)),
+                    transfer_function: Some(vec![[0.0, 0.0], [1.0, 0.0]]),
+                    ..SurfaceStyle::default()
+                },
+            )
+            .expect("upload zero-opacity volume");
+        let img_vol_zero = render_surfaces(&[&gpu_vol_zero]);
+        let cmp_zero = img_vol_zero
+            .compare(&img_empty, 0, 0.0)
+            .expect("compare zero-opacity volume with empty");
+        assert_eq!(
+            cmp_zero.differing_pixels, 0,
+            "zero-opacity transfer function must produce background-identical output (sample_count={sample_count})"
+        );
+
+        // 2. Low-opacity vs high-opacity transfer function produces visibly denser output.
+        let gpu_vol_low = renderer
+            .upload_surface_with_center(
+                ctx.device(),
+                &shell,
+                dataset_center,
+                &SurfaceStyle {
+                    color_by: ColorBy::point("linear"),
+                    colormap: ColormapKind::Viridis,
+                    draw_surface: false,
+                    volume_grid: Some(Arc::clone(&grid)),
+                    transfer_function: Some(vec![[0.0, 0.0], [1.0, 0.25]]),
+                    ..SurfaceStyle::default()
+                },
+            )
+            .expect("upload low-opacity volume");
+        let gpu_vol_high = renderer
+            .upload_surface_with_center(
+                ctx.device(),
+                &shell,
+                dataset_center,
+                &SurfaceStyle {
+                    color_by: ColorBy::point("linear"),
+                    colormap: ColormapKind::Viridis,
+                    draw_surface: false,
+                    volume_grid: Some(Arc::clone(&grid)),
+                    transfer_function: Some(vec![[0.0, 0.2], [0.5, 0.6], [1.0, 1.0]]),
+                    ..SurfaceStyle::default()
+                },
+            )
+            .expect("upload high-opacity volume");
+        let img_vol_low = render_surfaces(&[&gpu_vol_low]);
+        let img_vol_high = render_surfaces(&[&gpu_vol_high]);
+        let cmp_low_empty = img_vol_low
+            .compare(&img_empty, 2, 0.0)
+            .expect("compare low-opacity volume with empty");
+        assert!(
+            cmp_low_empty.differing_pixels > 4000,
+            "volume ray marching must visibly render the resampled cube (sample_count={sample_count}, diff={})",
+            cmp_low_empty.differing_pixels
+        );
+        let cmp_low_high = img_vol_low
+            .compare(&img_vol_high, 2, 0.0)
+            .expect("compare low vs high opacity transfer function");
+        assert!(
+            cmp_low_high.differing_pixels > 4000,
+            "changing transfer function control points must change rendered volume density (sample_count={sample_count})"
+        );
+
+        // 3. Depth-buffer termination against an opaque slice inside the volume.
+        let gpu_opaque_slice = renderer
+            .upload_surface_with_center(
+                ctx.device(),
+                &slice_x,
+                dataset_center,
+                &SurfaceStyle {
+                    color_by: ColorBy::Solid,
+                    solid_color_srgb: [0.95, 0.2, 0.2, 1.0],
+                    ..SurfaceStyle::default()
+                },
+            )
+            .expect("upload opaque slice");
+        let img_slice_only = render_surfaces(&[&gpu_opaque_slice]);
+        let img_vol_and_slice = render_surfaces(&[&gpu_vol_low, &gpu_opaque_slice]);
+        let cmp_vs_vol_only = img_vol_and_slice
+            .compare(&img_vol_low, 5, 0.0)
+            .expect("compare volume+slice vs volume only");
+        assert!(
+            cmp_vs_vol_only.differing_pixels > 1500,
+            "opaque inner slice must remain visible inside the ray-marched volume via depth termination (sample_count={sample_count})"
+        );
+        let cmp_vs_slice_only = img_vol_and_slice
+            .compare(&img_slice_only, 2, 0.0)
+            .expect("compare volume+slice vs slice only");
+        assert!(
+            cmp_vs_slice_only.differing_pixels > 3000,
+            "volume in front of and around the opaque slice must visibly composite over it (sample_count={sample_count})"
+        );
+    }
+}

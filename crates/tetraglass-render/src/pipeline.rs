@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use bytemuck::{Pod, Zeroable};
-use tetraglass_core::{BoundingBox, DataArray, SurfaceMesh, ValueRange};
+use tetraglass_core::{BoundingBox, DataArray, RegularGrid, SurfaceMesh, ValueRange};
 use wgpu::util::DeviceExt;
 
 use crate::annotations::{
@@ -25,6 +25,65 @@ pub const WBOIT_ACCUM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16F
 
 /// Transmittance revealage texture format for Weighted Blended Order-Independent Transparency (`M3.3`).
 pub const WBOIT_REVEAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// Filterable 3D texture format used for GPU volume ray marching (`M4.4b`).
+pub const VOLUME_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// Number of samples in the pre-evaluated 1D opacity transfer function table (`M4.4b`).
+pub const DEFAULT_TRANSFER_FUNCTION_LUT_SIZE: usize = 256;
+
+/// Evaluates a piecewise-linear opacity transfer function `[[t, alpha], ...]` (`t, alpha in 0.0..=1.0`)
+/// into a 256-entry `f32` lookup table (`M4.4b`).
+///
+/// When `control_points` is `None` or has fewer than 2 control points, evaluates the default
+/// linear opacity ramp `[[0.0, 0.0], [1.0, 1.0]]`.
+#[must_use]
+pub fn evaluate_transfer_function_lut(
+    control_points: Option<&[[f64; 2]]>,
+) -> [f32; DEFAULT_TRANSFER_FUNCTION_LUT_SIZE] {
+    let default_pts = [[0.0, 0.0], [1.0, 1.0]];
+    let raw_pts = match control_points {
+        Some(pts) if pts.len() >= 2 => pts,
+        _ => &default_pts,
+    };
+
+    let mut sorted: Vec<[f64; 2]> = raw_pts
+        .iter()
+        .map(|&[t, a]| [t.clamp(0.0, 1.0), a.clamp(0.0, 1.0)])
+        .collect();
+    sorted.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut lut = [0.0f32; DEFAULT_TRANSFER_FUNCTION_LUT_SIZE];
+    for (i, slot) in lut.iter_mut().enumerate() {
+        let t = (i as f64) / ((DEFAULT_TRANSFER_FUNCTION_LUT_SIZE - 1) as f64);
+        if t <= sorted[0][0] {
+            *slot = sorted[0][1] as f32;
+            continue;
+        }
+        let last = sorted[sorted.len() - 1];
+        if t >= last[0] {
+            *slot = last[1] as f32;
+            continue;
+        }
+        let mut alpha = last[1];
+        for pair in sorted.windows(2) {
+            let [t0, a0] = pair[0];
+            let [t1, a1] = pair[1];
+            if t >= t0 && t <= t1 {
+                let span = t1 - t0;
+                if span > 1e-12 {
+                    let frac = (t - t0) / span;
+                    alpha = a0 + frac * (a1 - a0);
+                } else {
+                    alpha = a1;
+                }
+                break;
+            }
+        }
+        *slot = alpha.clamp(0.0, 1.0) as f32;
+    }
+    lut
+}
 
 /// Which component of a [`DataArray`] to map through the colormap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -202,6 +261,10 @@ pub struct SurfaceStyle {
     pub edge_color_srgb: [f32; 4],
     /// Optional interactive shader clip plane (`None` disables shader clipping).
     pub clip_plane: Option<ShaderClipPlane>,
+    /// Optional resampled 3D [`RegularGrid`] for `"volume"` ray-marching representations (`M4.4b`).
+    pub volume_grid: Option<Arc<RegularGrid>>,
+    /// Optional piecewise-linear opacity transfer function `[[t, alpha], ...]` (`0.0..=1.0`) for `"volume"` representations (`M4.4b`).
+    pub transfer_function: Option<Vec<[f64; 2]>>,
 }
 
 impl Default for SurfaceStyle {
@@ -216,8 +279,29 @@ impl Default for SurfaceStyle {
             draw_edges: false,
             edge_color_srgb: [0.12, 0.14, 0.18, 1.0],
             clip_plane: None,
+            volume_grid: None,
+            transfer_function: None,
         }
     }
+}
+
+fn create_volume_depth_bind_group_layout(
+    device: &wgpu::Device,
+    sample_count: u32,
+) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("tetraglass_volume_depth_bgl"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: sample_count > 1,
+            },
+            count: None,
+        }],
+    })
 }
 
 fn create_wboit_composite_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
@@ -269,6 +353,7 @@ pub struct OffscreenTarget {
     wboit_reveal_view: wgpu::TextureView,
     msaa_wboit_reveal_view: Option<wgpu::TextureView>,
     wboit_bind_group: wgpu::BindGroup,
+    volume_depth_bind_group: wgpu::BindGroup,
 }
 
 struct TargetAttachments {
@@ -282,6 +367,7 @@ struct TargetAttachments {
     wboit_reveal_view: wgpu::TextureView,
     msaa_wboit_reveal_view: Option<wgpu::TextureView>,
     wboit_bind_group: wgpu::BindGroup,
+    volume_depth_bind_group: wgpu::BindGroup,
 }
 
 impl OffscreenTarget {
@@ -317,6 +403,7 @@ impl OffscreenTarget {
             wboit_reveal_view: att.wboit_reveal_view,
             msaa_wboit_reveal_view: att.msaa_wboit_reveal_view,
             wboit_bind_group: att.wboit_bind_group,
+            volume_depth_bind_group: att.volume_depth_bind_group,
         })
     }
 
@@ -348,6 +435,7 @@ impl OffscreenTarget {
         self.wboit_reveal_view = att.wboit_reveal_view;
         self.msaa_wboit_reveal_view = att.msaa_wboit_reveal_view;
         self.wboit_bind_group = att.wboit_bind_group;
+        self.volume_depth_bind_group = att.volume_depth_bind_group;
         Ok(true)
     }
 
@@ -456,10 +544,20 @@ impl OffscreenTarget {
             sample_count,
             dimension: wgpu::TextureDimension::D2,
             format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let volume_depth_bgl = create_volume_depth_bind_group_layout(device, sample_count);
+        let volume_depth_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tetraglass_volume_depth_bg"),
+            layout: &volume_depth_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&depth_view),
+            }],
+        });
 
         let wboit_accum_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("tetraglass_wboit_accum"),
@@ -545,8 +643,37 @@ impl OffscreenTarget {
             wboit_reveal_view,
             msaa_wboit_reveal_view,
             wboit_bind_group,
+            volume_depth_bind_group,
         }
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct VolumeUniforms {
+    inv_view_proj: [[f32; 4]; 4],
+    box_min: [f32; 4],
+    box_max: [f32; 4],
+    grid_dims: [f32; 4],
+    scalar_params: [f32; 4],
+    mode_params: [u32; 4],
+    step_params: [f32; 4],
+    solid_color: [f32; 4],
+    clip_plane: [f32; 4],
+    transfer_lut: [[f32; 4]; 64],
+}
+
+#[derive(Debug)]
+struct GpuVolume {
+    grid: Arc<RegularGrid>,
+    dimensions: [u32; 3],
+    texture: wgpu::Texture,
+    uniform_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    pending_texels: Mutex<Option<Vec<u8>>>,
+    data_min: f32,
+    data_scale: f32,
+    transfer_function: Option<Vec<[f64; 2]>>,
 }
 
 #[repr(C)]
@@ -607,6 +734,7 @@ pub struct GpuSurface {
     draw_edges: bool,
     data_range: [f64; 2],
     effective_range: [f64; 2],
+    volume: Option<GpuVolume>,
 }
 
 impl GpuSurface {
@@ -652,16 +780,34 @@ impl GpuSurface {
         self.opacity
     }
 
+    /// Returns `true` if this representation is a 3D volume rendered by GPU ray marching (`M4.4b`).
+    #[must_use]
+    pub const fn is_volume(&self) -> bool {
+        self.volume.is_some()
+    }
+
+    /// Returns the piecewise-linear opacity transfer function `[[t, alpha], ...]` if this is a volume representation (`M4.4b`).
+    #[must_use]
+    pub fn transfer_function(&self) -> Option<&[[f64; 2]]> {
+        self.volume
+            .as_ref()
+            .and_then(|v| v.transfer_function.as_deref())
+    }
+
     /// Returns `true` if this surface has non-empty shaded faces with opaque alpha (`opacity >= 0.9999`) (`M3.3`).
     #[must_use]
     pub fn is_opaque(&self) -> bool {
-        self.draw_surface && self.vertex_count > 0 && self.opacity >= 0.9999
+        !self.is_volume() && self.draw_surface && self.vertex_count > 0 && self.opacity >= 0.9999
     }
 
     /// Returns `true` if this surface has non-empty shaded faces with semi-transparent alpha (`1e-5 < opacity < 0.9999`) (`M3.3`).
     #[must_use]
     pub fn is_transparent(&self) -> bool {
-        self.draw_surface && self.vertex_count > 0 && self.opacity > 1e-5 && self.opacity < 0.9999
+        !self.is_volume()
+            && self.draw_surface
+            && self.vertex_count > 0
+            && self.opacity > 1e-5
+            && self.opacity < 0.9999
     }
 
     /// Returns the currently active scalar range `[min, max]` mapped across the colormap.
@@ -692,6 +838,9 @@ pub struct Renderer {
     surface_pipeline: wgpu::RenderPipeline,
     wboit_accum_pipeline: wgpu::RenderPipeline,
     wboit_composite_pipeline: wgpu::RenderPipeline,
+    volume_sampler: wgpu::Sampler,
+    volume_bind_group_layout: wgpu::BindGroupLayout,
+    volume_pipeline: wgpu::RenderPipeline,
     pick_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
     annotation_uniform_buffer: wgpu::Buffer,
@@ -1299,6 +1448,116 @@ impl Renderer {
             cache: None,
         });
 
+        let volume_depth_snippet = if sample_count > 1 {
+            "@group(2) @binding(0)\nvar scene_depth_tex: texture_depth_multisampled_2d;\nfn load_scene_depth(px: vec2<i32>) -> f32 { return textureLoad(scene_depth_tex, px, 0); }\n"
+        } else {
+            "@group(2) @binding(0)\nvar scene_depth_tex: texture_depth_2d;\nfn load_scene_depth(px: vec2<i32>) -> f32 { return textureLoad(scene_depth_tex, px, 0); }\n"
+        };
+        let volume_shader_source = format!(
+            "{}\n{}\n{}",
+            include_str!("shaders/common.wgsl"),
+            volume_depth_snippet,
+            include_str!("shaders/volume.wgsl"),
+        );
+        let volume_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("tetraglass_volume_shader"),
+            source: wgpu::ShaderSource::Wgsl(volume_shader_source.into()),
+        });
+
+        let volume_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("tetraglass_volume_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let volume_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("tetraglass_volume_bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let volume_depth_bgl = create_volume_depth_bind_group_layout(device, sample_count);
+        let volume_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("tetraglass_volume_pipeline_layout"),
+                bind_group_layouts: &[
+                    Some(&frame_bind_group_layout),
+                    Some(&volume_bind_group_layout),
+                    Some(&volume_depth_bgl),
+                ],
+                immediate_size: 0,
+            });
+
+        let volume_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("tetraglass_volume_pipeline"),
+            layout: Some(&volume_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &volume_shader,
+                entry_point: Some("vs_volume"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &volume_shader,
+                entry_point: Some("fs_volume"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         Ok(Self {
             target_format,
             sample_count,
@@ -1308,6 +1567,9 @@ impl Renderer {
             surface_pipeline,
             wboit_accum_pipeline,
             wboit_composite_pipeline,
+            volume_sampler,
+            volume_bind_group_layout,
+            volume_pipeline,
             pick_pipeline,
             edge_pipeline,
             annotation_uniform_buffer,
@@ -1402,7 +1664,31 @@ impl Renderer {
             edge_vertices.push([0.0, 0.0, 0.0]);
         }
 
-        let extracted = extract_scalars(surface, &style.color_by)?;
+        let (extracted, gpu_volume) = if let Some(ref grid) = style.volume_grid {
+            let (vol_scalars, data_range, coloring_mode) =
+                extract_volume_scalars(grid, &style.color_by)?;
+            let effective_range = style.range.unwrap_or(data_range);
+            let gpu_vol = self.create_gpu_volume(
+                device,
+                Arc::clone(grid),
+                &vol_scalars,
+                data_range,
+                effective_range,
+                coloring_mode,
+                dataset_center,
+                style,
+            );
+            let num_triangles = surface.num_triangles();
+            let surf_extracted = ExtractedScalars {
+                vertex_scalars: vec![0.0f32; (num_triangles * 3).max(1)],
+                cell_scalars: vec![0.0f32; num_triangles.max(1)],
+                data_range,
+                coloring_mode,
+            };
+            (surf_extracted, Some(gpu_vol))
+        } else {
+            (extract_scalars(surface, &style.color_by)?, None)
+        };
 
         let effective_range = style.range.unwrap_or(extracted.data_range);
         let gpu_clip_plane = style
@@ -1482,7 +1768,96 @@ impl Renderer {
             draw_edges: style.draw_edges,
             data_range: extracted.data_range,
             effective_range,
+            volume: gpu_volume,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_gpu_volume(
+        &self,
+        device: &wgpu::Device,
+        grid: Arc<RegularGrid>,
+        scalars: &[f32],
+        data_range: [f64; 2],
+        effective_range: [f64; 2],
+        coloring_mode: u32,
+        dataset_center: [f64; 3],
+        style: &SurfaceStyle,
+    ) -> GpuVolume {
+        let [nx, ny, nz] = grid.dimensions();
+        let dims_u32 = [nx as u32, ny as u32, nz as u32];
+        let (texels, data_min, data_scale) =
+            pack_volume_rgba16f_texels(scalars, grid.inside_mask(), data_range);
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("tetraglass_volume_texture_3d"),
+            size: wgpu::Extent3d {
+                width: dims_u32[0],
+                height: dims_u32[1],
+                depth_or_array_layers: dims_u32[2],
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: VOLUME_TEXTURE_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let tex_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D3),
+            ..Default::default()
+        });
+
+        let gpu_clip_plane = style
+            .clip_plane
+            .map_or([0.0, 0.0, 0.0, 1.0], |p| p.to_gpu_plane(dataset_center));
+        let vol_uniforms = build_volume_uniforms(
+            &grid,
+            dataset_center,
+            data_min,
+            data_scale,
+            effective_range,
+            coloring_mode,
+            style.use_log_scale,
+            style.solid_color_srgb,
+            gpu_clip_plane,
+            style.transfer_function.as_deref(),
+        );
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("tetraglass_volume_uniforms"),
+            contents: bytemuck::bytes_of(&vol_uniforms),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tetraglass_volume_bg"),
+            layout: &self.volume_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&tex_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.volume_sampler),
+                },
+            ],
+        });
+
+        GpuVolume {
+            grid,
+            dimensions: dims_u32,
+            texture,
+            uniform_buffer,
+            bind_group,
+            pending_texels: Mutex::new(Some(texels)),
+            data_min,
+            data_scale,
+            transfer_function: style.transfer_function.clone(),
+        }
     }
 
     /// Updates a [`GpuSurface`]'s style.
@@ -1496,6 +1871,80 @@ impl Renderer {
         surface: &SurfaceMesh,
         style: &SurfaceStyle,
     ) -> Result<(), RenderError> {
+        if let Some(ref mut gpu_vol) = gpu_surface.volume {
+            if gpu_surface.active_color_by != style.color_by {
+                let (vol_scalars, data_range, _) =
+                    extract_volume_scalars(&gpu_vol.grid, &style.color_by)?;
+                let (texels, data_min, data_scale) = pack_volume_rgba16f_texels(
+                    &vol_scalars,
+                    gpu_vol.grid.inside_mask(),
+                    data_range,
+                );
+                write_volume_texture(queue, &gpu_vol.texture, gpu_vol.dimensions, &texels);
+                if let Ok(mut pending) = gpu_vol.pending_texels.lock() {
+                    *pending = None;
+                }
+                gpu_vol.data_min = data_min;
+                gpu_vol.data_scale = data_scale;
+                gpu_surface.active_color_by = style.color_by.clone();
+                gpu_surface.data_range = data_range;
+            }
+            let coloring_mode = match gpu_surface.active_color_by {
+                ColorBy::Solid => 0,
+                ColorBy::Point { .. } | ColorBy::Cell { .. } => 1,
+            };
+            let effective_range = style.range.unwrap_or(gpu_surface.data_range);
+            let gpu_clip_plane = style.clip_plane.map_or([0.0, 0.0, 0.0, 1.0], |p| {
+                p.to_gpu_plane(gpu_surface.dataset_center)
+            });
+            let tf_ref = style
+                .transfer_function
+                .as_deref()
+                .or(gpu_vol.transfer_function.as_deref());
+            let vol_uniforms = build_volume_uniforms(
+                &gpu_vol.grid,
+                gpu_surface.dataset_center,
+                gpu_vol.data_min,
+                gpu_vol.data_scale,
+                effective_range,
+                coloring_mode,
+                style.use_log_scale,
+                style.solid_color_srgb,
+                gpu_clip_plane,
+                tf_ref,
+            );
+            queue.write_buffer(
+                &gpu_vol.uniform_buffer,
+                0,
+                bytemuck::bytes_of(&vol_uniforms),
+            );
+            if style.transfer_function.is_some() {
+                gpu_vol
+                    .transfer_function
+                    .clone_from(&style.transfer_function);
+            }
+            let surf_uniforms = build_surface_uniforms(
+                effective_range,
+                coloring_mode,
+                style.use_log_scale,
+                style.solid_color_srgb,
+                style.edge_color_srgb,
+                gpu_clip_plane,
+            );
+            queue.write_buffer(
+                &gpu_surface.uniform_buffer,
+                0,
+                bytemuck::bytes_of(&surf_uniforms),
+            );
+            gpu_surface.active_colormap = style.colormap;
+            gpu_surface.active_clip_plane = style.clip_plane;
+            gpu_surface.opacity = style.solid_color_srgb[3].clamp(0.0, 1.0);
+            gpu_surface.draw_surface = style.draw_surface;
+            gpu_surface.draw_edges = style.draw_edges;
+            gpu_surface.effective_range = effective_range;
+            return Ok(());
+        }
+
         if gpu_surface.active_color_by != style.color_by {
             let extracted = extract_scalars(surface, &style.color_by)?;
             if surface.num_triangles() == gpu_surface.num_triangles {
@@ -1561,6 +2010,14 @@ impl Renderer {
             offset,
             bytemuck::bytes_of(&gpu_plane),
         );
+        if let Some(ref gpu_vol) = gpu_surface.volume {
+            let vol_offset = std::mem::offset_of!(VolumeUniforms, clip_plane) as u64;
+            queue.write_buffer(
+                &gpu_vol.uniform_buffer,
+                vol_offset,
+                bytemuck::bytes_of(&gpu_plane),
+            );
+        }
         gpu_surface.active_clip_plane = clip_plane;
     }
 
@@ -1727,8 +2184,27 @@ impl Renderer {
         };
 
         let has_transparent = surfaces.iter().any(|s| s.is_transparent());
+        let has_volume = surfaces.iter().any(|s| s.is_volume() && s.opacity > 1e-5);
 
-        if !has_transparent {
+        if has_volume {
+            let inv_view_proj = invert_mat4(view_proj);
+            for surface in surfaces {
+                if let Some(ref gpu_vol) = surface.volume {
+                    if let Ok(mut pending) = gpu_vol.pending_texels.lock()
+                        && let Some(texels) = pending.take()
+                    {
+                        write_volume_texture(queue, &gpu_vol.texture, gpu_vol.dimensions, &texels);
+                    }
+                    queue.write_buffer(
+                        &gpu_vol.uniform_buffer,
+                        0,
+                        bytemuck::bytes_of(&inv_view_proj),
+                    );
+                }
+            }
+        }
+
+        if !has_transparent && !has_volume {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("tetraglass_surface_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1772,7 +2248,7 @@ impl Renderer {
 
             self.draw_edges_and_annotations(&mut pass, surfaces, &prepared_annotations);
         } else {
-            // Pass 1: Opaque geometry pass (writes color and depth; defer MSAA resolve to Pass 3).
+            // Pass 1: Opaque geometry pass (writes color and depth; defer MSAA resolve to final pass).
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("tetraglass_opaque_pass"),
@@ -1816,101 +2292,176 @@ impl Renderer {
                 }
             }
 
-            // Pass 2: WBOIT accumulation pass (`accum` + `reveal`, depth-tested against opaque pass).
-            {
-                let (accum_attachment, accum_resolve) = match &target.msaa_wboit_accum_view {
-                    Some(msaa_view) => (msaa_view, Some(&target.wboit_accum_view)),
-                    None => (&target.wboit_accum_view, None),
-                };
-                let (reveal_attachment, reveal_resolve) = match &target.msaa_wboit_reveal_view {
-                    Some(msaa_view) => (msaa_view, Some(&target.wboit_reveal_view)),
-                    None => (&target.wboit_reveal_view, None),
-                };
-
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("tetraglass_wboit_accum_pass"),
-                    color_attachments: &[
-                        Some(wgpu::RenderPassColorAttachment {
-                            view: accum_attachment,
-                            depth_slice: None,
-                            resolve_target: accum_resolve,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        }),
-                        Some(wgpu::RenderPassColorAttachment {
-                            view: reveal_attachment,
-                            depth_slice: None,
-                            resolve_target: reveal_resolve,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        }),
-                    ],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &target.depth_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-
-                pass.set_pipeline(&self.wboit_accum_pipeline);
-                for surface in surfaces {
-                    if !surface.is_transparent() {
-                        continue;
-                    }
-                    let cm_idx = match surface.active_colormap {
-                        ColormapKind::Viridis => 0,
-                        ColormapKind::Cividis => 1,
-                        ColormapKind::CoolWarm => 2,
+            if has_transparent {
+                // Pass 2: WBOIT accumulation pass (`accum` + `reveal`, depth-tested against opaque pass).
+                {
+                    let (accum_attachment, accum_resolve) = match &target.msaa_wboit_accum_view {
+                        Some(msaa_view) => (msaa_view, Some(&target.wboit_accum_view)),
+                        None => (&target.wboit_accum_view, None),
                     };
-                    pass.set_bind_group(0, &self.frame_bind_groups[cm_idx], &[]);
-                    pass.set_bind_group(1, &surface.bind_group, &[]);
-                    pass.set_vertex_buffer(0, surface.geometry_buffer.slice(..));
-                    pass.set_vertex_buffer(1, surface.scalar_buffer.slice(..));
-                    pass.draw(0..surface.vertex_count, 0..1);
+                    let (reveal_attachment, reveal_resolve) = match &target.msaa_wboit_reveal_view {
+                        Some(msaa_view) => (msaa_view, Some(&target.wboit_reveal_view)),
+                        None => (&target.wboit_reveal_view, None),
+                    };
+
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("tetraglass_wboit_accum_pass"),
+                        color_attachments: &[
+                            Some(wgpu::RenderPassColorAttachment {
+                                view: accum_attachment,
+                                depth_slice: None,
+                                resolve_target: accum_resolve,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            }),
+                            Some(wgpu::RenderPassColorAttachment {
+                                view: reveal_attachment,
+                                depth_slice: None,
+                                resolve_target: reveal_resolve,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            }),
+                        ],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &target.depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+
+                    pass.set_pipeline(&self.wboit_accum_pipeline);
+                    for surface in surfaces {
+                        if !surface.is_transparent() {
+                            continue;
+                        }
+                        let cm_idx = match surface.active_colormap {
+                            ColormapKind::Viridis => 0,
+                            ColormapKind::Cividis => 1,
+                            ColormapKind::CoolWarm => 2,
+                        };
+                        pass.set_bind_group(0, &self.frame_bind_groups[cm_idx], &[]);
+                        pass.set_bind_group(1, &surface.bind_group, &[]);
+                        pass.set_vertex_buffer(0, surface.geometry_buffer.slice(..));
+                        pass.set_vertex_buffer(1, surface.scalar_buffer.slice(..));
+                        pass.draw(0..surface.vertex_count, 0..1);
+                    }
+                }
+
+                // Pass 3: WBOIT composite.
+                {
+                    let composite_resolve = if has_volume { None } else { resolve_target };
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("tetraglass_wboit_composite_pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: color_attachment_view,
+                            depth_slice: None,
+                            resolve_target: composite_resolve,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &target.depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+
+                    pass.set_pipeline(&self.wboit_composite_pipeline);
+                    pass.set_bind_group(0, &target.wboit_bind_group, &[]);
+                    pass.draw(0..3, 0..1);
+
+                    if !has_volume {
+                        self.draw_edges_and_annotations(&mut pass, surfaces, &prepared_annotations);
+                    }
                 }
             }
 
-            // Pass 3: WBOIT composite + wireframe edges + annotations + final MSAA resolve.
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("tetraglass_wboit_composite_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: color_attachment_view,
-                        depth_slice: None,
-                        resolve_target,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &target.depth_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
+            if has_volume {
+                // Volume ray-marching pass (reads `target.depth_view` via `volume_depth_bind_group`).
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("tetraglass_volume_pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: color_attachment_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+
+                    pass.set_pipeline(&self.volume_pipeline);
+                    pass.set_bind_group(2, &target.volume_depth_bind_group, &[]);
+                    for surface in surfaces {
+                        if surface.opacity <= 1e-5 {
+                            continue;
+                        }
+                        let Some(ref gpu_vol) = surface.volume else {
+                            continue;
+                        };
+                        let cm_idx = match surface.active_colormap {
+                            ColormapKind::Viridis => 0,
+                            ColormapKind::Cividis => 1,
+                            ColormapKind::CoolWarm => 2,
+                        };
+                        pass.set_bind_group(0, &self.frame_bind_groups[cm_idx], &[]);
+                        pass.set_bind_group(1, &gpu_vol.bind_group, &[]);
+                        pass.draw(0..3, 0..1);
+                    }
+                }
+
+                // Final overlay pass for wireframe edges, annotations, and MSAA resolve.
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("tetraglass_volume_overlay_pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: color_attachment_view,
+                            depth_slice: None,
+                            resolve_target,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &target.depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
                         }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
 
-                pass.set_pipeline(&self.wboit_composite_pipeline);
-                pass.set_bind_group(0, &target.wboit_bind_group, &[]);
-                pass.draw(0..3, 0..1);
-
-                self.draw_edges_and_annotations(&mut pass, surfaces, &prepared_annotations);
+                    self.draw_edges_and_annotations(&mut pass, surfaces, &prepared_annotations);
+                }
             }
         }
 
@@ -2310,5 +2861,309 @@ fn srgb_rgba_to_linear_color(rgba: [f32; 4]) -> wgpu::Color {
         g: f64::from(srgb_channel_to_linear(rgba[1])),
         b: f64::from(srgb_channel_to_linear(rgba[2])),
         a: f64::from(rgba[3].clamp(0.0, 1.0)),
+    }
+}
+
+fn extract_volume_scalars(
+    grid: &RegularGrid,
+    color_by: &ColorBy,
+) -> Result<(Vec<f32>, [f64; 2], u32), RenderError> {
+    let num_points = grid.num_points().max(1);
+    match color_by {
+        ColorBy::Solid => Ok((vec![0.5f32; num_points], [0.0, 1.0], 0)),
+        ColorBy::Point { name, component } | ColorBy::Cell { name, component } => {
+            let association = match color_by {
+                ColorBy::Cell { .. } => FieldAssociation::Cell,
+                _ => FieldAssociation::Point,
+            };
+            let array = grid
+                .point_data()
+                .get(name)
+                .ok_or_else(|| RenderError::MissingArray {
+                    name: name.clone(),
+                    association,
+                })?;
+            let (scalars, data_range) = evaluate_array_scalars(name, array, *component)?;
+            Ok((scalars, data_range, 1))
+        }
+    }
+}
+
+fn pack_volume_rgba16f_texels(
+    scalars: &[f32],
+    inside_mask: &[u8],
+    data_range: [f64; 2],
+) -> (Vec<u8>, f32, f32) {
+    let data_min = data_range[0] as f32;
+    let span = (data_range[1] - data_range[0]) as f32;
+    let data_scale = if span.abs() > 1e-20 { span } else { 1.0 };
+
+    let len = scalars.len().min(inside_mask.len());
+    let mut texels_u16: Vec<u16> = Vec::with_capacity(len * 4);
+    let zero_h = f32_to_f16_bits(0.0);
+    let one_h = f32_to_f16_bits(1.0);
+    for i in 0..len {
+        let inside = inside_mask[i] != 0;
+        if inside {
+            let norm = if span.abs() > 1e-20 {
+                ((scalars[i] - data_min) / data_scale).clamp(0.0, 1.0)
+            } else {
+                0.5
+            };
+            texels_u16.push(f32_to_f16_bits(norm));
+            texels_u16.push(one_h);
+        } else {
+            texels_u16.push(zero_h);
+            texels_u16.push(zero_h);
+        }
+        texels_u16.push(zero_h);
+        texels_u16.push(one_h);
+    }
+    let bytes: Vec<u8> = bytemuck::cast_slice(&texels_u16).to_vec();
+    (bytes, data_min, data_scale)
+}
+
+fn write_volume_texture(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    dimensions: [u32; 3],
+    texels: &[u8],
+) {
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        texels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(dimensions[0] * 8),
+            rows_per_image: Some(dimensions[1]),
+        },
+        wgpu::Extent3d {
+            width: dimensions[0],
+            height: dimensions[1],
+            depth_or_array_layers: dimensions[2],
+        },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_volume_uniforms(
+    grid: &RegularGrid,
+    dataset_center: [f64; 3],
+    data_min: f32,
+    data_scale: f32,
+    effective_range: [f64; 2],
+    coloring_mode: u32,
+    use_log_scale: bool,
+    solid_color_srgb: [f32; 4],
+    clip_plane: [f32; 4],
+    transfer_function: Option<&[[f64; 2]]>,
+) -> VolumeUniforms {
+    let bounds = grid.bounds();
+    let box_min = [
+        (bounds.min[0] - dataset_center[0]) as f32,
+        (bounds.min[1] - dataset_center[1]) as f32,
+        (bounds.min[2] - dataset_center[2]) as f32,
+        0.0,
+    ];
+    let box_max = [
+        (bounds.max[0] - dataset_center[0]) as f32,
+        (bounds.max[1] - dataset_center[1]) as f32,
+        (bounds.max[2] - dataset_center[2]) as f32,
+        0.0,
+    ];
+    let [nx, ny, nz] = grid.dimensions();
+    let max_dim = nx.max(ny).max(nz).max(2) as f32;
+    let max_steps = (max_dim * 2.5).clamp(64.0, 256.0);
+    let diag = bounds.diagonal().max(1e-6) as f32;
+    let step_size = diag / max_steps;
+    let ref_step = diag / 48.0;
+
+    let lut_flat = evaluate_transfer_function_lut(transfer_function);
+    let mut transfer_lut = [[0.0f32; 4]; 64];
+    for (vec_idx, slot) in transfer_lut.iter_mut().enumerate() {
+        let base = vec_idx * 4;
+        *slot = [
+            lut_flat[base],
+            lut_flat[base + 1],
+            lut_flat[base + 2],
+            lut_flat[base + 3],
+        ];
+    }
+
+    VolumeUniforms {
+        inv_view_proj: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        box_min,
+        box_max,
+        grid_dims: [nx as f32, ny as f32, nz as f32, max_steps],
+        scalar_params: [
+            data_min,
+            data_scale,
+            effective_range[0] as f32,
+            effective_range[1] as f32,
+        ],
+        mode_params: [coloring_mode, u32::from(use_log_scale), 0, 0],
+        step_params: [
+            solid_color_srgb[3].clamp(0.0, 1.0),
+            step_size,
+            ref_step,
+            0.0,
+        ],
+        solid_color: [
+            srgb_channel_to_linear(solid_color_srgb[0]),
+            srgb_channel_to_linear(solid_color_srgb[1]),
+            srgb_channel_to_linear(solid_color_srgb[2]),
+            solid_color_srgb[3],
+        ],
+        clip_plane,
+        transfer_lut,
+    }
+}
+
+/// Converts a finite `f32` in `[0.0, 1.0]` (or general `f32`) to IEEE 754 binary16 (`f16`) bits.
+fn f32_to_f16_bits(val: f32) -> u16 {
+    let bits = val.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xff) as i32;
+    let mant = bits & 0x007f_ffff;
+
+    if exp == 255 {
+        return sign | 0x7c00 | u16::from(mant != 0);
+    }
+    let half_exp = exp - 127 + 15;
+    if half_exp >= 31 {
+        return sign | 0x7c00;
+    }
+    if half_exp <= 0 {
+        if half_exp < -10 {
+            return sign;
+        }
+        let m = mant | 0x0080_0000;
+        let shift = (14 - half_exp) as u32;
+        return sign | ((m >> shift) as u16);
+    }
+    let round = (mant + 0x0000_1000) >> 13;
+    if round >= 0x0400 {
+        let next_exp = (half_exp + 1) as u16;
+        if next_exp >= 31 {
+            return sign | 0x7c00;
+        }
+        return sign | (next_exp << 10);
+    }
+    sign | ((half_exp as u16) << 10) | (round as u16)
+}
+
+/// Computes the inverse of a column-major 4x4 matrix in `f64` precision.
+fn invert_mat4(m: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut a = [[0.0f64; 8]; 4];
+    for r in 0..4 {
+        for c in 0..4 {
+            // `m` is column-major `m[col][row]`; invert as standard matrix `M[r][c] = m[c][r]`.
+            a[r][c] = f64::from(m[c][r]);
+        }
+        a[r][4 + r] = 1.0;
+    }
+
+    for i in 0..4 {
+        let mut pivot_row = i;
+        let mut max_abs = a[i][i].abs();
+        for (r, row) in a.iter().enumerate().skip(i + 1) {
+            if row[i].abs() > max_abs {
+                max_abs = row[i].abs();
+                pivot_row = r;
+            }
+        }
+        if max_abs <= 1e-18 {
+            return [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ];
+        }
+        if pivot_row != i {
+            a.swap(i, pivot_row);
+        }
+        let inv_piv = 1.0 / a[i][i];
+        for val in &mut a[i] {
+            *val *= inv_piv;
+        }
+        for r in 0..4 {
+            if r == i {
+                continue;
+            }
+            let factor = a[r][i];
+            if factor.abs() > 0.0 {
+                let pivot_slice = a[i];
+                for (c, val) in a[r].iter_mut().enumerate() {
+                    *val -= factor * pivot_slice[c];
+                }
+            }
+        }
+    }
+
+    let mut out = [[0.0f32; 4]; 4];
+    for c in 0..4 {
+        for r in 0..4 {
+            out[c][r] = a[r][4 + c] as f32;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evaluate_transfer_function_lut_interpolates_default_and_custom_points() {
+        let default_lut = evaluate_transfer_function_lut(None);
+        assert!((default_lut[0] - 0.0).abs() < 1e-6);
+        assert!((default_lut[127] - (127.0 / 255.0)).abs() < 1e-4);
+        assert!((default_lut[255] - 1.0).abs() < 1e-6);
+
+        let custom = [[0.0, 0.0], [0.5, 0.2], [1.0, 0.8]];
+        let lut = evaluate_transfer_function_lut(Some(&custom));
+        assert!((lut[0] - 0.0).abs() < 1e-6);
+        let mid_idx = 128;
+        let t_mid = (mid_idx as f32) / 255.0;
+        let expected_mid = 0.2 + ((t_mid - 0.5) / 0.5) * 0.6;
+        assert!((lut[mid_idx] - expected_mid).abs() < 1e-4);
+        assert!((lut[255] - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn invert_mat4_inverts_camera_view_proj() {
+        let bounds = BoundingBox {
+            min: [0.0, 0.0, 0.0],
+            max: [2.0, 2.0, 2.0],
+        };
+        let cam = Camera::fit_bounds(bounds, 35.0, 25.0);
+        let vp = cam.view_proj_matrix(800.0 / 600.0);
+        let inv = invert_mat4(vp);
+
+        for (c, inv_col) in inv.iter().enumerate() {
+            for r in 0..4usize {
+                let sum: f32 = vp
+                    .iter()
+                    .zip(inv_col.iter())
+                    .map(|(vp_col, &inv_val)| vp_col[r] * inv_val)
+                    .sum();
+                let expected = if r == c { 1.0 } else { 0.0 };
+                assert!(
+                    (sum - expected).abs() < 1e-4,
+                    "product at ({r}, {c}) = {sum}, expected {expected}"
+                );
+            }
+        }
     }
 }

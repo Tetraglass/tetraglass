@@ -15,6 +15,7 @@ Every scene in [`gallery/`](../../../gallery/) is validated and rendered in CI a
 | `gallery/threshold.json` | Whole-cell `"type": "threshold"` (`field: "linear"`, `min: 0.0`, `max: 9.0`) keeping 5 of 8 hexahedra with `surface_with_edges` inside a `silver` outer element wireframe. | `tetraglass render gallery/threshold.json -o out.png` |
 | `gallery/streamlines.json` | Bidirectional RK4(5) `"type": "streamlines"` (`vectors: "velocity"`, `4x4` plane seed grid) rendered with `"style": "tubes"` colored by `velocity:magnitude` (`viridis`) inside a `silver` outer element wireframe. | `tetraglass render gallery/streamlines.json -o out.png` |
 | `gallery/glyphs.json` | 3D `"type": "glyphs"` (`vectors: "velocity"`, `shape: "arrow"`, `scale_by: "magnitude"`) colored by `velocity:magnitude` (`viridis`) inside a `silver` outer element wireframe. | `tetraglass render gallery/glyphs.json -o out.png` |
+| `gallery/volume.json` | GPU ray-marched `"type": "resample"` (`dimensions: [32, 32, 32]`, `"style": "volume"`) colored by `linear` (`viridis`) with a piecewise-linear opacity `transfer_function` inside a `silver` outer element wireframe. | `tetraglass render gallery/volume.json -o out.png` |
 
 ## Filter gallery highlights
 

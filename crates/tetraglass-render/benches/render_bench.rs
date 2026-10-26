@@ -111,6 +111,7 @@ fn main() {
         draw_edges: true,
         edge_color_srgb: [0.08, 0.09, 0.11, 1.0],
         clip_plane: None,
+        ..SurfaceStyle::default()
     };
 
     let t_upload = Instant::now();

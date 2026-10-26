@@ -1376,10 +1376,12 @@ fn build_surface_style(rep: &EvaluatedRepresentation) -> SurfaceStyle {
         rep.edge_color[2],
         rep.opacity as f32,
     ];
+    let is_volume = rep.volume.is_some();
     let (draw_surface, draw_edges) = match rep.style {
         RepresentationStyle::Wireframe => (false, true),
-        RepresentationStyle::SurfaceWithEdges => (true, true),
-        _ => (true, false),
+        RepresentationStyle::SurfaceWithEdges => (!is_volume, true),
+        RepresentationStyle::Volume => (false, false),
+        _ => (!is_volume, false),
     };
     match &rep.coloring {
         None => SurfaceStyle {
@@ -1392,6 +1394,8 @@ fn build_surface_style(rep: &EvaluatedRepresentation) -> SurfaceStyle {
             draw_edges,
             edge_color_srgb,
             clip_plane: None,
+            volume_grid: rep.volume.clone(),
+            transfer_function: rep.transfer_function.clone(),
         },
         Some(c) => SurfaceStyle {
             color_by: build_color_by(c),
@@ -1403,6 +1407,8 @@ fn build_surface_style(rep: &EvaluatedRepresentation) -> SurfaceStyle {
             draw_edges,
             edge_color_srgb,
             clip_plane: None,
+            volume_grid: rep.volume.clone(),
+            transfer_function: rep.transfer_function.clone(),
         },
     }
 }
