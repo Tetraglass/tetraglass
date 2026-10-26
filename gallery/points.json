@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "sources": {
+    "gmsh_tet2": {
+      "file": "../testdata/gmsh/tet2_v41.msh"
+    }
+  },
+  "view": {
+    "show": [
+      {
+        "input": "gmsh_tet2",
+        "style": "points",
+        "point_size": 12.0,
+        "color_by": "linear",
+        "colormap": "viridis",
+        "range": [0.0, 6.0],
+        "colorbar": {
+          "title": "linear",
+          "position": "right"
+        }
+      },
+      {
+        "input": "gmsh_tet2",
+        "style": "wireframe",
+        "edge_color": "silver"
+      }
+    ],
+    "camera": {
+      "fit": "all",
+      "azimuth": 38.0,
+      "elevation": 24.0,
+      "zoom": 1.0,
+      "projection": "perspective"
+    },
+    "lights": "default",
+    "background": "white",
+    "axes": true,
+    "title": "Screen-Space Point Cloud (tet2_v41, linear)"
+  },
+  "output": {
+    "image": "points.png",
+    "size": [800, 600],
+    "time": "first",
+    "msaa": 4,
+    "engine": "raster"
+  }
+}

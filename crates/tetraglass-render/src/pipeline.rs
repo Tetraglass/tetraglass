@@ -262,6 +262,10 @@ pub struct SurfaceStyle {
     pub draw_edges: bool,
     /// Wireframe edge color in sRGB `[r, g, b, a]` (`0.0..=1.0`).
     pub edge_color_srgb: [f32; 4],
+    /// Whether to draw screen-space point impostors at mesh vertices (`true` for `Points`) (`M6.2`).
+    pub draw_points: bool,
+    /// Screen-space point diameter in pixels (`3.0` by default) when `draw_points` is `true` (`M6.2`).
+    pub point_size: f32,
     /// Optional interactive shader clip plane (`None` disables shader clipping).
     pub clip_plane: Option<ShaderClipPlane>,
     /// Optional resampled 3D [`RegularGrid`] for `"volume"` ray-marching representations (`M4.4b`).
@@ -281,6 +285,8 @@ impl Default for SurfaceStyle {
             draw_surface: true,
             draw_edges: false,
             edge_color_srgb: [0.12, 0.14, 0.18, 1.0],
+            draw_points: false,
+            point_size: 3.0,
             clip_plane: None,
             volume_grid: None,
             transfer_function: None,
@@ -824,6 +830,7 @@ struct FrameUniforms {
     eye_pos: [f32; 4],
     key_dir: [f32; 4],
     fill_dir: [f32; 4],
+    viewport_size: [f32; 4],
 }
 
 #[repr(C)]
@@ -837,6 +844,7 @@ struct SurfaceUniforms {
     edge_color: [f32; 4],
     pick_info: [u32; 4],
     clip_plane: [f32; 4],
+    point_params: [f32; 4],
 }
 
 /// Uploaded GPU buffers and bind group for a [`SurfaceMesh`].
@@ -852,10 +860,13 @@ pub struct GpuSurface {
     bounds: Option<BoundingBox>,
     vertex_count: u32,
     edge_vertex_count: u32,
+    point_count: u32,
     num_triangles: usize,
     geometry_buffer: wgpu::Buffer,
     edge_vertex_buffer: wgpu::Buffer,
+    point_geometry_buffer: wgpu::Buffer,
     scalar_buffer: wgpu::Buffer,
+    point_scalar_buffer: wgpu::Buffer,
     cell_scalar_buffer: wgpu::Buffer,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -865,6 +876,8 @@ pub struct GpuSurface {
     opacity: f32,
     draw_surface: bool,
     draw_edges: bool,
+    draw_points: bool,
+    point_size: f32,
     data_range: [f64; 2],
     effective_range: [f64; 2],
     volume: Option<GpuVolume>,
@@ -893,6 +906,24 @@ impl GpuSurface {
     #[must_use]
     pub const fn edge_vertex_count(&self) -> u32 {
         self.edge_vertex_count
+    }
+
+    /// Returns the number of unique point instances in the GPU point buffer (`M6.2`).
+    #[must_use]
+    pub const fn point_count(&self) -> u32 {
+        self.point_count
+    }
+
+    /// Returns `true` if screen-space point impostor rendering is enabled on this surface (`M6.2`).
+    #[must_use]
+    pub const fn draw_points(&self) -> bool {
+        self.draw_points
+    }
+
+    /// Returns the screen-space point diameter in pixels (`M6.2`).
+    #[must_use]
+    pub const fn point_size(&self) -> f32 {
+        self.point_size
     }
 
     /// Returns the currently active [`ColormapKind`].
@@ -927,18 +958,21 @@ impl GpuSurface {
             .and_then(|v| v.transfer_function.as_deref())
     }
 
-    /// Returns `true` if this surface has non-empty shaded faces with opaque alpha (`opacity >= 0.9999`) (`M3.3`).
+    /// Returns `true` if this surface has non-empty shaded faces or points with opaque alpha (`opacity >= 0.9999`) (`M3.3`, `M6.2`).
     #[must_use]
     pub fn is_opaque(&self) -> bool {
-        !self.is_volume() && self.draw_surface && self.vertex_count > 0 && self.opacity >= 0.9999
+        !self.is_volume()
+            && ((self.draw_surface && self.vertex_count > 0)
+                || (self.draw_points && self.point_count > 0))
+            && self.opacity >= 0.9999
     }
 
-    /// Returns `true` if this surface has non-empty shaded faces with semi-transparent alpha (`1e-5 < opacity < 0.9999`) (`M3.3`).
+    /// Returns `true` if this surface has non-empty shaded faces or points with semi-transparent alpha (`1e-5 < opacity < 0.9999`) (`M3.3`, `M6.2`).
     #[must_use]
     pub fn is_transparent(&self) -> bool {
         !self.is_volume()
-            && self.draw_surface
-            && self.vertex_count > 0
+            && ((self.draw_surface && self.vertex_count > 0)
+                || (self.draw_points && self.point_count > 0))
             && self.opacity > 1e-5
             && self.opacity < 0.9999
     }
@@ -981,6 +1015,9 @@ pub struct Renderer {
     volume_pipeline: wgpu::RenderPipeline,
     pick_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
+    point_pipeline: wgpu::RenderPipeline,
+    point_wboit_accum_pipeline: wgpu::RenderPipeline,
+    point_pick_pipeline: wgpu::RenderPipeline,
     annotation_uniform_buffer: wgpu::Buffer,
     annotation_sampler: wgpu::Sampler,
     annotation_bind_group_layout: wgpu::BindGroupLayout,
@@ -1111,7 +1148,7 @@ impl Renderer {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
@@ -1440,6 +1477,207 @@ impl Renderer {
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let point_vertex_buffers = [
+            // Slot 0: per-point instance geometry (position, normal, cell_index)
+            Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<SurfaceGeometryVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 12,
+                        shader_location: 1,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Uint32,
+                        offset: 24,
+                        shader_location: 2,
+                    },
+                ],
+            }),
+            // Slot 1: per-point instance scalar f32 attribute
+            Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<f32>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: 0,
+                    shader_location: 3,
+                }],
+            }),
+        ];
+
+        let point_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("tetraglass_point_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_point"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &point_vertex_buffers,
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: -4,
+                    slope_scale: -1.5,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_point"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let point_wboit_accum_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("tetraglass_point_wboit_accum_pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_point"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &point_vertex_buffers,
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: sample_count,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_point_wboit"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[
+                        Some(wgpu::ColorTargetState {
+                            format: WBOIT_ACCUM_FORMAT,
+                            blend: Some(wgpu::BlendState {
+                                color: wgpu::BlendComponent {
+                                    src_factor: wgpu::BlendFactor::One,
+                                    dst_factor: wgpu::BlendFactor::One,
+                                    operation: wgpu::BlendOperation::Add,
+                                },
+                                alpha: wgpu::BlendComponent {
+                                    src_factor: wgpu::BlendFactor::One,
+                                    dst_factor: wgpu::BlendFactor::One,
+                                    operation: wgpu::BlendOperation::Add,
+                                },
+                            }),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: WBOIT_REVEAL_FORMAT,
+                            blend: Some(wgpu::BlendState {
+                                color: wgpu::BlendComponent {
+                                    src_factor: wgpu::BlendFactor::Zero,
+                                    dst_factor: wgpu::BlendFactor::OneMinusSrc,
+                                    operation: wgpu::BlendOperation::Add,
+                                },
+                                alpha: wgpu::BlendComponent {
+                                    src_factor: wgpu::BlendFactor::Zero,
+                                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                    operation: wgpu::BlendOperation::Add,
+                                },
+                            }),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                    ],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+
+        let point_pick_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("tetraglass_point_pick_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_point"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &point_vertex_buffers,
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_point_pick"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: PICK_FORMAT,
+                    blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -1868,6 +2106,9 @@ impl Renderer {
             volume_pipeline,
             pick_pipeline,
             edge_pipeline,
+            point_pipeline,
+            point_wboit_accum_pipeline,
+            point_pick_pipeline,
             annotation_uniform_buffer,
             annotation_sampler,
             annotation_bind_group_layout,
@@ -1950,6 +2191,30 @@ impl Renderer {
             geom_vertices.push(SurfaceGeometryVertex::zeroed());
         }
 
+        let point_instances = collect_surface_point_instances(surface);
+        let point_count_usize = point_instances.len();
+        let point_count = u32::try_from(point_count_usize).map_err(|_| {
+            tetraglass_core::CoreError::IndexOverflow {
+                value: point_count_usize as u64,
+            }
+        })?;
+        let mut point_geom_vertices = Vec::with_capacity(point_count_usize.max(1));
+        for &(pt_idx, normal, cell_index) in &point_instances {
+            let p = points[pt_idx as usize];
+            point_geom_vertices.push(SurfaceGeometryVertex {
+                position: [
+                    (p[0] - dataset_center[0]) as f32,
+                    (p[1] - dataset_center[1]) as f32,
+                    (p[2] - dataset_center[2]) as f32,
+                ],
+                normal,
+                cell_index,
+            });
+        }
+        if point_geom_vertices.is_empty() {
+            point_geom_vertices.push(SurfaceGeometryVertex::zeroed());
+        }
+
         let wireframe_edges = surface.wireframe_edges();
         let edge_vertex_count_usize = wireframe_edges.len() * 2;
         let edge_vertex_count = u32::try_from(edge_vertex_count_usize).map_err(|_| {
@@ -1988,6 +2253,7 @@ impl Renderer {
             let num_triangles = surface.num_triangles();
             let surf_extracted = ExtractedScalars {
                 vertex_scalars: vec![0.0f32; (num_triangles * 3).max(1)],
+                point_scalars: vec![0.0f32; point_count_usize.max(1)],
                 cell_scalars: vec![0.0f32; num_triangles.max(1)],
                 data_range,
                 coloring_mode,
@@ -2001,6 +2267,7 @@ impl Renderer {
         let gpu_clip_plane = style
             .clip_plane
             .map_or([0.0, 0.0, 0.0, 1.0], |p| p.to_gpu_plane(dataset_center));
+        let point_size = style.point_size.max(1.0);
         let uniforms = build_surface_uniforms(
             effective_range,
             extracted.coloring_mode,
@@ -2008,6 +2275,7 @@ impl Renderer {
             style.solid_color_srgb,
             style.edge_color_srgb,
             gpu_clip_plane,
+            point_size,
         );
 
         let geometry_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2022,9 +2290,21 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
+        let point_geometry_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("tetraglass_surface_point_geometry"),
+            contents: bytemuck::cast_slice(&point_geom_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
         let scalar_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("tetraglass_surface_vertex_scalars"),
             contents: bytemuck::cast_slice(&extracted.vertex_scalars),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let point_scalar_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("tetraglass_surface_point_scalars"),
+            contents: bytemuck::cast_slice(&extracted.point_scalars),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -2060,10 +2340,13 @@ impl Renderer {
             bounds: surface.bounds(),
             vertex_count,
             edge_vertex_count,
+            point_count,
             num_triangles,
             geometry_buffer,
             edge_vertex_buffer,
+            point_geometry_buffer,
             scalar_buffer,
+            point_scalar_buffer,
             cell_scalar_buffer,
             uniform_buffer,
             bind_group,
@@ -2073,6 +2356,8 @@ impl Renderer {
             opacity: style.solid_color_srgb[3].clamp(0.0, 1.0),
             draw_surface: style.draw_surface,
             draw_edges: style.draw_edges,
+            draw_points: style.draw_points,
+            point_size,
             data_range: extracted.data_range,
             effective_range,
             volume: gpu_volume,
@@ -2178,6 +2463,7 @@ impl Renderer {
         surface: &SurfaceMesh,
         style: &SurfaceStyle,
     ) -> Result<(), RenderError> {
+        let point_size = style.point_size.max(1.0);
         if let Some(ref mut gpu_vol) = gpu_surface.volume {
             if gpu_surface.active_color_by != style.color_by {
                 let (vol_scalars, data_range, _) =
@@ -2237,6 +2523,7 @@ impl Renderer {
                 style.solid_color_srgb,
                 style.edge_color_srgb,
                 gpu_clip_plane,
+                point_size,
             );
             queue.write_buffer(
                 &gpu_surface.uniform_buffer,
@@ -2248,6 +2535,8 @@ impl Renderer {
             gpu_surface.opacity = style.solid_color_srgb[3].clamp(0.0, 1.0);
             gpu_surface.draw_surface = style.draw_surface;
             gpu_surface.draw_edges = style.draw_edges;
+            gpu_surface.draw_points = style.draw_points;
+            gpu_surface.point_size = point_size;
             gpu_surface.effective_range = effective_range;
             return Ok(());
         }
@@ -2260,6 +2549,13 @@ impl Renderer {
                     0,
                     bytemuck::cast_slice(&extracted.vertex_scalars),
                 );
+                if extracted.point_scalars.len() == gpu_surface.point_count.max(1) as usize {
+                    queue.write_buffer(
+                        &gpu_surface.point_scalar_buffer,
+                        0,
+                        bytemuck::cast_slice(&extracted.point_scalars),
+                    );
+                }
                 queue.write_buffer(
                     &gpu_surface.cell_scalar_buffer,
                     0,
@@ -2286,6 +2582,7 @@ impl Renderer {
             style.solid_color_srgb,
             style.edge_color_srgb,
             gpu_clip_plane,
+            point_size,
         );
         queue.write_buffer(
             &gpu_surface.uniform_buffer,
@@ -2297,6 +2594,8 @@ impl Renderer {
         gpu_surface.opacity = style.solid_color_srgb[3].clamp(0.0, 1.0);
         gpu_surface.draw_surface = style.draw_surface;
         gpu_surface.draw_edges = style.draw_edges;
+        gpu_surface.draw_points = style.draw_points;
+        gpu_surface.point_size = point_size;
         gpu_surface.effective_range = effective_range;
         Ok(())
     }
@@ -2395,7 +2694,9 @@ impl Renderer {
             });
         }
 
-        let aspect = (target.width() as f32) / (target.height().max(1) as f32);
+        let vp_w = (target.width().max(1)) as f32;
+        let vp_h = (target.height().max(1)) as f32;
+        let aspect = vp_w / vp_h;
         let view_proj = camera.view_proj_matrix(aspect);
         let eye = camera.eye_position();
         let (key_dir, fill_dir) = camera.light_directions();
@@ -2404,6 +2705,7 @@ impl Renderer {
             eye_pos: [eye[0], eye[1], eye[2], 1.0],
             key_dir: [key_dir[0], key_dir[1], key_dir[2], 0.0],
             fill_dir: [fill_dir[0], fill_dir[1], fill_dir[2], 0.0],
+            viewport_size: [vp_w, vp_h, 1.0 / vp_w, 1.0 / vp_h],
         };
         queue.write_buffer(
             &self.frame_uniform_buffer,
@@ -2548,23 +2850,7 @@ impl Renderer {
                 multiview_mask: None,
             });
 
-            pass.set_pipeline(&self.surface_pipeline);
-            for surface in surfaces {
-                if !surface.is_opaque() {
-                    continue;
-                }
-                let cm_idx = match surface.active_colormap {
-                    ColormapKind::Viridis => 0,
-                    ColormapKind::Cividis => 1,
-                    ColormapKind::CoolWarm => 2,
-                };
-                pass.set_bind_group(0, &self.frame_bind_groups[cm_idx], &[]);
-                pass.set_bind_group(1, &surface.bind_group, &[]);
-                pass.set_vertex_buffer(0, surface.geometry_buffer.slice(..));
-                pass.set_vertex_buffer(1, surface.scalar_buffer.slice(..));
-                pass.draw(0..surface.vertex_count, 0..1);
-            }
-
+            self.draw_opaque_surfaces_and_points(&mut pass, surfaces);
             self.draw_edges_and_annotations(&mut pass, surfaces, &prepared_annotations);
         } else {
             // Pass 1: Opaque geometry pass (writes color and depth; defer MSAA resolve to final pass).
@@ -2593,22 +2879,7 @@ impl Renderer {
                     multiview_mask: None,
                 });
 
-                pass.set_pipeline(&self.surface_pipeline);
-                for surface in surfaces {
-                    if !surface.is_opaque() {
-                        continue;
-                    }
-                    let cm_idx = match surface.active_colormap {
-                        ColormapKind::Viridis => 0,
-                        ColormapKind::Cividis => 1,
-                        ColormapKind::CoolWarm => 2,
-                    };
-                    pass.set_bind_group(0, &self.frame_bind_groups[cm_idx], &[]);
-                    pass.set_bind_group(1, &surface.bind_group, &[]);
-                    pass.set_vertex_buffer(0, surface.geometry_buffer.slice(..));
-                    pass.set_vertex_buffer(1, surface.scalar_buffer.slice(..));
-                    pass.draw(0..surface.vertex_count, 0..1);
-                }
+                self.draw_opaque_surfaces_and_points(&mut pass, surfaces);
             }
 
             if use_ssao {
@@ -2713,7 +2984,10 @@ impl Renderer {
 
                     pass.set_pipeline(&self.wboit_accum_pipeline);
                     for surface in surfaces {
-                        if !surface.is_transparent() {
+                        if !surface.is_transparent()
+                            || !surface.draw_surface
+                            || surface.vertex_count == 0
+                        {
                             continue;
                         }
                         let cm_idx = match surface.active_colormap {
@@ -2726,6 +3000,31 @@ impl Renderer {
                         pass.set_vertex_buffer(0, surface.geometry_buffer.slice(..));
                         pass.set_vertex_buffer(1, surface.scalar_buffer.slice(..));
                         pass.draw(0..surface.vertex_count, 0..1);
+                    }
+
+                    if surfaces
+                        .iter()
+                        .any(|s| s.is_transparent() && s.draw_points && s.point_count > 0)
+                    {
+                        pass.set_pipeline(&self.point_wboit_accum_pipeline);
+                        for surface in surfaces {
+                            if !surface.is_transparent()
+                                || !surface.draw_points
+                                || surface.point_count == 0
+                            {
+                                continue;
+                            }
+                            let cm_idx = match surface.active_colormap {
+                                ColormapKind::Viridis => 0,
+                                ColormapKind::Cividis => 1,
+                                ColormapKind::CoolWarm => 2,
+                            };
+                            pass.set_bind_group(0, &self.frame_bind_groups[cm_idx], &[]);
+                            pass.set_bind_group(1, &surface.bind_group, &[]);
+                            pass.set_vertex_buffer(0, surface.point_geometry_buffer.slice(..));
+                            pass.set_vertex_buffer(1, surface.point_scalar_buffer.slice(..));
+                            pass.draw(0..6, 0..surface.point_count);
+                        }
                     }
                 }
 
@@ -2842,6 +3141,64 @@ impl Renderer {
         Ok(())
     }
 
+    pub(crate) fn draw_opaque_surfaces_and_points<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        surfaces: &[&'a GpuSurface],
+    ) {
+        if surfaces
+            .iter()
+            .any(|s| s.is_opaque() && s.draw_surface && s.vertex_count > 0)
+        {
+            pass.set_pipeline(&self.surface_pipeline);
+            for surface in surfaces {
+                if !surface.is_opaque() || !surface.draw_surface || surface.vertex_count == 0 {
+                    continue;
+                }
+                let cm_idx = match surface.active_colormap {
+                    ColormapKind::Viridis => 0,
+                    ColormapKind::Cividis => 1,
+                    ColormapKind::CoolWarm => 2,
+                };
+                pass.set_bind_group(0, &self.frame_bind_groups[cm_idx], &[]);
+                pass.set_bind_group(1, &surface.bind_group, &[]);
+                pass.set_vertex_buffer(0, surface.geometry_buffer.slice(..));
+                pass.set_vertex_buffer(1, surface.scalar_buffer.slice(..));
+                pass.draw(0..surface.vertex_count, 0..1);
+            }
+        }
+
+        self.draw_opaque_points(pass, surfaces);
+    }
+
+    pub(crate) fn draw_opaque_points<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        surfaces: &[&'a GpuSurface],
+    ) {
+        if surfaces
+            .iter()
+            .any(|s| s.is_opaque() && s.draw_points && s.point_count > 0)
+        {
+            pass.set_pipeline(&self.point_pipeline);
+            for surface in surfaces {
+                if !surface.is_opaque() || !surface.draw_points || surface.point_count == 0 {
+                    continue;
+                }
+                let cm_idx = match surface.active_colormap {
+                    ColormapKind::Viridis => 0,
+                    ColormapKind::Cividis => 1,
+                    ColormapKind::CoolWarm => 2,
+                };
+                pass.set_bind_group(0, &self.frame_bind_groups[cm_idx], &[]);
+                pass.set_bind_group(1, &surface.bind_group, &[]);
+                pass.set_vertex_buffer(0, surface.point_geometry_buffer.slice(..));
+                pass.set_vertex_buffer(1, surface.point_scalar_buffer.slice(..));
+                pass.draw(0..6, 0..surface.point_count);
+            }
+        }
+    }
+
     pub(crate) fn prepare_overlays(
         &self,
         device: &wgpu::Device,
@@ -2851,7 +3208,9 @@ impl Renderer {
         background_srgb: [f32; 4],
         annotations: &Annotations,
     ) -> Option<(wgpu::Buffer, wgpu::BindGroup, u32)> {
-        let aspect = (target.width() as f32) / (target.height().max(1) as f32);
+        let vp_w = (target.width().max(1)) as f32;
+        let vp_h = (target.height().max(1)) as f32;
+        let aspect = vp_w / vp_h;
         let view_proj = camera.view_proj_matrix(aspect);
         let eye = camera.eye_position();
         let (key_dir, fill_dir) = camera.light_directions();
@@ -2860,6 +3219,7 @@ impl Renderer {
             eye_pos: [eye[0], eye[1], eye[2], 1.0],
             key_dir: [key_dir[0], key_dir[1], key_dir[2], 0.0],
             fill_dir: [fill_dir[0], fill_dir[1], fill_dir[2], 0.0],
+            viewport_size: [vp_w, vp_h, 1.0 / vp_w, 1.0 / vp_h],
         };
         queue.write_buffer(
             &self.frame_uniform_buffer,
@@ -2982,7 +3342,9 @@ impl Renderer {
         camera: &Camera,
         surfaces: &[&GpuSurface],
     ) -> Result<(), RenderError> {
-        let aspect = (target.width() as f32) / (target.height().max(1) as f32);
+        let vp_w = (target.width().max(1)) as f32;
+        let vp_h = (target.height().max(1)) as f32;
+        let aspect = vp_w / vp_h;
         let view_proj = camera.view_proj_matrix(aspect);
         let eye = camera.eye_position();
         let (key_dir, fill_dir) = camera.light_directions();
@@ -2991,6 +3353,7 @@ impl Renderer {
             eye_pos: [eye[0], eye[1], eye[2], 1.0],
             key_dir: [key_dir[0], key_dir[1], key_dir[2], 0.0],
             fill_dir: [fill_dir[0], fill_dir[1], fill_dir[2], 0.0],
+            viewport_size: [vp_w, vp_h, 1.0 / vp_w, 1.0 / vp_h],
         };
         queue.write_buffer(
             &self.frame_uniform_buffer,
@@ -3032,21 +3395,48 @@ impl Renderer {
             multiview_mask: None,
         });
 
-        pass.set_pipeline(&self.pick_pipeline);
-        for surface in surfaces {
-            if !surface.draw_surface || surface.vertex_count == 0 || surface.opacity <= 1e-5 {
-                continue;
+        if surfaces
+            .iter()
+            .any(|s| s.draw_surface && s.vertex_count > 0 && s.opacity > 1e-5)
+        {
+            pass.set_pipeline(&self.pick_pipeline);
+            for surface in surfaces {
+                if !surface.draw_surface || surface.vertex_count == 0 || surface.opacity <= 1e-5 {
+                    continue;
+                }
+                let cm_idx = match surface.active_colormap {
+                    ColormapKind::Viridis => 0,
+                    ColormapKind::Cividis => 1,
+                    ColormapKind::CoolWarm => 2,
+                };
+                pass.set_bind_group(0, &self.frame_bind_groups[cm_idx], &[]);
+                pass.set_bind_group(1, &surface.bind_group, &[]);
+                pass.set_vertex_buffer(0, surface.geometry_buffer.slice(..));
+                pass.set_vertex_buffer(1, surface.scalar_buffer.slice(..));
+                pass.draw(0..surface.vertex_count, 0..1);
             }
-            let cm_idx = match surface.active_colormap {
-                ColormapKind::Viridis => 0,
-                ColormapKind::Cividis => 1,
-                ColormapKind::CoolWarm => 2,
-            };
-            pass.set_bind_group(0, &self.frame_bind_groups[cm_idx], &[]);
-            pass.set_bind_group(1, &surface.bind_group, &[]);
-            pass.set_vertex_buffer(0, surface.geometry_buffer.slice(..));
-            pass.set_vertex_buffer(1, surface.scalar_buffer.slice(..));
-            pass.draw(0..surface.vertex_count, 0..1);
+        }
+
+        if surfaces
+            .iter()
+            .any(|s| s.draw_points && s.point_count > 0 && s.opacity > 1e-5)
+        {
+            pass.set_pipeline(&self.point_pick_pipeline);
+            for surface in surfaces {
+                if !surface.draw_points || surface.point_count == 0 || surface.opacity <= 1e-5 {
+                    continue;
+                }
+                let cm_idx = match surface.active_colormap {
+                    ColormapKind::Viridis => 0,
+                    ColormapKind::Cividis => 1,
+                    ColormapKind::CoolWarm => 2,
+                };
+                pass.set_bind_group(0, &self.frame_bind_groups[cm_idx], &[]);
+                pass.set_bind_group(1, &surface.bind_group, &[]);
+                pass.set_vertex_buffer(0, surface.point_geometry_buffer.slice(..));
+                pass.set_vertex_buffer(1, surface.point_scalar_buffer.slice(..));
+                pass.draw(0..6, 0..surface.point_count);
+            }
         }
 
         Ok(())
@@ -3177,6 +3567,7 @@ fn build_surface_uniforms(
     solid_color_srgb: [f32; 4],
     edge_color_srgb: [f32; 4],
     clip_plane: [f32; 4],
+    point_size: f32,
 ) -> SurfaceUniforms {
     SurfaceUniforms {
         range_min: range[0] as f32,
@@ -3197,11 +3588,62 @@ fn build_surface_uniforms(
         ],
         pick_info: [1, 0, 0, 0],
         clip_plane,
+        point_params: [point_size.max(1.0), 0.0, 0.0, 0.0],
     }
+}
+
+/// Returns `(point_index, normal, cell_index)` for each unique point instance on `surface`.
+pub(crate) fn collect_surface_point_instances(surface: &SurfaceMesh) -> Vec<(u32, [f32; 3], u32)> {
+    let points = surface.points();
+    let triangles = surface.triangles();
+    if !triangles.is_empty() {
+        let mut visited = vec![false; points.len()];
+        let mut instances = Vec::with_capacity(points.len().min(triangles.len() * 3));
+        for (tri_idx, &[i0, i1, i2]) in triangles.iter().enumerate() {
+            let p0 = points[i0 as usize];
+            let p1 = points[i1 as usize];
+            let p2 = points[i2 as usize];
+            let normal = triangle_normal_f32(p0, p1, p2);
+            let cell_index = tri_idx as u32;
+            for v in [i0, i1, i2] {
+                let idx = v as usize;
+                if let Some(slot) = visited.get_mut(idx)
+                    && !*slot
+                {
+                    *slot = true;
+                    instances.push((v, normal, cell_index));
+                }
+            }
+        }
+        return instances;
+    }
+
+    let edges = surface.wireframe_edges();
+    if !edges.is_empty() {
+        let mut visited = vec![false; points.len()];
+        let mut instances = Vec::with_capacity(points.len().min(edges.len() * 2));
+        for &[i0, i1] in edges {
+            for v in [i0, i1] {
+                let idx = v as usize;
+                if let Some(slot) = visited.get_mut(idx)
+                    && !*slot
+                {
+                    *slot = true;
+                    instances.push((v, [0.0, 0.0, 1.0], v));
+                }
+            }
+        }
+        return instances;
+    }
+
+    (0..(points.len() as u32))
+        .map(|v| (v, [0.0, 0.0, 1.0], v))
+        .collect()
 }
 
 pub(crate) struct ExtractedScalars {
     pub(crate) vertex_scalars: Vec<f32>,
+    pub(crate) point_scalars: Vec<f32>,
     pub(crate) cell_scalars: Vec<f32>,
     pub(crate) data_range: [f64; 2],
     pub(crate) coloring_mode: u32,
@@ -3214,10 +3656,13 @@ pub(crate) fn extract_scalars(
     let num_triangles = surface.num_triangles();
     let vertex_len = (num_triangles * 3).max(1);
     let cell_len = num_triangles.max(1);
+    let point_instances = collect_surface_point_instances(surface);
+    let point_len = point_instances.len().max(1);
 
     match color_by {
         ColorBy::Solid => Ok(ExtractedScalars {
             vertex_scalars: vec![0.0f32; vertex_len],
+            point_scalars: vec![0.0f32; point_len],
             cell_scalars: vec![0.0f32; cell_len],
             data_range: [0.0, 1.0],
             coloring_mode: 0,
@@ -3241,14 +3686,39 @@ pub(crate) fn extract_scalars(
             if vertex_scalars.is_empty() {
                 vertex_scalars.push(0.0);
             }
+            let mut point_scalars = Vec::with_capacity(point_len);
+            for &(pt_idx, _, _) in &point_instances {
+                point_scalars.push(tuple_scalars.get(pt_idx as usize).copied().unwrap_or(0.0));
+            }
+            if point_scalars.is_empty() {
+                point_scalars.push(0.0);
+            }
             Ok(ExtractedScalars {
                 vertex_scalars,
+                point_scalars,
                 cell_scalars: vec![0.0f32; cell_len],
                 data_range,
                 coloring_mode: 1,
             })
         }
         ColorBy::Cell { name, component } => {
+            if num_triangles == 0
+                && surface.cell_data().get(name).is_none()
+                && let Some(point_arr) = surface.point_data().get(name)
+            {
+                let (mut cell_scalars, data_range) =
+                    evaluate_array_scalars(name, point_arr, *component)?;
+                if cell_scalars.is_empty() {
+                    cell_scalars.push(0.0);
+                }
+                return Ok(ExtractedScalars {
+                    vertex_scalars: vec![0.0f32; vertex_len],
+                    point_scalars: vec![0.0f32; point_len],
+                    cell_scalars,
+                    data_range,
+                    coloring_mode: 2,
+                });
+            }
             let array = surface
                 .cell_data()
                 .get(name)
@@ -3262,6 +3732,7 @@ pub(crate) fn extract_scalars(
             }
             Ok(ExtractedScalars {
                 vertex_scalars: vec![0.0f32; vertex_len],
+                point_scalars: vec![0.0f32; point_len],
                 cell_scalars,
                 data_range,
                 coloring_mode: 2,

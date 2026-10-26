@@ -289,11 +289,18 @@ pub fn probe_surface_triangle(
 ) -> Option<SurfacePickResult> {
     let tri_idx = raw.triangle_index as usize;
     let triangles = surface.triangles();
-    let &[i0, i1, i2] = triangles.get(tri_idx)?;
     let points = surface.points();
-    let p0 = *points.get(i0 as usize)?;
-    let p1 = *points.get(i1 as usize)?;
-    let p2 = *points.get(i2 as usize)?;
+    let (i0, i1, i2, p0, p1, p2) = if triangles.is_empty() {
+        let p = *points.get(tri_idx)?;
+        let idx = raw.triangle_index;
+        (idx, idx, idx, p, p, p)
+    } else {
+        let &[i0, i1, i2] = triangles.get(tri_idx)?;
+        let p0 = *points.get(i0 as usize)?;
+        let p1 = *points.get(i1 as usize)?;
+        let p2 = *points.get(i2 as usize)?;
+        (i0, i1, i2, p0, p1, p2)
+    };
 
     let (ray_orig_rel, ray_dir) = camera.pixel_ray_f64(
         f64::from(pixel[0]),

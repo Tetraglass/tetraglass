@@ -16,6 +16,7 @@ Every scene in [`gallery/`](../../../gallery/) is validated and rendered in CI a
 | `gallery/streamlines.json` | Bidirectional RK4(5) `"type": "streamlines"` (`vectors: "velocity"`, `4x4` plane seed grid) rendered with `"style": "tubes"` colored by `velocity:magnitude` (`viridis`) inside a `silver` outer element wireframe. | `tetraglass render gallery/streamlines.json -o out.png` |
 | `gallery/glyphs.json` | 3D `"type": "glyphs"` (`vectors: "velocity"`, `shape: "arrow"`, `scale_by: "magnitude"`) colored by `velocity:magnitude` (`viridis`) inside a `silver` outer element wireframe. | `tetraglass render gallery/glyphs.json -o out.png` |
 | `gallery/volume.json` | GPU ray-marched `"type": "resample"` (`dimensions: [32, 32, 32]`, `"style": "volume"`) colored by `linear` (`viridis`) with a piecewise-linear opacity `transfer_function` inside a `silver` outer element wireframe. | `tetraglass render gallery/volume.json -o out.png` |
+| `gallery/points.json` | Screen-space point cloud (`"style": "points"`, `"point_size": 12.0`) on `tet2_v41.msh` colored by `linear` (`viridis`) over a `silver` element wireframe. | `tetraglass render gallery/points.json -o out.png` |
 
 ## Filter gallery highlights
 

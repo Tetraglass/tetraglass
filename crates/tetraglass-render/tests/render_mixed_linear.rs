@@ -1014,3 +1014,168 @@ fn compute_path_tracer_accumulates_progressively_and_renders_soft_shadows_and_mu
         assert!(!pt.is_converged());
     }
 }
+
+#[test]
+fn points_representation_renders_solid_point_and_cell_colors_scales_with_point_size_and_supports_wboit()
+ {
+    use tetraglass_render::{DEFAULT_COLOR_FORMAT, OffscreenTarget, Renderer};
+
+    let root = workspace_root();
+    let vtu_path = root.join("testdata/vtk/mixed_linear.vtu");
+    let grid = read_vtu_from_path(&vtu_path).expect("read mixed_linear.vtu");
+    let surface = extract_external_surface(&grid).expect("extract surface");
+    let bounds = surface.bounds().expect("surface bounds");
+    let camera = Camera::fit_bounds(bounds, 30.0, 20.0);
+
+    let ctx = HeadlessContext::new().expect("headless wgpu context");
+    let count_non_white = |img: &RenderedImage| -> usize {
+        img.as_rgba8()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|px| px[0] < 250 || px[1] < 250 || px[2] < 250)
+            .count()
+    };
+
+    // 1. Small vs large `point_size` with point-scalar coloring (`linear`).
+    let opts_small = HeadlessRenderOptions {
+        width: 400,
+        height: 300,
+        sample_count: 4,
+        style: SurfaceStyle {
+            color_by: ColorBy::point("linear"),
+            colormap: ColormapKind::Viridis,
+            draw_surface: false,
+            draw_edges: false,
+            draw_points: true,
+            point_size: 4.0,
+            ..SurfaceStyle::default()
+        },
+        camera: Some(camera.clone()),
+        ..HeadlessRenderOptions::default()
+    };
+    let opts_large = HeadlessRenderOptions {
+        style: SurfaceStyle {
+            point_size: 14.0,
+            ..opts_small.style.clone()
+        },
+        ..opts_small.clone()
+    };
+
+    let img_small = ctx
+        .render_surface(&surface, &opts_small)
+        .expect("render small points");
+    let img_large = ctx
+        .render_surface(&surface, &opts_large)
+        .expect("render large points");
+
+    let out_dir = root.join("target/render-tests");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    img_large
+        .save_png(out_dir.join("points_mixed_linear.png"))
+        .expect("save points_mixed_linear.png");
+
+    let px_small = count_non_white(&img_small);
+    let px_large = count_non_white(&img_large);
+    assert!(
+        px_small >= 50,
+        "expected >= 50 non-white pixels for 4px points on mixed_linear, got {px_small}"
+    );
+    assert!(
+        px_large > px_small * 4,
+        "increasing point_size from 4px to 14px must substantially increase covered pixel count (px_large={px_large} vs px_small={px_small})"
+    );
+
+    // 2. Cell-scalar (`cell_id`) and solid coloring on `"points"` produce distinct valid images.
+    let opts_cell = HeadlessRenderOptions {
+        style: SurfaceStyle {
+            color_by: ColorBy::cell("cell_id"),
+            colormap: ColormapKind::Cividis,
+            ..opts_large.style.clone()
+        },
+        ..opts_large.clone()
+    };
+    let opts_solid = HeadlessRenderOptions {
+        style: SurfaceStyle {
+            color_by: ColorBy::Solid,
+            solid_color_srgb: [0.85, 0.22, 0.18, 1.0],
+            ..opts_large.style.clone()
+        },
+        ..opts_large.clone()
+    };
+    let img_cell = ctx
+        .render_surface(&surface, &opts_cell)
+        .expect("render cell-colored points");
+    let img_solid = ctx
+        .render_surface(&surface, &opts_solid)
+        .expect("render solid-colored points");
+
+    assert!(count_non_white(&img_cell) >= px_large / 2);
+    assert!(count_non_white(&img_solid) >= px_large / 2);
+    assert!(
+        img_large
+            .compare(&img_cell, 2, 0.0)
+            .expect("compare point vs cell")
+            .differing_pixels
+            > 200
+    );
+    assert!(
+        img_large
+            .compare(&img_solid, 2, 0.0)
+            .expect("compare point vs solid")
+            .differing_pixels
+            > 200
+    );
+
+    // 3. `Renderer::update_surface_style` dynamically updates `draw_points`, `point_size`, and WBOIT transparency.
+    let renderer =
+        Renderer::new(ctx.device(), ctx.queue(), DEFAULT_COLOR_FORMAT, 4).expect("create renderer");
+    let mut gpu_surface = renderer
+        .upload_surface(ctx.device(), &surface, &opts_small.style)
+        .expect("upload points surface");
+    assert_eq!(gpu_surface.point_count(), 11);
+    assert!(gpu_surface.draw_points());
+    assert!((gpu_surface.point_size() - 4.0).abs() < 1e-6);
+    assert!(gpu_surface.is_opaque());
+    assert!(!gpu_surface.is_transparent());
+
+    let transparent_style = SurfaceStyle {
+        color_by: ColorBy::Solid,
+        solid_color_srgb: [0.15, 0.45, 0.85, 0.45],
+        draw_surface: false,
+        draw_edges: false,
+        draw_points: true,
+        point_size: 16.0,
+        ..SurfaceStyle::default()
+    };
+    renderer
+        .update_surface_style(ctx.queue(), &mut gpu_surface, &surface, &transparent_style)
+        .expect("update to transparent points style");
+    assert!((gpu_surface.point_size() - 16.0).abs() < 1e-6);
+    assert!(!gpu_surface.is_opaque());
+    assert!(gpu_surface.is_transparent());
+
+    let target = OffscreenTarget::new(ctx.device(), 400, 300, DEFAULT_COLOR_FORMAT, 4)
+        .expect("create offscreen target");
+    let mut encoder = ctx
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    renderer
+        .render(
+            &mut encoder,
+            ctx.queue(),
+            &target,
+            &camera,
+            [1.0, 1.0, 1.0, 1.0],
+            &[&gpu_surface],
+        )
+        .expect("render WBOIT points");
+    ctx.queue().submit(std::iter::once(encoder.finish()));
+    let img_wboit = ctx
+        .readback_target(&target)
+        .expect("read WBOIT points image");
+    assert!(
+        count_non_white(&img_wboit) > 400,
+        "semi-transparent points must render via WBOIT accumulation pass"
+    );
+}

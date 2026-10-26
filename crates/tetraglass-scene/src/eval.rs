@@ -407,12 +407,11 @@ fn hash_streamline_surface(
     }
     // Group styles that produce identical tessellated surface geometry.
     let style_group = match style {
-        RepresentationStyle::Wireframe => 0u8,
+        RepresentationStyle::Wireframe | RepresentationStyle::Points => 0u8,
         RepresentationStyle::Lines => 1u8,
         RepresentationStyle::Tubes
         | RepresentationStyle::Surface
         | RepresentationStyle::SurfaceWithEdges
-        | RepresentationStyle::Points
         | RepresentationStyle::Volume => 2u8,
     };
     h.write_u8(style_group);
@@ -1094,14 +1093,15 @@ impl SceneEvaluator {
             .map_or(1.0, |b| b.diagonal().max(1e-6));
         let base_radius = tube_radius.unwrap_or(0.012 * diag).max(1e-6);
         let surface = match style {
-            RepresentationStyle::Wireframe => Arc::new(polylines.to_line_surface()?),
+            RepresentationStyle::Wireframe | RepresentationStyle::Points => {
+                Arc::new(polylines.to_line_surface()?)
+            }
             RepresentationStyle::Lines => {
                 Arc::new(polylines.to_tube_surface((base_radius * 0.35).max(1e-6), 6)?)
             }
             RepresentationStyle::Tubes
             | RepresentationStyle::Surface
             | RepresentationStyle::SurfaceWithEdges
-            | RepresentationStyle::Points
             | RepresentationStyle::Volume => {
                 Arc::new(polylines.to_tube_surface(base_radius, DEFAULT_TUBE_SIDES)?)
             }
@@ -1785,6 +1785,11 @@ fn resolve_representation_coloring(
         Some(ArrayAssociation::Cell) => {
             if let Some(vol) = volume
                 && let Some(arr) = vol.point_data().get(&parsed.name)
+            {
+                (ArrayAssociation::Point, arr)
+            } else if surface.num_triangles() == 0
+                && surface.cell_data().get(&parsed.name).is_none()
+                && let Some(arr) = point_attrs.get(&parsed.name)
             {
                 (ArrayAssociation::Point, arr)
             } else {

@@ -1241,6 +1241,7 @@ impl PathTracer {
             rpass.draw(0..3, 0..1);
 
             if let Some((renderer, gpu_surfaces, _)) = overlays {
+                renderer.draw_opaque_points(&mut rpass, gpu_surfaces);
                 renderer.draw_edges_and_annotations(
                     &mut rpass,
                     gpu_surfaces,

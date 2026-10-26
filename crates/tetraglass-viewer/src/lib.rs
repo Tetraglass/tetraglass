@@ -993,6 +993,40 @@ impl ViewerDocument {
         Ok(true)
     }
 
+    /// Returns whether the primary representation uses [`RepresentationStyle::Points`] (`M6.2`).
+    #[must_use]
+    pub fn is_points_representation(&self) -> bool {
+        self.evaluated
+            .representations
+            .first()
+            .is_some_and(|r| r.style == RepresentationStyle::Points)
+    }
+
+    /// Returns the screen-space point diameter in pixels for the primary representation (`M6.2`).
+    #[must_use]
+    pub fn point_size(&self) -> f64 {
+        self.scene.view.show.first().map_or(3.0, |r| r.point_size)
+    }
+
+    /// Sets the screen-space point diameter in pixels (`> 0.0`) on the primary representation (`M6.2`).
+    pub fn set_point_size(&mut self, point_size: f64) -> Result<bool, ViewerError> {
+        if !point_size.is_finite() || point_size <= 0.0 {
+            return Err(ViewerError::Validation(format!(
+                "point_size `{point_size}` must be finite and > 0.0"
+            )));
+        }
+        if (self.point_size() - point_size).abs() <= 1e-6 {
+            return Ok(false);
+        }
+        if let Some(rep) = self.scene.view.show.first_mut() {
+            rep.point_size = point_size;
+        }
+        self.evaluated = self
+            .evaluator
+            .evaluate_scene_at_time(&self.scene, TimeSelector::step(self.current_step))?;
+        Ok(true)
+    }
+
     /// Returns whether the primary representation is a volume representation (`M4.4b`).
     #[must_use]
     pub fn is_volume_representation(&self) -> bool {
@@ -2705,6 +2739,7 @@ impl ViewerSession {
         let mut colorbar_changed_to: Option<bool> = None;
         let mut axes_changed_to: Option<bool> = None;
         let mut opacity_changed_to: Option<f64> = None;
+        let mut point_size_changed_to: Option<f64> = None;
         let mut ssao_changed_to: Option<ViewportSsaoConfig> = None;
         let mut path_tracing_enabled_changed_to: Option<bool> = None;
         let mut path_trace_config_changed_to: Option<ViewportPathTraceConfig> = None;
@@ -2903,6 +2938,20 @@ impl ViewerSession {
                     .changed()
                 {
                     opacity_changed_to = Some(opacity_val);
+                }
+
+                if self.doc.is_points_representation() {
+                    let mut point_size_val = self.doc.point_size();
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut point_size_val, 1.0..=32.0)
+                                .text("Point size")
+                                .show_value(true),
+                        )
+                        .changed()
+                    {
+                        point_size_changed_to = Some(point_size_val);
+                    }
                 }
 
                 let mut ssao_cfg = self.doc.ssao();
@@ -3408,6 +3457,11 @@ impl ViewerSession {
         }
         if let Some(new_opacity) = opacity_changed_to
             && let Ok(true) = self.doc.set_opacity(new_opacity)
+        {
+            style_or_annotations_dirty = true;
+        }
+        if let Some(new_point_size) = point_size_changed_to
+            && let Ok(true) = self.doc.set_point_size(new_point_size)
         {
             style_or_annotations_dirty = true;
         }
@@ -4014,12 +4068,14 @@ pub fn build_surface_style(rep: &EvaluatedRepresentation) -> ViewportSurfaceStyl
         rep.opacity as f32,
     ];
     let is_volume = rep.volume.is_some();
-    let (draw_surface, draw_edges) = match rep.style {
-        RepresentationStyle::Wireframe => (false, true),
-        RepresentationStyle::SurfaceWithEdges => (!is_volume, true),
-        RepresentationStyle::Volume => (false, false),
-        _ => (!is_volume, false),
+    let (draw_surface, draw_edges, draw_points) = match rep.style {
+        RepresentationStyle::Wireframe => (false, true, false),
+        RepresentationStyle::SurfaceWithEdges => (!is_volume, true, false),
+        RepresentationStyle::Points => (false, false, !is_volume),
+        RepresentationStyle::Volume => (false, false, false),
+        _ => (!is_volume, false, false),
     };
+    let point_size = (rep.point_size as f32).max(1.0);
     match &rep.coloring {
         None => ViewportSurfaceStyle {
             color_by: ViewportColorBy::Solid,
@@ -4030,6 +4086,8 @@ pub fn build_surface_style(rep: &EvaluatedRepresentation) -> ViewportSurfaceStyl
             draw_surface,
             draw_edges,
             edge_color_srgb,
+            draw_points,
+            point_size,
             clip_plane: None,
             volume_grid: rep.volume.clone(),
             transfer_function: rep.transfer_function.clone(),
@@ -4043,6 +4101,8 @@ pub fn build_surface_style(rep: &EvaluatedRepresentation) -> ViewportSurfaceStyl
             draw_surface,
             draw_edges,
             edge_color_srgb,
+            draw_points,
+            point_size,
             clip_plane: None,
             volume_grid: rep.volume.clone(),
             transfer_function: rep.transfer_function.clone(),
@@ -4301,5 +4361,46 @@ mod tests {
             Arc::ptr_eq(&initial_vol, &updated_vol),
             "updating transfer function must reuse cached RegularGrid without re-running resample"
         );
+    }
+
+    #[test]
+    fn points_document_validates_and_updates_point_size() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .to_path_buf();
+        let json = r#"{
+            "version": 1,
+            "sources": {
+                "mesh": { "file": "testdata/vtk/mixed_linear.vtu" }
+            },
+            "view": {
+                "show": [
+                    {
+                        "input": "mesh",
+                        "style": "points",
+                        "point_size": 8.0,
+                        "color_by": "linear"
+                    }
+                ]
+            }
+        }"#;
+        let scene = Scene::from_json_str(json).expect("parse points scene");
+        let mut doc = ViewerDocument::from_scene(scene, &root).expect("load ViewerDocument");
+        assert!(doc.is_points_representation());
+        assert!((doc.point_size() - 8.0).abs() < 1e-12);
+        let style = doc.active_surface_style();
+        assert!(!style.draw_surface);
+        assert!(!style.draw_edges);
+        assert!(style.draw_points);
+        assert!((style.point_size - 8.0).abs() < 1e-6);
+
+        assert!(doc.set_point_size(14.5).expect("update point_size"));
+        assert!((doc.point_size() - 14.5).abs() < 1e-12);
+        assert!((doc.active_surface_style().point_size - 14.5).abs() < 1e-6);
+        assert!(!doc.set_point_size(14.5).expect("idempotent point_size"));
+        assert!(doc.set_point_size(0.0).is_err());
+        assert!(doc.set_point_size(-2.0).is_err());
     }
 }

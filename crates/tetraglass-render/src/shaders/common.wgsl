@@ -5,6 +5,7 @@ struct FrameUniforms {
     eye_pos: vec4<f32>,
     key_dir: vec4<f32>,
     fill_dir: vec4<f32>,
+    viewport_size: vec4<f32>,
 };
 
 struct SurfaceUniforms {
@@ -16,6 +17,7 @@ struct SurfaceUniforms {
     edge_color: vec4<f32>,
     pick_info: vec4<u32>,
     clip_plane: vec4<f32>,
+    point_params: vec4<f32>,
 };
 
 fn is_clipped_by_plane(world_pos: vec3<f32>, clip_plane: vec4<f32>) -> bool {
