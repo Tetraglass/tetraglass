@@ -67,6 +67,12 @@ impl Scene {
         Ok(serde_json::from_slice(bytes)?)
     }
 
+    /// Parses and migrates a [`Scene`] from a JSON string that may use earlier pre-freeze
+    /// draft conventions (`M4.6`), returning the canonical v1 [`Scene`] and [`crate::MigrationReport`].
+    pub fn from_draft_json_str(json: &str) -> Result<(Self, crate::MigrationReport), SceneError> {
+        crate::migrate_scene_json_str(json)
+    }
+
     /// Serializes this [`Scene`] to a compact JSON string.
     pub fn to_json_string(&self) -> Result<String, SceneError> {
         Ok(serde_json::to_string(self)?)

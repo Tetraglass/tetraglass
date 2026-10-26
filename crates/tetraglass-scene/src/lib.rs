@@ -39,6 +39,7 @@
 mod array_ref;
 mod error;
 mod eval;
+mod migrate;
 mod types;
 mod validate;
 
@@ -51,6 +52,7 @@ pub use eval::{
     EvaluatedColoring, EvaluatedDataset, EvaluatedRepresentation, EvaluatedScene, PipelineHash,
     SceneEvaluator, hash_unstructured_grid,
 };
+pub use migrate::{MigrationReport, migrate_scene_json_str, migrate_scene_value};
 pub use types::{
     BackgroundGradient, BackgroundSpec, CameraConfig, ClipKeep, ClipMode, ColorSpec,
     ColorbarOptions, ColorbarPosition, ColorbarSpec, ColormapName, CyclesConfig,

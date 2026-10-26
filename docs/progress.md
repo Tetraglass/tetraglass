@@ -431,3 +431,10 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-004, D-011, and `docs/scene-format.md`).
 - Dependencies added: none.
 - Follow-ups: M4.6 Schema freeze (Scene schema v1 final, migration tests from earlier drafts).
+
+## 2026-10-26: M4.6 Schema freeze
+- Done: froze version 1 (`SCENE_VERSION = 1`) of the scene schema (`crates/tetraglass-cli/tests/snapshots/scene-v1.schema.json`) and updated `docs/scene-format.md`, `docs/book/src/scene-format.md`, and `AGENTS.md` from draft to final v1 status; added `MigrationReport`, `migrate_scene_value`, `migrate_scene_json_str`, and `Scene::from_draft_json_str` in `crates/tetraglass-scene/src/migrate.rs` to deterministically migrate pre-freeze M1–M4 draft conventions (missing or `0` version, `contour` `array`/`value`, `threshold` `array`/`range`, `streamlines`/`glyphs` `vector`/`field`, `"type": "volume"` / `dims`, `view.show[i]` `dataset`/`field`, and `output.frames` `start`/`end`) into canonical v1 `Scene`s while keeping `Scene::from_json_str` strictly enforcing `version == 1` and `deny_unknown_fields`.
+- Tests: integration test suite in `crates/tetraglass-scene/tests/schema_freeze.rs` (`frozen_v1_schema_matches_snapshot_and_declares_all_v1_capabilities`, `all_gallery_scenes_are_canonical_v1_and_roundtrip_losslessly`, `migrates_m1_through_m4_draft_scenes_to_canonical_v1_and_evaluates`, and `migrates_versionless_minimal_draft_and_rejects_future_versions`).
+- Decisions: none (implemented per D-004, `docs/scene-format.md`, and `.agents/rules/scene-schema.md`).
+- Dependencies added: none.
+- Follow-ups: M4.7 Gate and release 0.2 (`/milestone-gate`).

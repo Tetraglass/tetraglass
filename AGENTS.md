@@ -19,7 +19,7 @@ polished core.
 | Binding decisions | @docs/decisions.md | Before proposing anything that might contradict one |
 | Milestones, tasks, gates | @docs/roadmap.md | At the start of every session |
 | What has been done | @docs/progress.md | At the start of every session; append after every task |
-| Scene file format (draft) | @docs/scene-format.md | When touching the scene crate, CLI or gallery |
+| Scene file format (v1) | @docs/scene-format.md | When touching the scene crate, CLI or gallery |
 | Detailed rules | `.agents/rules/` | Loaded automatically by file type |
 | Repeatable procedures | `.agents/skills/` | Invoke with `/<skill-name>` |
 

@@ -112,3 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+## 4. Schema stability and draft migration (`v1`)
+
+Version `1` (`SCENE_VERSION = 1`) of the scene schema is frozen as of release `0.2` (`M4.6`). Strict parsing via `Scene::from_json_str` enforces `version == 1` and `#[serde(deny_unknown_fields)]` on every object. To normalize pre-freeze draft scenes (such as version `0` or omitted `version`, `view.show[i].dataset`/`field`, `contour.value`, `threshold.range`, or `"type": "volume"`), use `Scene::from_draft_json_str` or `migrate_scene_value`.
