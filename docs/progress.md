@@ -517,3 +517,11 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-008 and D-018).
 - Dependencies added: none.
 - Follow-ups: M6.4 `warp_by_vector` and `calculator` array filters.
+
+## 2026-10-26: M6.4 `warp_by_vector` and `calculator` array filters
+- Done: implemented `warp_by_vector` (`WarpByVectorParams`, `warp_by_vector`, `warp_by_vector_with_chunk_size`, `warp_by_vector_grid`, `warp_unstructured_grid`) in `crates/tetraglass-filters/src/warp.rs` displacing vertex coordinates in `f64` by `scale_factor * vector_field` while preserving connectivity and attributes zero-copy; implemented `calculator` (`CalculatorAssociation`, `CalculatorParams`, `calculator`, `calculator_with_chunk_size`, `evaluate_calculator`, `evaluate_calculator_with_chunk_size`, `calculator_grid`, `calculator_unstructured_grid`) in `crates/tetraglass-filters/src/calculator.rs` with a pure-Rust recursive-descent expression parser and parallel evaluator supporting scalar/vector arithmetic, power (`^`), vector constructors (`[x, y, z]`, `vec(x, y, z)`, `iHat`, `jHat`, `kHat`), coordinates (`x`, `y`, `z`, `coords`), component and tensor selectors (`.x`, `.y`, `.z`, `.xx`, `.xy`, `.magnitude`, `.0`), vector algebra (`mag`, `mag2`, `normalize`, `dot`, `cross`), and math functions (`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `sqrt`, `cbrt`, `abs`, `exp`, `ln`/`log`, `log10`, `log2`, `floor`, `ceil`, `round`, `sign`, `min`, `max`, `pow`, `atan2`, `hypot`, `clamp`, `lerp`); re-exported both filters in `tetraglass` and `tetraglass::prelude`.
+- Tests: integration test suite in `crates/tetraglass-filters/tests/warp_and_calculator.rs` (`warp_by_vector_analytic_dilation_and_shear_on_hex_linear`, `calculator_evaluates_scalars_vectors_tensors_and_cell_expressions`, `warp_and_calculator_work_across_all_testdata_cell_families_and_chain_into_slice_and_contour`, `warp_and_calculator_are_deterministic_across_chunk_sizes_and_handle_empty_views`, `warp_and_calculator_validate_parameters_and_expressions`), doctests on `warp_by_vector` and `calculator`, and umbrella pipeline test in `crates/tetraglass/tests/umbrella_pipeline.rs`.
+- Decisions: none (implemented per D-005, D-008, and D-014).
+- Dependencies added: none.
+- Follow-ups: M6.5 Gate and release 0.3 (`/milestone-gate`).
+

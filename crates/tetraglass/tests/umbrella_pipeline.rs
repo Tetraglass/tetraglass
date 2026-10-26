@@ -148,4 +148,16 @@ fn umbrella_crate_reads_partitioned_pvtu_and_extracts_seamless_surface() {
     let tet_view =
         tetraglass::filters::linearize(&grid, &Default::default()).expect("linearize pvtu");
     assert!((tet_view.total_volume() - 8.0).abs() < 1e-12);
+
+    // Chain `calculator` and `warp_by_vector` via `tetraglass::prelude` (`M6.4`)
+    let with_q = calculator(
+        &tet_view,
+        &CalculatorParams::new("dynamic_q", "0.5 * mag(velocity)^2"),
+    )
+    .expect("compute dynamic_q");
+    assert!(with_q.point_data().get("dynamic_q").is_some());
+
+    let warped = warp_by_vector(&with_q, &WarpByVectorParams::with_scale("velocity", 0.1))
+        .expect("warp_by_vector");
+    assert_eq!(warped.num_points(), 27);
 }

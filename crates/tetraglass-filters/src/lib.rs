@@ -46,6 +46,7 @@
 //! ```
 
 mod basis;
+mod calculator;
 mod clip;
 mod contour;
 mod glyphs;
@@ -57,7 +58,13 @@ mod slice;
 mod streamlines;
 mod surface;
 mod threshold;
+mod warp;
 
+pub use calculator::{
+    CalculatorAssociation, CalculatorParams, DEFAULT_CALCULATOR_CHUNK_SIZE, calculator,
+    calculator_grid, calculator_unstructured_grid, calculator_with_chunk_size, evaluate_calculator,
+    evaluate_calculator_with_chunk_size,
+};
 pub use clip::{ClipKeep, ClipMode, ClipParams, clip, clip_grid, clip_with_chunk_size};
 pub use contour::{
     ContourComponent, ContourParams, contour, contour_grid, contour_with_chunk_size,
@@ -97,4 +104,8 @@ pub use tetraglass_core::{DEFAULT_TUBE_SIDES, PolylineSet, RegularGrid, SurfaceM
 pub use threshold::{
     ThresholdAssociation, ThresholdComponent, ThresholdParams, threshold, threshold_grid,
     threshold_with_chunk_size,
+};
+pub use warp::{
+    DEFAULT_WARP_CHUNK_SIZE, WarpByVectorParams, warp_by_vector, warp_by_vector_grid,
+    warp_by_vector_with_chunk_size, warp_unstructured_grid,
 };

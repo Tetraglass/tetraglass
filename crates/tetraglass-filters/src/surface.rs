@@ -132,6 +132,26 @@ pub enum FilterError {
         /// Human-readable description of why the dimensions are invalid.
         reason: &'static str,
     },
+
+    /// `warp_by_vector` scale factor is non-finite (`NaN` or `±∞`).
+    #[error("warp_by_vector scale factor must be finite, got {scale_factor}")]
+    InvalidWarpScaleFactor {
+        /// Provided scale factor.
+        scale_factor: f64,
+    },
+
+    /// `calculator` result array name is empty or whitespace-only.
+    #[error("calculator result array name must not be empty")]
+    InvalidCalculatorResultName,
+
+    /// `calculator` mathematical expression is syntactically or semantically invalid.
+    #[error("invalid calculator expression `{expression}`: {reason}")]
+    InvalidCalculatorExpression {
+        /// Provided calculator expression string.
+        expression: String,
+        /// Human-readable description of the syntax or type error.
+        reason: String,
+    },
 }
 
 #[inline]

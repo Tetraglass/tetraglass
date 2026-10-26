@@ -94,10 +94,11 @@ pub use tetraglass_io::{
 
 #[cfg(feature = "filters")]
 pub use tetraglass_filters::{
-    ClipParams, ContourParams, FilterError, GlyphParams, LinearizeParams, ResampleParams,
-    SliceParams, StreamlineParams, TetLocator, ThresholdParams, clip, contour,
-    extract_external_surface, glyphs, linearize, linearize_default, resample, slice, streamlines,
-    threshold,
+    CalculatorAssociation, CalculatorParams, ClipParams, ContourParams, FilterError, GlyphParams,
+    LinearizeParams, ResampleParams, SliceParams, StreamlineParams, TetLocator, ThresholdParams,
+    WarpByVectorParams, calculator, calculator_unstructured_grid, clip, contour,
+    evaluate_calculator, extract_external_surface, glyphs, linearize, linearize_default, resample,
+    slice, streamlines, threshold, warp_by_vector, warp_unstructured_grid,
 };
 
 #[cfg(feature = "scene")]
@@ -143,8 +144,10 @@ pub mod prelude {
 
     #[cfg(feature = "filters")]
     pub use crate::{
-        TetLocator, clip, contour, extract_external_surface, glyphs, linearize, linearize_default,
-        resample, slice, streamlines, threshold,
+        CalculatorAssociation, CalculatorParams, TetLocator, WarpByVectorParams, calculator,
+        calculator_unstructured_grid, clip, contour, evaluate_calculator, extract_external_surface,
+        glyphs, linearize, linearize_default, resample, slice, streamlines, threshold,
+        warp_by_vector, warp_unstructured_grid,
     };
 
     #[cfg(feature = "scene")]
