@@ -461,3 +461,10 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-002, D-003, D-015, and `.agents/rules/gpu-rendering.md`).
 - Dependencies added: none.
 - Follow-ups: M5.3a GPU triangle BVH and compute-shader progressive path tracer.
+
+## 2026-10-26: M5.3a GPU triangle BVH and compute-shader progressive path tracer
+- Done: implemented a 12-bucket Surface Area Heuristic (SAH) pre-order flattened linear triangle BVH (`TriangleBvh`, `BvhNode`, `PathTraceTriangle`, `PathTraceMaterial`, `PathTraceInput`) and compute-shader progressive path tracer (`crates/tetraglass-render/src/shaders/path_tracer.wgsl`, `crates/tetraglass-render/src/path_tracer.rs`, `PathTracer`, `PathTraceConfig`, `GpuPathTraceScene`, and `HeadlessContext::{render_surface_path_traced, render_surfaces_path_traced}`) in `tetraglass-render` with ordered near-first BVH stack traversal, Möller–Trumbore intersection, shader clip-plane culling, stochastic alpha pass-through, linear/log10 colormap evaluation (`Viridis`, `Cividis`, `CoolWarm`), soft area-light shadow rays, multi-bounce cosine-weighted diffuse global illumination, R2 sub-pixel anti-aliasing, progressive per-pixel storage-buffer accumulation with automatic reset on camera/viewport/scene changes, and a depth-writing present pass (`fs_pathtrace_present`) that composites wireframe edges (`draw_edges`) and 2D annotations (`colorbar`, `axes`, `title`) on top across all `wgpu` backends including WebGPU.
+- Tests: unit test `triangle_bvh_matches_brute_force_ray_intersections_and_respects_clip_plane` in `crates/tetraglass-render/src/path_tracer.rs` and headless GPU integration test `compute_path_tracer_accumulates_progressively_and_renders_soft_shadows_and_multi_bounce_gi` in `crates/tetraglass-render/tests/render_mixed_linear.rs` (inspected `target/render-tests/path_traced_crinkle_1spp.png` and `path_traced_crinkle_32spp.png` per `/render-check`).
+- Decisions: none (implemented per D-002, D-007, D-010, and D-014).
+- Dependencies added: none.
+- Follow-ups: M5.3b Progressive path tracer in the viewer and CLI.

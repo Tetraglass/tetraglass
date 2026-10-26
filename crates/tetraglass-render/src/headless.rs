@@ -15,8 +15,11 @@ use tetraglass_core::{BoundingBox, SurfaceMesh};
 use crate::annotations::Annotations;
 use crate::camera::Camera;
 use crate::error::RenderError;
+use crate::path_tracer::{PathTraceConfig, PathTraceInput, PathTracer};
 use crate::pick::{PickTarget, SurfacePickResult, probe_surface_triangle};
-use crate::pipeline::{DEFAULT_COLOR_FORMAT, OffscreenTarget, Renderer, SsaoConfig, SurfaceStyle};
+use crate::pipeline::{
+    DEFAULT_COLOR_FORMAT, GpuSurface, OffscreenTarget, Renderer, SsaoConfig, SurfaceStyle,
+};
 use crate::png::{decode_rgba8_png, encode_rgba8_png};
 
 /// Per-channel tolerance for image regression tests (`.agents/rules/testing.md`: `<= 2` of `255`).
@@ -392,6 +395,112 @@ impl HeadlessContext {
             options.background_srgb,
             &[&gpu_surface],
             &options.annotations,
+        )?;
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        self.readback_target(&target)
+    }
+
+    /// Renders `surface` offscreen using the built-in compute-shader [`PathTracer`] (`M5.3a`)
+    /// with `config`, compositing optional wireframe edges and annotations on top, and reads back
+    /// the resulting [`RenderedImage`].
+    pub fn render_surface_path_traced(
+        &self,
+        surface: &SurfaceMesh,
+        options: &HeadlessRenderOptions,
+        config: PathTraceConfig,
+    ) -> Result<RenderedImage, RenderError> {
+        self.render_surfaces_path_traced(
+            &[PathTraceInput::new(surface, &options.style)],
+            options,
+            config,
+        )
+    }
+
+    /// Renders one or more `inputs` offscreen using the built-in compute-shader [`PathTracer`]
+    /// (`M5.3a`) with `config`, compositing wireframe edges and annotations on top, and reads
+    /// back the resulting [`RenderedImage`].
+    pub fn render_surfaces_path_traced(
+        &self,
+        inputs: &[PathTraceInput<'_>],
+        options: &HeadlessRenderOptions,
+        config: PathTraceConfig,
+    ) -> Result<RenderedImage, RenderError> {
+        let renderer = Renderer::new(
+            &self.device,
+            &self.queue,
+            DEFAULT_COLOR_FORMAT,
+            options.sample_count,
+        )?;
+        let mut path_tracer =
+            PathTracer::new(&self.device, DEFAULT_COLOR_FORMAT, options.sample_count)?;
+        path_tracer.set_config(config);
+
+        let target = OffscreenTarget::new(
+            &self.device,
+            options.width,
+            options.height,
+            DEFAULT_COLOR_FORMAT,
+            options.sample_count,
+        )?;
+
+        let mut combined_bounds: Option<BoundingBox> = None;
+        for input in inputs {
+            if let Some(b) = input.surface.bounds() {
+                combined_bounds = Some(match combined_bounds {
+                    Some(prev) => BoundingBox {
+                        min: [
+                            prev.min[0].min(b.min[0]),
+                            prev.min[1].min(b.min[1]),
+                            prev.min[2].min(b.min[2]),
+                        ],
+                        max: [
+                            prev.max[0].max(b.max[0]),
+                            prev.max[1].max(b.max[1]),
+                            prev.max[2].max(b.max[2]),
+                        ],
+                    },
+                    None => b,
+                });
+            }
+        }
+        let bounds = combined_bounds.unwrap_or(BoundingBox {
+            min: [-1.0, -1.0, -1.0],
+            max: [1.0, 1.0, 1.0],
+        });
+        let dataset_center = bounds.center();
+        let camera = options
+            .camera
+            .clone()
+            .unwrap_or_else(|| Camera::fit_bounds(bounds, 30.0, 20.0));
+
+        let pt_scene = path_tracer.upload_surfaces(&self.device, inputs, dataset_center)?;
+
+        let mut gpu_surfaces: Vec<GpuSurface> = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            gpu_surfaces.push(renderer.upload_surface_with_center(
+                &self.device,
+                input.surface,
+                dataset_center,
+                input.style,
+            )?);
+        }
+        let gpu_refs: Vec<&GpuSurface> = gpu_surfaces.iter().collect();
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("tetraglass_headless_pt_encoder"),
+            });
+        path_tracer.render_converged(
+            &self.device,
+            &mut encoder,
+            &self.queue,
+            &target,
+            &pt_scene,
+            &camera,
+            options.background_srgb,
+            Some((&renderer, &gpu_refs, &options.annotations)),
         )?;
         self.queue.submit(std::iter::once(encoder.finish()));
 

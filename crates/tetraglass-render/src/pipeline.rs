@@ -570,6 +570,19 @@ impl OffscreenTarget {
         &self.egui_color_view
     }
 
+    pub(crate) const fn color_attachment_and_resolve(
+        &self,
+    ) -> (&wgpu::TextureView, Option<&wgpu::TextureView>) {
+        match &self.msaa_color_view {
+            Some(msaa_view) => (msaa_view, Some(&self.color_view)),
+            None => (&self.color_view, None),
+        }
+    }
+
+    pub(crate) const fn depth_view(&self) -> &wgpu::TextureView {
+        &self.depth_view
+    }
+
     fn create_attachments(
         device: &wgpu::Device,
         width: u32,
@@ -2829,7 +2842,102 @@ impl Renderer {
         Ok(())
     }
 
-    fn draw_edges_and_annotations<'a>(
+    pub(crate) fn prepare_overlays(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &OffscreenTarget,
+        camera: &Camera,
+        background_srgb: [f32; 4],
+        annotations: &Annotations,
+    ) -> Option<(wgpu::Buffer, wgpu::BindGroup, u32)> {
+        let aspect = (target.width() as f32) / (target.height().max(1) as f32);
+        let view_proj = camera.view_proj_matrix(aspect);
+        let eye = camera.eye_position();
+        let (key_dir, fill_dir) = camera.light_directions();
+        let frame_uniforms = FrameUniforms {
+            view_proj,
+            eye_pos: [eye[0], eye[1], eye[2], 1.0],
+            key_dir: [key_dir[0], key_dir[1], key_dir[2], 0.0],
+            fill_dir: [fill_dir[0], fill_dir[1], fill_dir[2], 0.0],
+        };
+        queue.write_buffer(
+            &self.frame_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&frame_uniforms),
+        );
+
+        if annotations.is_empty() {
+            return None;
+        }
+        let batch = build_annotation_batch(
+            annotations,
+            camera,
+            target.width(),
+            target.height(),
+            background_srgb,
+        );
+        if batch.vertices.is_empty() {
+            return None;
+        }
+        let overlay_uniforms = AnnotationUniforms {
+            viewport_size: [target.width() as f32, target.height() as f32],
+            _pad: [0.0, 0.0],
+        };
+        queue.write_buffer(
+            &self.annotation_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&overlay_uniforms),
+        );
+
+        let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("tetraglass_annotation_vbuf"),
+            contents: bytemuck::cast_slice(&batch.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let atlas_tex = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("tetraglass_annotation_atlas"),
+                size: wgpu::Extent3d {
+                    width: batch.atlas_width,
+                    height: batch.atlas_height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &batch.atlas_r8,
+        );
+        let atlas_view = atlas_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tetraglass_annotation_bg"),
+            layout: &self.annotation_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.annotation_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.annotation_sampler),
+                },
+            ],
+        });
+        Some((vbuf, bg, batch.vertices.len() as u32))
+    }
+
+    pub(crate) fn draw_edges_and_annotations<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
         surfaces: &[&'a GpuSurface],
@@ -3092,14 +3200,14 @@ fn build_surface_uniforms(
     }
 }
 
-struct ExtractedScalars {
-    vertex_scalars: Vec<f32>,
-    cell_scalars: Vec<f32>,
-    data_range: [f64; 2],
-    coloring_mode: u32,
+pub(crate) struct ExtractedScalars {
+    pub(crate) vertex_scalars: Vec<f32>,
+    pub(crate) cell_scalars: Vec<f32>,
+    pub(crate) data_range: [f64; 2],
+    pub(crate) coloring_mode: u32,
 }
 
-fn extract_scalars(
+pub(crate) fn extract_scalars(
     surface: &SurfaceMesh,
     color_by: &ColorBy,
 ) -> Result<ExtractedScalars, RenderError> {
@@ -3210,7 +3318,7 @@ fn format_value_range(r: ValueRange) -> [f64; 2] {
     [r.min, r.max]
 }
 
-fn triangle_normal_f32(p0: [f64; 3], p1: [f64; 3], p2: [f64; 3]) -> [f32; 3] {
+pub(crate) fn triangle_normal_f32(p0: [f64; 3], p1: [f64; 3], p2: [f64; 3]) -> [f32; 3] {
     let ux = p1[0] - p0[0];
     let uy = p1[1] - p0[1];
     let uz = p1[2] - p0[2];
@@ -3228,7 +3336,7 @@ fn triangle_normal_f32(p0: [f64; 3], p1: [f64; 3], p2: [f64; 3]) -> [f32; 3] {
     }
 }
 
-fn srgb_channel_to_linear(c: f32) -> f32 {
+pub(crate) fn srgb_channel_to_linear(c: f32) -> f32 {
     let c = c.clamp(0.0, 1.0);
     if c <= 0.04045 {
         c / 12.92
@@ -3237,7 +3345,7 @@ fn srgb_channel_to_linear(c: f32) -> f32 {
     }
 }
 
-fn srgb_rgba_to_linear_color(rgba: [f32; 4]) -> wgpu::Color {
+pub(crate) fn srgb_rgba_to_linear_color(rgba: [f32; 4]) -> wgpu::Color {
     wgpu::Color {
         r: f64::from(srgb_channel_to_linear(rgba[0])),
         g: f64::from(srgb_channel_to_linear(rgba[1])),

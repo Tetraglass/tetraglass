@@ -101,6 +101,18 @@ impl Camera {
         [p[0] as f32, p[1] as f32, p[2] as f32]
     }
 
+    /// Returns the orthonormal camera basis `(right, up, back)` in `f32`, where `back` points
+    /// from `focal_point` toward the eye (`-back` is the forward viewing direction).
+    #[must_use]
+    pub fn basis(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
+        let (r, u, b) = self.basis_f64();
+        (
+            [r[0] as f32, r[1] as f32, r[2] as f32],
+            [u[0] as f32, u[1] as f32, u[2] as f32],
+            [b[0] as f32, b[1] as f32, b[2] as f32],
+        )
+    }
+
     /// Returns the right-handed column-major 4x4 view matrix.
     #[must_use]
     pub fn view_matrix(&self) -> [[f32; 4]; 4] {

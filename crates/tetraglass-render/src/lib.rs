@@ -82,6 +82,7 @@ pub mod camera;
 pub mod colormap;
 pub mod error;
 pub mod headless;
+pub mod path_tracer;
 pub mod pick;
 pub mod pipeline;
 pub mod png;
@@ -97,6 +98,12 @@ pub use error::{FieldAssociation, RenderError};
 pub use headless::{
     DEFAULT_CHANNEL_TOLERANCE, DEFAULT_MAX_DIFF_FRACTION, HeadlessContext, HeadlessRenderOptions,
     ImageComparison, RenderedImage,
+};
+pub use path_tracer::{
+    BvhNode, DEFAULT_PATH_TRACE_LIGHT_SOFTNESS, DEFAULT_PATH_TRACE_MAX_BOUNCES,
+    DEFAULT_PATH_TRACE_SAMPLES, DEFAULT_PATH_TRACE_SAMPLES_PER_FRAME, GpuPathTraceScene,
+    MAX_BVH_LEAF_TRIANGLES, PathTraceConfig, PathTraceInput, PathTraceMaterial, PathTraceTriangle,
+    PathTracer, TriangleBvh,
 };
 pub use pick::{
     PICK_FORMAT, PendingPixelPick, PickProbeValue, PickTarget, RawPickHit, SurfacePickResult,

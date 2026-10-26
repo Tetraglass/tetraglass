@@ -833,3 +833,184 @@ fn ssao_darkens_concave_crevices_and_leaves_background_and_disabled_renders_inta
         );
     }
 }
+
+#[test]
+fn compute_path_tracer_accumulates_progressively_and_renders_soft_shadows_and_multi_bounce_gi() {
+    use tetraglass_core::{SyntheticCellLayout, SyntheticGridSpec};
+    use tetraglass_filters::{
+        ClipMode, ClipParams, LinearizeParams, clip, extract_tet_view_surface, linearize,
+    };
+    use tetraglass_render::{
+        Annotations, ColorbarAnnotation, DEFAULT_COLOR_FORMAT, OffscreenTarget, PathTraceConfig,
+        PathTracer,
+    };
+
+    let root = workspace_root();
+    let grid = SyntheticGridSpec::new(8, 8, 8, SyntheticCellLayout::Hexahedra)
+        .generate()
+        .expect("generate 8x8x8 hex grid");
+    let tet_view = linearize(&grid, &LinearizeParams::default()).expect("linearize");
+    let crinkle = clip(
+        &tet_view,
+        &ClipParams::with_origin([0.5, 0.5, 0.5], [-1.0, -1.0, -1.0]).mode(ClipMode::Crinkle),
+    )
+    .expect("crinkle clip");
+    let surface = extract_tet_view_surface(&crinkle).expect("extract crinkle surface");
+
+    let bounds = surface.bounds().expect("surface bounds");
+    let camera = Camera::fit_bounds(bounds, 35.0, 28.0);
+    let ctx = HeadlessContext::new().expect("headless context");
+
+    let style = SurfaceStyle {
+        color_by: ColorBy::point("linear"),
+        colormap: ColormapKind::Viridis,
+        draw_edges: true,
+        edge_color_srgb: [0.12, 0.14, 0.18, 1.0],
+        ..SurfaceStyle::default()
+    };
+
+    let opts = HeadlessRenderOptions {
+        width: 480,
+        height: 360,
+        sample_count: 4,
+        background_srgb: [1.0, 1.0, 1.0, 1.0],
+        style: style.clone(),
+        camera: Some(camera.clone()),
+        annotations: Annotations {
+            axes: true,
+            colorbars: vec![
+                ColorbarAnnotation::new(ColormapKind::Viridis, [0.0, 3.0]).with_title("linear"),
+            ],
+            ..Annotations::default()
+        },
+    };
+
+    // 1. Compare 1-bounce direct lighting vs 3-bounce global illumination.
+    let img_1bounce = ctx
+        .render_surface_path_traced(
+            &surface,
+            &opts,
+            PathTraceConfig::new(16).with_max_bounces(1),
+        )
+        .expect("render 1-bounce path trace");
+    let img_3bounce = ctx
+        .render_surface_path_traced(
+            &surface,
+            &opts,
+            PathTraceConfig::new(32).with_max_bounces(3),
+        )
+        .expect("render 3-bounce path trace");
+    let img_1spp = ctx
+        .render_surface_path_traced(&surface, &opts, PathTraceConfig::new(1).with_max_bounces(3))
+        .expect("render 1-spp path trace");
+
+    let out_dir = root.join("target/render-tests");
+    img_1spp
+        .save_png(out_dir.join("path_traced_crinkle_1spp.png"))
+        .expect("save path_traced_crinkle_1spp.png");
+    img_3bounce
+        .save_png(out_dir.join("path_traced_crinkle_32spp.png"))
+        .expect("save path_traced_crinkle_32spp.png");
+
+    // Background top-left corner must remain pure white.
+    assert_eq!(img_3bounce.pixel(4, 4), [255, 255, 255, 255]);
+
+    let total_luma = |img: &RenderedImage| -> u64 {
+        img.as_rgba8()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|px| u64::from(px[0]) + u64::from(px[1]) + u64::from(px[2]))
+            .sum()
+    };
+    let luma_1b = total_luma(&img_1bounce);
+    let luma_3b = total_luma(&img_3bounce);
+    assert!(
+        luma_3b > luma_1b,
+        "multi-bounce indirect global illumination must brighten shadowed crevices compared to 1-bounce direct lighting (luma_3b={luma_3b} vs luma_1b={luma_1b})"
+    );
+
+    // 2. Test progressive accumulation via `PathTracer::step` and automatic reset on camera orbit.
+    let mut pt = PathTracer::new(ctx.device(), DEFAULT_COLOR_FORMAT, 1).expect("create PathTracer");
+    pt.set_config(
+        PathTraceConfig::new(8)
+            .with_samples_per_frame(2)
+            .with_max_bounces(3),
+    );
+    let target = OffscreenTarget::new(ctx.device(), 240, 180, DEFAULT_COLOR_FORMAT, 1)
+        .expect("create 1x target");
+    let style_no_edges = SurfaceStyle {
+        draw_edges: false,
+        ..style
+    };
+    let pt_scene = pt
+        .upload_surface(ctx.device(), &surface, &style_no_edges)
+        .expect("upload path trace scene");
+
+    for expected_samples in [2u32, 4, 6, 8] {
+        let mut encoder = ctx
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let accum = pt
+            .step(
+                ctx.device(),
+                &mut encoder,
+                ctx.queue(),
+                &target,
+                &pt_scene,
+                &camera,
+                [1.0, 1.0, 1.0, 1.0],
+            )
+            .expect("step path tracer");
+        ctx.queue().submit(std::iter::once(encoder.finish()));
+        assert_eq!(accum, expected_samples);
+        assert_eq!(pt.accumulated_samples(), expected_samples);
+    }
+    assert!(pt.is_converged());
+
+    // Calling `step` again after convergence keeps `accumulated_samples == 8`.
+    {
+        let mut encoder = ctx
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let accum = pt
+            .step(
+                ctx.device(),
+                &mut encoder,
+                ctx.queue(),
+                &target,
+                &pt_scene,
+                &camera,
+                [1.0, 1.0, 1.0, 1.0],
+            )
+            .expect("step converged");
+        ctx.queue().submit(std::iter::once(encoder.finish()));
+        assert_eq!(accum, 8);
+    }
+
+    // Orbiting the camera must automatically reset accumulation to `samples_per_frame` (`2`).
+    let mut moved_camera = camera.clone();
+    moved_camera.orbit(15.0, 5.0);
+    {
+        let mut encoder = ctx
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let accum = pt
+            .step(
+                ctx.device(),
+                &mut encoder,
+                ctx.queue(),
+                &target,
+                &pt_scene,
+                &moved_camera,
+                [1.0, 1.0, 1.0, 1.0],
+            )
+            .expect("step after camera orbit");
+        ctx.queue().submit(std::iter::once(encoder.finish()));
+        assert_eq!(
+            accum, 2,
+            "camera movement must reset progressive sample accumulation"
+        );
+        assert!(!pt.is_converged());
+    }
+}
