@@ -15,6 +15,10 @@ Every mesh carries four analytic fields:
 | `vtk/tet_linear.vtu` | 6 linear tetrahedra (VTK type 10, 8 points) partitioning $[0, 1]^3$ in ASCII encoding | `generate/generate_vtk.py` |
 | `vtk/tet_linear_binary.vtu` | Same 6 linear tetrahedra as `tet_linear.vtu` in inline base64 binary encoding | `generate/generate_vtk.py` |
 | `vtk/tet_linear_appended.vtu` | Same 6 linear tetrahedra as `tet_linear.vtu` in zlib-compressed appended binary encoding | `generate/generate_vtk.py` |
+| `vtk/tet_linear_legacy.vtk` | Same 6 linear tetrahedra as `tet_linear.vtu` in legacy VTK 4.2 ASCII (`CELLS 6 30`) encoding | `generate/generate_vtk.py` |
+| `vtk/tet_linear_legacy_binary.vtk` | Same 6 linear tetrahedra as `tet_linear.vtu` in legacy VTK 4.2 big-endian `BINARY` encoding | `generate/generate_vtk.py` |
+| `vtk/tet_linear_v51.vtk` | Same 6 linear tetrahedra as `tet_linear.vtu` in legacy VTK 5.1 ASCII (`OFFSETS`/`CONNECTIVITY`) encoding | `generate/generate_vtk.py` |
+| `vtk/tet_linear_v51_binary.vtk` | Same 6 linear tetrahedra as `tet_linear.vtu` in legacy VTK 5.1 big-endian `BINARY` encoding | `generate/generate_vtk.py` |
 | `vtk/hex_linear.vtu` | $2 \times 2 \times 2$ block of 8 linear hexahedra (VTK type 12, 27 points, 24 outer quad faces) on $[0, 2]^3$ | `generate/generate_vtk.py` |
 | `vtk/mixed_linear.vtu` | 1 hex (12), 1 wedge (13), 1 pyramid (14) and 1 tet (10) sharing 4 internal faces (11 points, volume $2.0$) | `generate/generate_vtk.py` |
 | `vtk/tet_quadratic.vtu` | 6 quadratic 10-node tetrahedra (VTK type 24, 27 points) on $[0, 1]^3$ | `generate/generate_vtk.py` |

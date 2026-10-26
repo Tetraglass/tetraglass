@@ -68,6 +68,42 @@ fn required_vtk_files_exist_and_contain_standard_fields() {
     assert!(pvd.contains("file=\"series_0.vtu\""));
     assert!(pvd.contains("file=\"series_1.vtu\""));
     assert!(pvd.contains("file=\"series_2.vtu\""));
+
+    let legacy_vtk_files = [
+        (
+            "tet_linear_legacy.vtk",
+            b"# vtk DataFile Version 4.2".as_slice(),
+        ),
+        (
+            "tet_linear_legacy_binary.vtk",
+            b"# vtk DataFile Version 4.2".as_slice(),
+        ),
+        (
+            "tet_linear_v51.vtk",
+            b"# vtk DataFile Version 5.1".as_slice(),
+        ),
+        (
+            "tet_linear_v51_binary.vtk",
+            b"# vtk DataFile Version 5.1".as_slice(),
+        ),
+    ];
+    for (name, header) in legacy_vtk_files {
+        let path = vtk_dir.join(name);
+        let bytes = fs::read(&path).unwrap_or_else(|e| panic!("missing {}: {e}", path.display()));
+        assert!(!bytes.is_empty(), "{} is empty", path.display());
+        assert!(
+            (bytes.len() as u64) < MAX_TESTDATA_BYTES,
+            "{} exceeds 1 MB ({} bytes)",
+            path.display(),
+            bytes.len()
+        );
+        assert!(
+            bytes.starts_with(header),
+            "{} missing expected header {:?}",
+            path.display(),
+            String::from_utf8_lossy(header)
+        );
+    }
 }
 
 #[test]

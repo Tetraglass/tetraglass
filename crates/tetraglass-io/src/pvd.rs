@@ -26,7 +26,8 @@ use tetraglass_core::{StepLoader, TimeSeries, UnstructuredGrid};
 
 use crate::error::IoError;
 use crate::{
-    MeshFormat, detect_format_from_bytes, detect_format_from_extension, read_msh, read_vtu,
+    MeshFormat, detect_format_from_bytes, detect_format_from_extension, read_msh, read_vtk,
+    read_vtu,
 };
 
 /// A single `<DataSet>` entry inside a ParaView `.pvd` `<Collection>`.
@@ -223,6 +224,7 @@ fn parse_step_mesh_bytes(file_name: &str, bytes: &[u8]) -> Result<UnstructuredGr
 
     match format {
         MeshFormat::Vtu => read_vtu(bytes),
+        MeshFormat::VtkLegacy => read_vtk(bytes),
         MeshFormat::Gmsh => read_msh(bytes),
         other => Err(IoError::InvalidPvdStructure {
             offset: 0,

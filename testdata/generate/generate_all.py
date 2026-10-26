@@ -59,6 +59,34 @@ def verify_vtu(path: Path, expected_points: int, expected_cells: int, extra_arra
         )
 
 
+def verify_vtk_legacy(path: Path, expected_points: int, expected_cells: int) -> None:
+    assert path.exists(), f"Missing {path}"
+    assert path.stat().st_size < MAX_FILE_BYTES, f"{path} exceeds 1 MB"
+
+    reader = vtk.vtkUnstructuredGridReader()
+    reader.SetFileName(str(path))
+    reader.ReadAllScalarsOn()
+    reader.ReadAllVectorsOn()
+    reader.ReadAllFieldsOn()
+    reader.Update()
+    ugrid = reader.GetOutput()
+
+    assert ugrid.GetNumberOfPoints() == expected_points, (
+        f"{path.name}: expected {expected_points} points, got {ugrid.GetNumberOfPoints()}"
+    )
+    assert ugrid.GetNumberOfCells() == expected_cells, (
+        f"{path.name}: expected {expected_cells} cells, got {ugrid.GetNumberOfCells()}"
+    )
+    pd = ugrid.GetPointData()
+    for name, ncomp in (("linear", 1), ("radius", 1), ("velocity", 3)):
+        arr = pd.GetArray(name)
+        assert arr is not None, f"{path.name}: missing point array '{name}'"
+        assert arr.GetNumberOfComponents() == ncomp
+    cd = ugrid.GetCellData()
+    cell_id = cd.GetArray("cell_id")
+    assert cell_id is not None and cell_id.GetNumberOfComponents() == 1
+
+
 def verify_msh(path: Path, expected_nodes: int, expected_cells: int) -> None:
     assert path.exists(), f"Missing {path}"
     assert path.stat().st_size < MAX_FILE_BYTES, f"{path} exceeds 1 MB"
@@ -101,6 +129,10 @@ def main() -> None:
     verify_vtu(vtk_dir / "tet_linear.vtu", expected_points=8, expected_cells=6)
     verify_vtu(vtk_dir / "tet_linear_binary.vtu", expected_points=8, expected_cells=6)
     verify_vtu(vtk_dir / "tet_linear_appended.vtu", expected_points=8, expected_cells=6)
+    verify_vtk_legacy(vtk_dir / "tet_linear_legacy.vtk", expected_points=8, expected_cells=6)
+    verify_vtk_legacy(vtk_dir / "tet_linear_legacy_binary.vtk", expected_points=8, expected_cells=6)
+    verify_vtk_legacy(vtk_dir / "tet_linear_v51.vtk", expected_points=8, expected_cells=6)
+    verify_vtk_legacy(vtk_dir / "tet_linear_v51_binary.vtk", expected_points=8, expected_cells=6)
     verify_vtu(vtk_dir / "hex_linear.vtu", expected_points=27, expected_cells=8)
     verify_vtu(vtk_dir / "mixed_linear.vtu", expected_points=11, expected_cells=4)
     verify_vtu(vtk_dir / "tet_quadratic.vtu", expected_points=27, expected_cells=6)

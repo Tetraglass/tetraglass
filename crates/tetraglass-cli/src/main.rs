@@ -24,7 +24,7 @@ use tetraglass_export::{
 };
 use tetraglass_io::{
     IoError, MeshFormat, detect_format_from_bytes, detect_format_from_extension, read_msh_series,
-    read_pvd_series_with_loader, read_vtu_series,
+    read_pvd_series_with_loader, read_vtk_series, read_vtu_series,
 };
 use tetraglass_render::{
     Annotations, Camera, ColorBy, ColorbarAnnotation, ColorbarPlacement, ColormapKind,
@@ -1627,6 +1627,12 @@ fn load_series_from_path(
             })?;
             Ok((format, series))
         }
+        MeshFormat::VtkLegacy => {
+            let series = read_vtk_series(bytes).map_err(|e| {
+                CliFailure::Message(format!("failed to parse `{}`: {e}", path.display()))
+            })?;
+            Ok((format, series))
+        }
         MeshFormat::Gmsh => {
             let series = read_msh_series(bytes).map_err(|e| {
                 CliFailure::Message(format!("failed to parse `{}`: {e}", path.display()))
@@ -1647,11 +1653,6 @@ fn load_series_from_path(
             })?;
             Ok((format, series))
         }
-        other => Err(CliFailure::Message(format!(
-            "format `{}` is not yet supported in this milestone (`{}`)",
-            mesh_format_label(other),
-            path.display()
-        ))),
     }
 }
 

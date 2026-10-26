@@ -13,6 +13,15 @@
 //!   - Cell types: linear (`1, 3, 5, 9, 10, 12, 13, 14`), quadratic (`21..=27`), arbitrary-order
 //!     Lagrange (`68..=73`), and polyhedra (`42`, supporting both classic `faces`/`faceoffsets`
 //!     and VTK 9.4+ `face_connectivity`/`face_offsets`/`polyhedron_to_faces`/`polyhedron_offsets`).
+//! - **Legacy VTK DataFile (`.vtk`):** [`read_vtk`], [`read_vtk_series`] (and
+//!   [`read_vtk_from_path`] on native targets).
+//!   - Versions: Legacy VTK `1.0` through `5.1` (`DATASET UNSTRUCTURED_GRID`), both `ASCII`
+//!     and big-endian `BINARY` encodings.
+//!   - Cell layouts: classic VTK 2.0–4.2 `CELLS n size` and VTK 5.0–5.1 `OFFSETS` + `CONNECTIVITY`.
+//!   - Cell types: linear (`1, 3, 5, 9, 10, 12, 13, 14`), quadratic (`21..=27`), arbitrary-order
+//!     Lagrange (`68..=73`), and polyhedra (`42`, inline `CELLS` face streams and `FACES`/`FACE_LOCATIONS`).
+//!   - Attributes: `POINT_DATA` and `CELL_DATA` (`SCALARS`, `VECTORS`, `NORMALS`, `TENSORS`,
+//!     `TENSORS6`, `TEXTURE_COORDINATES`, and `FIELD` data tables).
 //! - **ParaView XML data collection (`.pvd`):** [`parse_pvd_entries`],
 //!   [`read_pvd_series_with_loader`] (and [`read_pvd_series_from_path`], [`read_pvd_from_path`]
 //!   on native targets) producing a lazy [`tetraglass_core::TimeSeries`].
@@ -55,6 +64,7 @@ use tetraglass_core::{StepLoader, TimeSeries};
 mod error;
 mod msh;
 mod pvd;
+mod vtk;
 mod vtu;
 mod vtu_codec;
 
@@ -66,6 +76,9 @@ pub use pvd::{PvdEntry, parse_pvd_entries, read_pvd_series_with_loader};
 #[cfg(not(target_arch = "wasm32"))]
 pub use pvd::{read_pvd_from_path, read_pvd_series_from_path};
 #[cfg(not(target_arch = "wasm32"))]
+pub use vtk::read_vtk_from_path;
+pub use vtk::{read_vtk, read_vtk_series};
+#[cfg(not(target_arch = "wasm32"))]
 pub use vtu::read_vtu_from_path;
 pub use vtu::{read_vtu, write_vtu, write_vtu_to_bytes};
 
@@ -76,7 +89,7 @@ pub fn read_vtu_series(bytes: impl Into<Arc<[u8]>>) -> Result<TimeSeries<IoError
     Ok(TimeSeries::from_boxed_steps(vec![(0.0, loader)])?)
 }
 
-/// Opens a `.vtu`, `.pvd`, or `.msh` file from a native path as a lazy [`TimeSeries<IoError>`].
+/// Opens a `.vtu`, `.vtk`, `.pvd`, or `.msh` file from a native path as a lazy [`TimeSeries<IoError>`].
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_series_from_path(
     path: impl AsRef<Path>,
@@ -98,6 +111,7 @@ pub fn read_series_from_path(
 
     match format {
         MeshFormat::Vtu => Ok((format, read_vtu_series(bytes)?)),
+        MeshFormat::VtkLegacy => Ok((format, read_vtk_series(bytes)?)),
         MeshFormat::Gmsh => Ok((format, read_msh_series(bytes)?)),
         MeshFormat::Pvd => {
             let base_dir = path
@@ -115,10 +129,6 @@ pub fn read_series_from_path(
             })?;
             Ok((format, series))
         }
-        MeshFormat::VtkLegacy => Err(IoError::UnsupportedFeature {
-            offset: 0,
-            feature: "legacy .vtk format".to_string(),
-        }),
     }
 }
 

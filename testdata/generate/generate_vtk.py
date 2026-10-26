@@ -164,6 +164,27 @@ def write_vtu(
         raise RuntimeError(f"Failed to write {path}")
 
 
+def write_vtk_legacy(
+    ugrid: vtk.vtkUnstructuredGrid,
+    path: Path,
+    mode: str = "ascii",
+    file_version: int = 42,
+) -> None:
+    writer = vtk.vtkUnstructuredGridWriter()
+    writer.SetFileName(str(path))
+    writer.SetInputData(ugrid)
+    writer.SetFileVersion(file_version)
+    if mode == "ascii":
+        writer.SetFileTypeToASCII()
+    elif mode == "binary":
+        writer.SetFileTypeToBinary()
+    else:
+        raise ValueError(f"Unsupported legacy VTK mode: {mode}")
+
+    if writer.Write() != 1:
+        raise RuntimeError(f"Failed to write {path}")
+
+
 def build_tet_linear(time_value: float | None = None) -> vtk.vtkUnstructuredGrid:
     cells = [(vtk.VTK_TETRA, list(tet)) for tet in KUHN_TETS]
     return make_ugrid(CUBE_POINTS, cells, time_value=time_value)
@@ -432,6 +453,14 @@ def main() -> None:
     write_vtu(tet_linear, VTK_DIR / "tet_linear.vtu", mode="ascii")
     write_vtu(tet_linear, VTK_DIR / "tet_linear_binary.vtu", mode="binary", compress=False)
     write_vtu(tet_linear, VTK_DIR / "tet_linear_appended.vtu", mode="appended", compress=True)
+    write_vtk_legacy(tet_linear, VTK_DIR / "tet_linear_legacy.vtk", mode="ascii", file_version=42)
+    write_vtk_legacy(
+        tet_linear, VTK_DIR / "tet_linear_legacy_binary.vtk", mode="binary", file_version=42
+    )
+    write_vtk_legacy(tet_linear, VTK_DIR / "tet_linear_v51.vtk", mode="ascii", file_version=51)
+    write_vtk_legacy(
+        tet_linear, VTK_DIR / "tet_linear_v51_binary.vtk", mode="binary", file_version=51
+    )
 
     write_vtu(build_hex_linear(), VTK_DIR / "hex_linear.vtu", mode="ascii")
     write_vtu(build_mixed_linear(), VTK_DIR / "mixed_linear.vtu", mode="ascii")

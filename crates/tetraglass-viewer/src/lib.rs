@@ -29,7 +29,7 @@ use tetraglass_egui::{
 use tetraglass_filters::{ClipParams, clip, extract_tet_view_surface};
 use tetraglass_io::{
     IoError, MeshFormat, detect_format_from_bytes, detect_format_from_extension, read_msh_series,
-    read_pvd_series_with_loader, read_vtu_series,
+    read_pvd_series_with_loader, read_vtk_series, read_vtu_series,
 };
 use tetraglass_render::{
     Annotations, ColorbarAnnotation, ColorbarPlacement, DEFAULT_COLORBAR_TICKS, PickProbeValue,
@@ -3195,6 +3195,7 @@ fn load_series_from_bytes(
 
     match format {
         MeshFormat::Vtu => Ok((format, read_vtu_series(bytes)?)),
+        MeshFormat::VtkLegacy => Ok((format, read_vtk_series(bytes)?)),
         MeshFormat::Gmsh => Ok((format, read_msh_series(bytes)?)),
         MeshFormat::Pvd => {
             let base_dir = path
@@ -3207,10 +3208,6 @@ fn load_series_from_bytes(
             })?;
             Ok((format, series))
         }
-        other => Err(ViewerError::MeshIo(IoError::UnsupportedFeature {
-            offset: 0,
-            feature: format!("format `{other:?}` not yet supported"),
-        })),
     }
 }
 
@@ -3368,6 +3365,7 @@ fn load_series_from_store(
 
     match format {
         MeshFormat::Vtu => Ok((format, read_vtu_series(bytes)?)),
+        MeshFormat::VtkLegacy => Ok((format, read_vtk_series(bytes)?)),
         MeshFormat::Gmsh => Ok((format, read_msh_series(bytes)?)),
         MeshFormat::Pvd => {
             let store_clone = store.clone();
@@ -3400,10 +3398,6 @@ fn load_series_from_store(
             })?;
             Ok((format, series))
         }
-        other => Err(ViewerError::MeshIo(IoError::UnsupportedFeature {
-            offset: 0,
-            feature: format!("format `{other:?}` not yet supported"),
-        })),
     }
 }
 

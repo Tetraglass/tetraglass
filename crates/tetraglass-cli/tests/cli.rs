@@ -1064,3 +1064,91 @@ fn render_command_exports_animation_png_sequence_via_raster_and_cycles() {
     assert!(out_dir.join("cycles_frame_0001.png").is_file());
     assert!(out_dir.join("cycles_frame_0002.png").is_file());
 }
+
+#[test]
+fn inspect_validate_and_render_legacy_vtk_files() {
+    let root = workspace_root();
+    let out_dir = root.join("target/cli-vtk-legacy-tests");
+    let _ = std::fs::remove_dir_all(&out_dir);
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    for vtk_file in ["tet_linear_legacy.vtk", "tet_linear_legacy_binary.vtk"] {
+        let vtk_path = root.join("testdata/vtk").join(vtk_file);
+        let inspect_out = tetraglass_bin()
+            .arg("inspect")
+            .arg(&vtk_path)
+            .arg("--json")
+            .output()
+            .expect("run `tetraglass inspect --json` on .vtk");
+        assert!(
+            inspect_out.status.success(),
+            "inspect failed on {}: {}",
+            vtk_path.display(),
+            String::from_utf8_lossy(&inspect_out.stderr)
+        );
+        let summary: serde_json::Value =
+            serde_json::from_slice(&inspect_out.stdout).expect("parse inspect JSON");
+        assert_eq!(summary["format"], "vtk");
+        assert_eq!(summary["num_points"], 8);
+        assert_eq!(summary["num_cells"], 6);
+        assert_eq!(summary["cell_types"]["tetra"], 6);
+        assert_eq!(summary["point_arrays"].as_array().unwrap().len(), 3);
+        assert_eq!(summary["cell_arrays"].as_array().unwrap().len(), 1);
+    }
+
+    let scene_path = out_dir.join("legacy_vtk_scene.json");
+    let png_path = out_dir.join("legacy_vtk.png");
+    let vtk_abs = root.join("testdata/vtk/tet_linear_legacy_binary.vtk");
+    let scene_json = serde_json::json!({
+        "version": 1,
+        "sources": {
+            "mesh": {
+                "file": vtk_abs.display().to_string(),
+                "format": "vtk"
+            }
+        },
+        "view": {
+            "show": [
+                {
+                    "input": "mesh",
+                    "color_by": "linear",
+                    "colormap": "viridis"
+                }
+            ]
+        },
+        "output": {
+            "image": png_path.display().to_string(),
+            "size": [320, 240]
+        }
+    });
+    std::fs::write(
+        &scene_path,
+        serde_json::to_string_pretty(&scene_json).unwrap(),
+    )
+    .unwrap();
+
+    let val_out = tetraglass_bin()
+        .arg("validate")
+        .arg(&scene_path)
+        .output()
+        .expect("validate legacy .vtk scene");
+    assert!(
+        val_out.status.success(),
+        "validate failed: {}",
+        String::from_utf8_lossy(&val_out.stderr)
+    );
+
+    let render_out = tetraglass_bin()
+        .arg("render")
+        .arg(&scene_path)
+        .output()
+        .expect("render legacy .vtk scene");
+    assert!(
+        render_out.status.success(),
+        "render failed: {}",
+        String::from_utf8_lossy(&render_out.stderr)
+    );
+    let img = RenderedImage::load_png(&png_path).expect("load rendered PNG");
+    assert_eq!(img.width(), 320);
+    assert_eq!(img.height(), 240);
+}
