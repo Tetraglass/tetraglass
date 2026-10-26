@@ -60,6 +60,7 @@ pub use types::{
     RangeSpec, RenderEngine, Representation, RepresentationStyle, SCENE_VERSION, Scene, Source,
     SourceFormat, StreamlineDirectionSpec, StreamlineIntegratorSpec, StreamlineLineSeedSpec,
     StreamlinePlaneSeedSpec, StreamlineSeedsSpec, TimePreset, TimeSelector, TimeStepIndex, View,
+    format_frame_filename,
 };
 pub use validate::{
     ArrayMetadata, DatasetMetadata, ValidationIssue, ValidationReport, closest_match,
@@ -889,5 +890,42 @@ mod tests {
             scene.view.show[0].transfer_function,
             Some(vec![[0.0, 0.0], [0.5, 0.25], [1.0, 0.9]])
         );
+    }
+
+    #[test]
+    fn frames_config_resolves_step_ranges_and_formats_patterns() {
+        let times = [0.0, 0.25, 0.5, 0.75, 1.0];
+
+        let all = FramesConfig::all("frame_%04d.png");
+        let resolved_all = all.resolve_step_range(&times).expect("all steps");
+        assert_eq!(
+            resolved_all,
+            vec![(0, 0.0), (1, 0.25), (2, 0.5), (3, 0.75), (4, 1.0)]
+        );
+
+        let sub = FramesConfig::new(TimeSelector::step(1), TimeSelector::step(3), "step_%d.png");
+        let resolved_sub = sub.resolve_step_range(&times).expect("step subrange");
+        assert_eq!(resolved_sub, vec![(1, 0.25), (2, 0.5), (3, 0.75)]);
+
+        let by_time = FramesConfig::new(
+            TimeSelector::Value(0.24),
+            TimeSelector::Value(0.76),
+            "out_{step}.png",
+        );
+        let resolved_time = by_time.resolve_step_range(&times).expect("time subrange");
+        assert_eq!(resolved_time, vec![(1, 0.25), (2, 0.5), (3, 0.75)]);
+
+        let inverted =
+            FramesConfig::new(TimeSelector::step(3), TimeSelector::step(1), "frame_%d.png");
+        assert!(inverted.resolve_step_range(&times).is_err());
+
+        assert_eq!(format_frame_filename("frame_%04d.png", 7), "frame_0007.png");
+        assert_eq!(format_frame_filename("step_%d.png", 12), "step_12.png");
+        assert_eq!(format_frame_filename("out_{step}.png", 3), "out_3.png");
+        assert_eq!(
+            format_frame_filename("out_{frame:04d}.png", 3),
+            "out_0003.png"
+        );
+        assert_eq!(format_frame_filename("render.png", 5), "render_0005.png");
     }
 }

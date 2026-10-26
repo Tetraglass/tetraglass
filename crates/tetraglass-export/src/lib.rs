@@ -38,7 +38,7 @@ pub use bundle::{
     BundleColormap, BundleLights, BundleManifest, BundleMaterialHints, BundleMeshData,
     BundleMeshFileRef, BundleObject, BundleTimeStep, TGBIN_FLAGS_DEFAULT, TGBIN_HEADER_BYTES,
     TGBIN_MAGIC, TGBIN_VERSION, decode_tgbin, encode_tgbin, export_evaluated_scene_to_bundle,
-    export_scene_to_bundle,
+    export_evaluated_steps_to_bundle, export_scene_to_bundle,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use bundle::{

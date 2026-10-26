@@ -424,3 +424,10 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-002, D-004, D-008, D-015, and `.agents/rules/gpu-rendering.md`).
 - Dependencies added: none.
 - Follow-ups: M4.5 Animation export (PNG sequences from the rasterizer and frame ranges through Cycles).
+
+## 2026-10-26: M4.5 Animation export
+- Done: added `FramesConfig::{new, all, resolve_step_range, format_filename}`, `format_frame_filename` (`printf`-style `%04d` / `%d`, `{step}` / `{frame}` / `{step:04d}`, and plain filename fallback), semantic validation of `output.frames` (`from`, `to`, `start_step <= end_step`) against loaded time-series metadata, and `SceneEvaluator::{available_time_steps, resolve_frame_steps}` in `tetraglass-scene`; exposed `export_evaluated_steps_to_bundle` in `tetraglass-export`; updated `blender/importer.py` and `blender/render.py` to keyframe arbitrary step subsets (`manifest["time_steps"]`) and support `--from-step <n>` and `--to-step <n>` alongside `--all-steps`; extended `tetraglass render` in `tetraglass-cli` to render PNG sequences from `output.frames` or CLI flags `--all-steps`, `--from-step <n>`, and `--to-step <n>` in both `"raster"` and `"cycles"` modes with `RenderFrameSummary` entries in `RenderSummary::frames`; updated `docs/scene-format.md` and `docs/book/src/scene-format.md`.
+- Tests: unit test `frames_config_resolves_step_ranges_and_formats_patterns` in `tetraglass-scene`, validation test `validates_output_frames_against_time_series_metadata` in `crates/tetraglass-scene/tests/validation.rs`, and CLI integration test `render_command_exports_animation_png_sequence_via_raster_and_cycles` (covering rasterizer full-series `output.frames`, rasterizer `--from-step` / `--to-step` subrange, and Cycles `--engine cycles --from-step 1 --to-step 2`) in `crates/tetraglass-cli/tests/cli.rs`.
+- Decisions: none (implemented per D-004, D-011, and `docs/scene-format.md`).
+- Dependencies added: none.
+- Follow-ups: M4.6 Schema freeze (Scene schema v1 final, migration tests from earlier drafts).

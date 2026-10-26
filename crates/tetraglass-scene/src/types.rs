@@ -1350,6 +1350,136 @@ pub struct FramesConfig {
     pub pattern: String,
 }
 
+impl FramesConfig {
+    /// Creates a [`FramesConfig`] spanning `from..=to` with output filename `pattern`.
+    #[must_use]
+    pub fn new(from: TimeSelector, to: TimeSelector, pattern: impl Into<String>) -> Self {
+        Self {
+            from,
+            to,
+            pattern: pattern.into(),
+        }
+    }
+
+    /// Creates a [`FramesConfig`] spanning all time steps (`"first"` to `"last"`) with `pattern`.
+    #[must_use]
+    pub fn all(pattern: impl Into<String>) -> Self {
+        Self::new(TimeSelector::FIRST, TimeSelector::LAST, pattern)
+    }
+
+    /// Resolves `[from, to]` against `times`, returning the inclusive sequence of
+    /// `(step_index, time_value)` pairs.
+    pub fn resolve_step_range(&self, times: &[f64]) -> Result<Vec<(usize, f64)>, String> {
+        let (start_step, start_time) = self
+            .from
+            .resolve_step(times)
+            .map_err(|e| format!("invalid `from` selector: {e}"))?;
+        let (end_step, end_time) = self
+            .to
+            .resolve_step(times)
+            .map_err(|e| format!("invalid `to` selector: {e}"))?;
+        if start_step > end_step {
+            return Err(format!(
+                "frame range start step ({start_step}, t = {start_time}) is after end step ({end_step}, t = {end_time})"
+            ));
+        }
+        Ok((start_step..=end_step).map(|i| (i, times[i])).collect())
+    }
+
+    /// Formats `self.pattern` for `step_index` using [`format_frame_filename`].
+    #[must_use]
+    pub fn format_filename(&self, step_index: usize) -> String {
+        format_frame_filename(&self.pattern, step_index)
+    }
+}
+
+/// Formats an animation frame filename pattern for `step_index` (`M4.5`).
+///
+/// Supports:
+/// - `printf`-style integer specifiers such as `"frame_%04d.png"`, `"step_%3d.png"`, or `"out_%d.png"`;
+/// - `"{step}"` or `"{frame}"` placeholders;
+/// - plain filenames (such as `"out.png"`), inserting `_{step_index:04}` before the extension.
+#[must_use]
+pub fn format_frame_filename(pattern: &str, step_index: usize) -> String {
+    if let Some(formatted) = try_format_printf_int_pattern(pattern, step_index) {
+        return formatted;
+    }
+    if pattern.contains("{step") || pattern.contains("{frame") {
+        return pattern
+            .replace("{step:04d}", &format!("{step_index:04}"))
+            .replace("{frame:04d}", &format!("{step_index:04}"))
+            .replace("{step}", &step_index.to_string())
+            .replace("{frame}", &step_index.to_string());
+    }
+    let last_sep = pattern.rfind(['/', '\\']);
+    let file_part_start = last_sep.map_or(0, |idx| idx + 1);
+    let file_part = &pattern[file_part_start..];
+    if let Some(dot_rel) = file_part.rfind('.')
+        && dot_rel > 0
+    {
+        let dot_idx = file_part_start + dot_rel;
+        format!(
+            "{}_{step_index:04}{}",
+            &pattern[..dot_idx],
+            &pattern[dot_idx..]
+        )
+    } else {
+        format!("{pattern}_{step_index:04}.png")
+    }
+}
+
+fn try_format_printf_int_pattern(pattern: &str, step_index: usize) -> Option<String> {
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    let mut out = String::with_capacity(pattern.len() + 8);
+    let mut matched = false;
+
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 1 < bytes.len() && bytes[i + 1] == b'%' {
+                out.push('%');
+                i += 2;
+                continue;
+            }
+            if !matched {
+                let mut j = i + 1;
+                let zero_pad = j < bytes.len() && bytes[j] == b'0';
+                if zero_pad {
+                    j += 1;
+                }
+                let width_start = j;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'd' {
+                    let width: usize = if j > width_start {
+                        pattern[width_start..j].parse().unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    if width > 0 {
+                        if zero_pad {
+                            out.push_str(&format!("{step_index:0>width$}"));
+                        } else {
+                            out.push_str(&format!("{step_index:>width$}"));
+                        }
+                    } else {
+                        out.push_str(&step_index.to_string());
+                    }
+                    matched = true;
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        let ch = pattern[i..].chars().next()?;
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+
+    matched.then_some(out)
+}
+
 /// Rendering engine backend (`output.engine`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

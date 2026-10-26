@@ -960,23 +960,85 @@ fn validate_impl(
                     Some("use a pattern such as \"frame_%04d.png\"".to_string()),
                 ));
             }
-            if let TimeSelector::Value(t) = frames.from
-                && !t.is_finite()
+            let from_finite = match frames.from {
+                TimeSelector::Value(t) if !t.is_finite() => {
+                    issues.push(ValidationIssue::new(
+                        "output.frames.from",
+                        "frame start time must be a finite number",
+                        None,
+                    ));
+                    false
+                }
+                _ => true,
+            };
+            let to_finite = match frames.to {
+                TimeSelector::Value(t) if !t.is_finite() => {
+                    issues.push(ValidationIssue::new(
+                        "output.frames.to",
+                        "frame end time must be a finite number",
+                        None,
+                    ));
+                    false
+                }
+                _ => true,
+            };
+
+            if from_finite
+                && to_finite
+                && let Some(loaded) = loaded_sources
             {
-                issues.push(ValidationIssue::new(
-                    "output.frames.from",
-                    "frame start time must be a finite number",
-                    None,
-                ));
-            }
-            if let TimeSelector::Value(t) = frames.to
-                && !t.is_finite()
-            {
-                issues.push(ValidationIssue::new(
-                    "output.frames.to",
-                    "frame end time must be a finite number",
-                    None,
-                ));
+                for (src_name, meta) in loaded {
+                    if !scene.sources.contains_key(src_name) || meta.time_steps.is_empty() {
+                        continue;
+                    }
+                    let suggestion = || {
+                        Some(format!(
+                            "use \"first\", \"last\", a step in 0..={}, or a time in [{}, {}]",
+                            meta.time_steps.len().saturating_sub(1),
+                            meta.time_steps.first().copied().unwrap_or(0.0),
+                            meta.time_steps.last().copied().unwrap_or(0.0)
+                        ))
+                    };
+                    let start_res = frames.from.resolve_step(&meta.time_steps);
+                    if let Err(err_msg) = &start_res {
+                        let path = match frames.from {
+                            TimeSelector::Step(_) => "output.frames.from.step",
+                            _ => "output.frames.from",
+                        };
+                        issues.push(ValidationIssue::new(
+                            path,
+                            format!("on source \"{src_name}\": {err_msg}"),
+                            suggestion(),
+                        ));
+                    }
+                    let end_res = frames.to.resolve_step(&meta.time_steps);
+                    if let Err(err_msg) = &end_res {
+                        let path = match frames.to {
+                            TimeSelector::Step(_) => "output.frames.to.step",
+                            _ => "output.frames.to",
+                        };
+                        issues.push(ValidationIssue::new(
+                            path,
+                            format!("on source \"{src_name}\": {err_msg}"),
+                            suggestion(),
+                        ));
+                    }
+                    if let (Ok((start_step, _)), Ok((end_step, _))) = (start_res, end_res)
+                        && start_step > end_step
+                    {
+                        issues.push(ValidationIssue::new(
+                            "output.frames",
+                            format!(
+                                "on source \"{src_name}\": frame start step {start_step} is after frame end step {end_step}"
+                            ),
+                            Some(
+                                "ensure `output.frames.from` resolves to a step <= `output.frames.to`"
+                                    .to_string(),
+                            ),
+                        ));
+                    }
+                    break;
+                }
             }
         }
 

@@ -19,7 +19,7 @@ use tetraglass_core::{
 };
 use tetraglass_egui as _;
 use tetraglass_export::{
-    export_evaluated_scene_to_bundle, write_bundle_dir, write_scene_bundle_output,
+    export_evaluated_steps_to_bundle, write_bundle_dir, write_scene_bundle_output,
     write_scene_glb_output,
 };
 use tetraglass_io::{
@@ -34,9 +34,9 @@ use tetraglass_render::{
 use tetraglass_scene::{
     ArrayAssociation, BackgroundSpec, ColorbarSpec, ColormapName, DEFAULT_CYCLES_SAMPLES,
     DEFAULT_MSAA_SAMPLES, DEFAULT_OUTPUT_SIZE, DatasetMetadata, EvaluatedColoring,
-    EvaluatedRepresentation, EvaluatedScene, RenderEngine, RepresentationStyle, ResolvedComponent,
-    Scene, SceneEvaluator, ValidationIssue, ValidationReport, scene_json_schema_string,
-    validate_scene_with_metadata,
+    EvaluatedRepresentation, EvaluatedScene, FramesConfig, RenderEngine, RepresentationStyle,
+    ResolvedComponent, Scene, SceneEvaluator, TimeSelector, ValidationIssue, ValidationReport,
+    format_frame_filename, scene_json_schema_string, validate_scene_with_metadata,
 };
 use tetraglass_viewer::{ViewerOptions, run_viewer};
 
@@ -105,7 +105,7 @@ fn help_text() -> String {
         "tetraglass {}\n\n\
          Usage:\n  \
          tetraglass inspect <file> [--json]\n  \
-         tetraglass render <scene.json> [-o <out.png>] [--engine <raster|cycles>] [--samples <n>] [--device <dev>] [--save-blend <path.blend>]\n  \
+         tetraglass render <scene.json> [-o <out.png>] [--engine <raster|cycles>] [--samples <n>] [--device <dev>] [--save-blend <path.blend>] [--all-steps] [--from-step <n>] [--to-step <n>]\n  \
          tetraglass validate <scene.json> [--json]\n  \
          tetraglass view <scene.json|mesh> [--frames <n>]\n  \
          tetraglass export <scene.json> -o <out.glb|dir> [--format <gltf|bundle>] [--all-steps]\n  \
@@ -614,6 +614,13 @@ struct RenderCameraSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct RenderFrameSummary {
+    step: usize,
+    time: f64,
+    image: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct RenderSummary {
     image: String,
     size: [u32; 2],
@@ -621,6 +628,8 @@ struct RenderSummary {
     engine: RenderEngine,
     time_step: usize,
     time: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frames: Option<Vec<RenderFrameSummary>>,
     representations: Vec<RenderRepresentationSummary>,
     camera: RenderCameraSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -654,6 +663,9 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
     let mut blender_path_override: Option<&str> = None;
     let mut blender_scripts_override: Option<&str> = None;
     let mut timeout_secs: u64 = DEFAULT_CYCLES_TIMEOUT_SECS;
+    let mut all_steps_flag = false;
+    let mut from_step_override: Option<usize> = None;
+    let mut to_step_override: Option<usize> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -662,8 +674,8 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
                 return Ok(
                     "Usage: tetraglass render <scene.json> [-o <out.png>] [--engine <raster|cycles>] \
                      [--samples <n>] [--device <auto|cpu|gpu|metal|optix|cuda|hip>] \
-                     [--save-blend <path.blend>] [--blender-path <bin>] [--blender-scripts <dir>] \
-                     [--timeout <secs>]"
+                     [--save-blend <path.blend>] [--all-steps] [--from-step <n>] [--to-step <n>] \
+                     [--blender-path <bin>] [--blender-scripts <dir>] [--timeout <secs>]"
                         .to_string(),
                 );
             }
@@ -675,6 +687,33 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
                     ));
                 };
                 output_override = Some(val.as_str());
+            }
+            "--all-steps" => {
+                all_steps_flag = true;
+            }
+            "--from-step" => {
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    return Err(CliFailure::Message(
+                        "missing step index after `--from-step`".to_string(),
+                    ));
+                };
+                let parsed = val.parse::<usize>().map_err(|_| {
+                    CliFailure::Message(format!("invalid `--from-step` value `{val}`"))
+                })?;
+                from_step_override = Some(parsed);
+            }
+            "--to-step" => {
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    return Err(CliFailure::Message(
+                        "missing step index after `--to-step`".to_string(),
+                    ));
+                };
+                let parsed = val.parse::<usize>().map_err(|_| {
+                    CliFailure::Message(format!("invalid `--to-step` value `{val}`"))
+                })?;
+                to_step_override = Some(parsed);
             }
             "--engine" => {
                 i += 1;
@@ -798,9 +837,17 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
 
     let base_dir = scene_path.parent().unwrap_or_else(|| Path::new("."));
 
-    // Determine output path, dimensions, MSAA, and engine.
+    let scene_frames = scene.output.as_ref().and_then(|o| o.frames.as_ref());
+    let is_animation = all_steps_flag
+        || from_step_override.is_some()
+        || to_step_override.is_some()
+        || scene_frames.is_some();
+
+    // Determine output path (or pattern path for animation), dimensions, MSAA, and engine.
     let output_path: PathBuf = if let Some(override_str) = output_override {
         PathBuf::from(override_str)
+    } else if is_animation && let Some(sf) = scene_frames {
+        resolve_relative_path(base_dir, &sf.pattern)
     } else if let Some(out_cfg) = &scene.output {
         resolve_relative_path(base_dir, &out_cfg.image)
     } else {
@@ -833,11 +880,70 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
         evaluator.insert_series_source(name.clone(), series);
     }
 
-    let evaluated = evaluator
-        .evaluate_scene(&scene)
-        .map_err(|e| CliFailure::Message(e.to_string()))?;
+    let (evaluated_steps, frame_paths, frame_range) = if is_animation {
+        let from_sel = if let Some(s) = from_step_override {
+            TimeSelector::step(s)
+        } else if all_steps_flag {
+            TimeSelector::FIRST
+        } else if let Some(sf) = scene_frames {
+            sf.from
+        } else {
+            TimeSelector::FIRST
+        };
+        let to_sel = if let Some(s) = to_step_override {
+            TimeSelector::step(s)
+        } else if all_steps_flag {
+            TimeSelector::LAST
+        } else if let Some(sf) = scene_frames {
+            sf.to
+        } else {
+            TimeSelector::LAST
+        };
+        let frames_cfg =
+            FramesConfig::new(from_sel, to_sel, output_path.to_string_lossy().into_owned());
+        let resolved_steps = evaluator
+            .resolve_frame_steps(&scene, &frames_cfg)
+            .map_err(|e| CliFailure::Message(e.to_string()))?;
+        let first_step = resolved_steps.first().map_or(0, |(s, _)| *s);
+        let last_step = resolved_steps.last().map_or(0, |(s, _)| *s);
 
-    let bounds = evaluated.camera_bounds.unwrap_or(BoundingBox {
+        let mut evs = Vec::with_capacity(resolved_steps.len());
+        let mut paths = Vec::with_capacity(resolved_steps.len());
+        for (step_idx, _) in resolved_steps {
+            let ev = evaluator
+                .evaluate_scene_at_time(&scene, TimeSelector::step(step_idx))
+                .map_err(|e| CliFailure::Message(e.to_string()))?;
+            let path = PathBuf::from(format_frame_filename(&frames_cfg.pattern, ev.time_step));
+            evs.push(ev);
+            paths.push(path);
+        }
+        (evs, paths, Some((first_step, last_step)))
+    } else {
+        let ev = evaluator
+            .evaluate_scene(&scene)
+            .map_err(|e| CliFailure::Message(e.to_string()))?;
+        (vec![ev], vec![output_path.clone()], None)
+    };
+
+    let evaluated = evaluated_steps
+        .first()
+        .expect("at least one evaluated step");
+    let combined_bounds = evaluated_steps
+        .iter()
+        .filter_map(|ev| ev.camera_bounds)
+        .reduce(|a, b| BoundingBox {
+            min: [
+                a.min[0].min(b.min[0]),
+                a.min[1].min(b.min[1]),
+                a.min[2].min(b.min[2]),
+            ],
+            max: [
+                a.max[0].max(b.max[0]),
+                a.max[1].max(b.max[1]),
+                a.max[2].max(b.max[2]),
+            ],
+        });
+    let bounds = combined_bounds.unwrap_or(BoundingBox {
         min: [-1.0, -1.0, -1.0],
         max: [1.0, 1.0, 1.0],
     });
@@ -862,9 +968,11 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
 
         Some(run_cycles_render(
             &scene,
-            &evaluated,
+            &evaluated_steps,
             base_dir,
             &output_path,
+            frame_range,
+            &frame_paths,
             size,
             samples,
             &device,
@@ -885,38 +993,50 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
                 .map_err(|e| CliFailure::Message(e.to_string()))?;
 
         let dataset_center = bounds.center();
-        let mut gpu_surfaces: Vec<GpuSurface> = Vec::with_capacity(evaluated.representations.len());
-        for rep in &evaluated.representations {
-            let style = build_surface_style(rep);
-            let gpu_surf = renderer
-                .upload_surface_with_center(ctx.device(), &rep.surface, dataset_center, &style)
+        for (ev, frame_path) in evaluated_steps.iter().zip(&frame_paths) {
+            let mut gpu_surfaces: Vec<GpuSurface> = Vec::with_capacity(ev.representations.len());
+            for rep in &ev.representations {
+                let style = build_surface_style(rep);
+                let gpu_surf = renderer
+                    .upload_surface_with_center(ctx.device(), &rep.surface, dataset_center, &style)
+                    .map_err(|e| CliFailure::Message(e.to_string()))?;
+                gpu_surfaces.push(gpu_surf);
+            }
+
+            let gpu_refs: Vec<&GpuSurface> = gpu_surfaces.iter().collect();
+            let annotations = build_annotations_from_scene(&scene, ev);
+            let mut encoder = ctx.device().create_command_encoder(&Default::default());
+            renderer
+                .render_with_annotations(
+                    ctx.device(),
+                    &mut encoder,
+                    ctx.queue(),
+                    &target,
+                    &camera,
+                    background_srgb,
+                    &gpu_refs,
+                    &annotations,
+                )
                 .map_err(|e| CliFailure::Message(e.to_string()))?;
-            gpu_surfaces.push(gpu_surf);
+            ctx.queue().submit(std::iter::once(encoder.finish()));
+
+            let image = ctx
+                .readback_target(&target)
+                .map_err(|e| CliFailure::Message(e.to_string()))?;
+            if let Some(parent) = frame_path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    CliFailure::Message(format!(
+                        "cannot create output directory `{}`: {e}",
+                        parent.display()
+                    ))
+                })?;
+            }
+            image
+                .save_png(frame_path)
+                .map_err(|e| CliFailure::Message(e.to_string()))?;
         }
-
-        let gpu_refs: Vec<&GpuSurface> = gpu_surfaces.iter().collect();
-        let annotations = build_annotations_from_scene(&scene, &evaluated);
-        let mut encoder = ctx.device().create_command_encoder(&Default::default());
-        renderer
-            .render_with_annotations(
-                ctx.device(),
-                &mut encoder,
-                ctx.queue(),
-                &target,
-                &camera,
-                background_srgb,
-                &gpu_refs,
-                &annotations,
-            )
-            .map_err(|e| CliFailure::Message(e.to_string()))?;
-        ctx.queue().submit(std::iter::once(encoder.finish()));
-
-        let image = ctx
-            .readback_target(&target)
-            .map_err(|e| CliFailure::Message(e.to_string()))?;
-        image
-            .save_png(&output_path)
-            .map_err(|e| CliFailure::Message(e.to_string()))?;
         None
     };
 
@@ -941,17 +1061,36 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
         })
         .collect();
 
+    let frames_summary = is_animation.then(|| {
+        evaluated_steps
+            .iter()
+            .zip(&frame_paths)
+            .map(|(ev, p)| RenderFrameSummary {
+                step: ev.time_step,
+                time: ev.time_value,
+                image: p.display().to_string(),
+            })
+            .collect()
+    });
+
+    let primary_image = frame_paths
+        .first()
+        .unwrap_or(&output_path)
+        .display()
+        .to_string();
+
     let summary = RenderSummary {
-        image: output_path.display().to_string(),
+        image: primary_image,
         size,
         msaa,
         engine,
         time_step: evaluated.time_step,
         time: evaluated.time_value,
+        frames: frames_summary,
         representations: rep_summaries,
         camera: RenderCameraSummary {
             fit: scene.view.camera.fit.clone(),
-            bounds: evaluated.camera_bounds.map(|b| InspectBounds {
+            bounds: combined_bounds.map(|b| InspectBounds {
                 min: b.min,
                 max: b.max,
             }),
@@ -973,9 +1112,11 @@ fn cmd_render(args: &[String]) -> Result<String, CliFailure> {
 #[allow(clippy::too_many_arguments)] // Reason: CLI render entrypoint passes resolved scene, output, device, and runtime paths directly
 fn run_cycles_render(
     scene: &Scene,
-    evaluated: &EvaluatedScene,
+    evaluated_steps: &[EvaluatedScene],
     scene_base_dir: &Path,
     output_path: &Path,
+    frame_range: Option<(usize, usize)>,
+    expected_outputs: &[PathBuf],
     size: [u32; 2],
     samples: u32,
     device: &str,
@@ -987,7 +1128,7 @@ fn run_cycles_render(
     let (blender_bin, probed_version) = discover_blender_binary(explicit_blender_path)?;
     let render_script = discover_blender_render_script(explicit_scripts_dir, scene_base_dir)?;
 
-    let archive = export_evaluated_scene_to_bundle(scene, evaluated)
+    let archive = export_evaluated_steps_to_bundle(scene, evaluated_steps)
         .map_err(|e| CliFailure::Message(format!("bundle export failed: {e}")))?;
 
     let nonce = CYCLES_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1006,16 +1147,18 @@ fn run_cycles_render(
         ))
     })?;
 
-    if let Some(parent) = output_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            let _ = std::fs::remove_dir_all(&temp_bundle_dir);
-            CliFailure::Message(format!(
-                "cannot create output directory `{}`: {e}",
-                parent.display()
-            ))
-        })?;
+    for out_file in expected_outputs {
+        if let Some(parent) = out_file.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                let _ = std::fs::remove_dir_all(&temp_bundle_dir);
+                CliFailure::Message(format!(
+                    "cannot create output directory `{}`: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
     }
 
     let mut cmd = Command::new(&blender_bin);
@@ -1038,6 +1181,13 @@ fn run_cycles_render(
         .arg(size[1].to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    if let Some((from_step, to_step)) = frame_range {
+        cmd.arg("--from-step")
+            .arg(from_step.to_string())
+            .arg("--to-step")
+            .arg(to_step.to_string());
+    }
 
     if let Some(blend_path) = save_blend_path {
         cmd.arg("--save-blend").arg(blend_path);
@@ -1129,12 +1279,14 @@ fn run_cycles_render(
         )));
     }
 
-    if !output_path.is_file() {
-        let tail = Vec::from(recent_lines).join("\n");
-        return Err(CliFailure::Message(format!(
-            "Blender finished with exit code 0, but output image `{}` was not created.\nLast output lines:\n{tail}",
-            output_path.display()
-        )));
+    for expected in expected_outputs {
+        if !expected.is_file() {
+            let tail = Vec::from(recent_lines).join("\n");
+            return Err(CliFailure::Message(format!(
+                "Blender finished with exit code 0, but output image `{}` was not created.\nLast output lines:\n{tail}",
+                expected.display()
+            )));
+        }
     }
 
     Ok(CyclesRunResult {

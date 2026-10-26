@@ -85,6 +85,18 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Render every time step in the bundle.",
     )
     parser.add_argument(
+        "--from-step",
+        type=int,
+        default=None,
+        help="Inclusive start time-step index to render.",
+    )
+    parser.add_argument(
+        "--to-step",
+        type=int,
+        default=None,
+        help="Inclusive end time-step index to render.",
+    )
+    parser.add_argument(
         "--width",
         type=int,
         default=None,
@@ -225,25 +237,47 @@ def run_headless_render(argv: list[str] | None = None) -> dict[str, Any]:
 
     rendered_files: list[str] = []
     try:
-        if args.all_steps:
-            steps_to_render = list(range(num_steps))
+        available_steps = [
+            int(s) for s in summary.get("steps", list(range(num_steps)))
+        ] or [0]
+        is_range_request = (
+            args.all_steps or args.from_step is not None or args.to_step is not None
+        )
+        if is_range_request:
+            lo = (
+                min(available_steps)
+                if args.from_step is None
+                else int(args.from_step)
+            )
+            hi = (
+                max(available_steps)
+                if args.to_step is None
+                else int(args.to_step)
+            )
+            steps_to_render = [s for s in available_steps if lo <= s <= hi]
+            if not steps_to_render:
+                steps_to_render = [available_steps[0]]
         else:
-            chosen_step = 0 if args.step is None else max(0, min(num_steps - 1, int(args.step)))
-            steps_to_render = [chosen_step]
+            if args.step is None:
+                steps_to_render = [available_steps[0]]
+            elif int(args.step) in available_steps:
+                steps_to_render = [int(args.step)]
+            else:
+                clamped_idx = max(0, min(len(available_steps) - 1, int(args.step)))
+                steps_to_render = [available_steps[clamped_idx]]
 
         total_frames = len(steps_to_render)
         for idx, step_idx in enumerate(steps_to_render):
             out_path = format_frame_output_path(
-                args.out, step_idx, all_steps=args.all_steps and num_steps > 1
+                args.out, step_idx, all_steps=is_range_request
             )
             out_path.parent.mkdir(parents=True, exist_ok=True)
             scene.frame_set(step_idx)
-            if num_steps > 1:
-                for obj in scene.objects:
-                    if "tetraglass_step" in obj:
-                        hidden = int(obj["tetraglass_step"]) != step_idx
-                        obj.hide_render = hidden
-                        obj.hide_viewport = hidden
+            for obj in scene.objects:
+                if "tetraglass_step" in obj:
+                    hidden = int(obj["tetraglass_step"]) != step_idx
+                    obj.hide_render = hidden
+                    obj.hide_viewport = hidden
             scene.render.filepath = str(out_path)
 
             emit_progress(

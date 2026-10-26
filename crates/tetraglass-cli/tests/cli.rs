@@ -484,6 +484,7 @@ fn gallery_scenes_and_author_scene_skill_example_validate_and_match_baselines() 
         "threshold",
         "streamlines",
         "glyphs",
+        "volume",
     ];
 
     let mut failures = Vec::new();
@@ -693,6 +694,7 @@ fn mdbook_guide_and_gallery_cover_all_filters_and_chapters_exist() {
         "threshold",
         "streamlines",
         "glyphs",
+        "resample",
     ] {
         assert!(
             seen_filter_types.contains(expected_filter),
@@ -899,4 +901,166 @@ fn render_cycles_command_discovers_blender_streams_progress_saves_blend_and_prin
     let rendered = RenderedImage::load_png(&cycles_png).expect("load Cycles rendered PNG");
     assert_eq!(rendered.width(), 800);
     assert_eq!(rendered.height(), 600);
+}
+
+#[test]
+fn render_command_exports_animation_png_sequence_via_raster_and_cycles() {
+    let root = workspace_root();
+    let out_dir = root.join("target/cli-anim-tests");
+    let _ = std::fs::remove_dir_all(&out_dir);
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let pvd_abs = root.join("testdata/vtk/series.pvd");
+    let scene_path = out_dir.join("anim_scene.json");
+    let scene_json = serde_json::json!({
+        "version": 1,
+        "sources": {
+            "flow": { "file": pvd_abs.display().to_string() }
+        },
+        "view": {
+            "show": [
+                {
+                    "input": "flow",
+                    "color_by": "transient",
+                    "colormap": "viridis",
+                    "range": "auto_all_steps",
+                    "colorbar": true
+                }
+            ],
+            "camera": { "fit": "all", "azimuth": 35.0, "elevation": 25.0 },
+            "background": "white"
+        },
+        "output": {
+            "image": "anim.png",
+            "size": [320, 240],
+            "frames": {
+                "from": "first",
+                "to": "last",
+                "pattern": "raster_frame_%04d.png"
+            }
+        }
+    });
+    std::fs::write(
+        &scene_path,
+        serde_json::to_string_pretty(&scene_json).unwrap(),
+    )
+    .unwrap();
+
+    // 1. Render all steps configured via `output.frames` in the scene JSON.
+    let raster_all_out = tetraglass_bin()
+        .arg("render")
+        .arg(&scene_path)
+        .output()
+        .expect("run `tetraglass render` on animation scene");
+    assert!(
+        raster_all_out.status.success(),
+        "raster animation render failed: {}",
+        String::from_utf8_lossy(&raster_all_out.stderr)
+    );
+    let summary_all: serde_json::Value =
+        serde_json::from_slice(&raster_all_out.stdout).expect("parse animation render summary");
+    let frames = summary_all["frames"]
+        .as_array()
+        .expect("expected `frames` array in summary");
+    assert_eq!(frames.len(), 3);
+    assert_eq!(frames[0]["step"], 0);
+    assert_eq!(frames[0]["time"], 0.0);
+    assert_eq!(frames[1]["step"], 1);
+    assert_eq!(frames[1]["time"], 0.5);
+    assert_eq!(frames[2]["step"], 2);
+    assert_eq!(frames[2]["time"], 1.0);
+
+    let f0 = out_dir.join("raster_frame_0000.png");
+    let f1 = out_dir.join("raster_frame_0001.png");
+    let f2 = out_dir.join("raster_frame_0002.png");
+    assert!(f0.is_file() && f1.is_file() && f2.is_file());
+    let img0 = RenderedImage::load_png(&f0).expect("load frame 0");
+    let img2 = RenderedImage::load_png(&f2).expect("load frame 2");
+    assert_eq!(img0.width(), 320);
+    assert_eq!(img0.height(), 240);
+    assert_ne!(
+        img0.as_rgba8(),
+        img2.as_rgba8(),
+        "frame 0 and frame 2 should have distinct scalar coloring"
+    );
+
+    // 2. Render a step subrange (`1..=2`) via CLI flags `--from-step` / `--to-step` and `-o`.
+    let sub_pattern = out_dir.join("sub_%04d.png");
+    let raster_sub_out = tetraglass_bin()
+        .arg("render")
+        .arg(&scene_path)
+        .arg("--from-step")
+        .arg("1")
+        .arg("--to-step")
+        .arg("2")
+        .arg("-o")
+        .arg(&sub_pattern)
+        .output()
+        .expect("run `tetraglass render --from-step 1 --to-step 2`");
+    assert!(
+        raster_sub_out.status.success(),
+        "raster subrange animation render failed: {}",
+        String::from_utf8_lossy(&raster_sub_out.stderr)
+    );
+    let summary_sub: serde_json::Value =
+        serde_json::from_slice(&raster_sub_out.stdout).expect("parse subrange summary");
+    let sub_frames = summary_sub["frames"].as_array().unwrap();
+    assert_eq!(sub_frames.len(), 2);
+    assert_eq!(sub_frames[0]["step"], 1);
+    assert_eq!(sub_frames[1]["step"], 2);
+    assert!(!out_dir.join("sub_0000.png").exists());
+    assert!(out_dir.join("sub_0001.png").is_file());
+    assert!(out_dir.join("sub_0002.png").is_file());
+
+    // 3. If Blender is available, test Cycles frame-range rendering (`--engine cycles --from-step 1 --to-step 2`).
+    let candidate_bins = [
+        std::env::var("TETRAGLASS_BLENDER_PATH").ok(),
+        std::env::var("BLENDER_PATH").ok(),
+        Some("blender".to_string()),
+        Some("/opt/homebrew/bin/blender".to_string()),
+        Some("/Applications/Blender.app/Contents/MacOS/Blender".to_string()),
+    ];
+    let has_blender = candidate_bins.into_iter().flatten().any(|bin| {
+        Command::new(bin)
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| out.status.success())
+    });
+    if !has_blender {
+        return;
+    }
+
+    let cycles_pattern = out_dir.join("cycles_frame_%04d.png");
+    let cycles_out = tetraglass_bin()
+        .arg("render")
+        .arg(&scene_path)
+        .arg("--engine")
+        .arg("cycles")
+        .arg("--samples")
+        .arg("2")
+        .arg("--device")
+        .arg("cpu")
+        .arg("--from-step")
+        .arg("1")
+        .arg("--to-step")
+        .arg("2")
+        .arg("-o")
+        .arg(&cycles_pattern)
+        .output()
+        .expect("run Cycles animation subrange render");
+    assert!(
+        cycles_out.status.success(),
+        "Cycles animation render failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&cycles_out.stdout),
+        String::from_utf8_lossy(&cycles_out.stderr)
+    );
+    let cycles_summary: serde_json::Value =
+        serde_json::from_slice(&cycles_out.stdout).expect("parse Cycles animation summary");
+    let cycles_frames = cycles_summary["frames"].as_array().unwrap();
+    assert_eq!(cycles_frames.len(), 2);
+    assert_eq!(cycles_frames[0]["step"], 1);
+    assert_eq!(cycles_frames[1]["step"], 2);
+    assert!(!out_dir.join("cycles_frame_0000.png").exists());
+    assert!(out_dir.join("cycles_frame_0001.png").is_file());
+    assert!(out_dir.join("cycles_frame_0002.png").is_file());
 }

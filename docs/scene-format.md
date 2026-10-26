@@ -130,7 +130,7 @@ A string `"<array>"` or `"<array>:<component>"`.
 | `image` | required | PNG path relative to the scene file; the CLI's `-o` overrides it. |
 | `size` | `[1200, 800]` | Pixels. |
 | `time` | `"first"` | `"first"`, `"last"`, a time value, or `{ "step": n }`. |
-| `frames` | none | Animation (M4): `{ "from": ..., "to": ..., "pattern": "frame_%04d.png" }`. |
+| `frames` | none | Animation (M4): `{ "from": ..., "to": ..., "pattern": "frame_%04d.png" }`. Supports `printf`-style integer patterns (`%04d`, `%d`), `{step}` / `{frame}`, or plain filenames; CLI flags `--all-steps`, `--from-step <n>`, and `--to-step <n>` override the step range for both `"raster"` and `"cycles"`. |
 | `msaa` | `4` | Sample count; fixed in gallery scenes. |
 | `engine` | `"raster"` | `"raster"` or `"cycles"` (M3); the CLI's `--engine` overrides it. |
 | `cycles` | none | `{ "samples": 128, "device": "auto", "save_blend": "scene.blend" }` (M3). |

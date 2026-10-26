@@ -27,8 +27,8 @@ use tetraglass_io::IoError;
 
 use crate::{
     ArrayAssociation, ClipKeep, ClipMode, ColorbarSpec, ColormapName, DatasetMetadata, Filter,
-    GlyphScaleBySpec, GlyphScalePreset, GlyphShapeSpec, ParsedArrayRef, RangePreset, RangeSpec,
-    Representation, RepresentationStyle, ResolvedComponent, Scene, SceneError,
+    FramesConfig, GlyphScaleBySpec, GlyphScalePreset, GlyphShapeSpec, ParsedArrayRef, RangePreset,
+    RangeSpec, Representation, RepresentationStyle, ResolvedComponent, Scene, SceneError,
     StreamlineDirectionSpec, StreamlineIntegratorSpec, StreamlineSeedsSpec, TimeSelector,
     ValidationIssue, ValidationReport, validate_scene_with_metadata,
 };
@@ -639,6 +639,49 @@ impl SceneEvaluator {
     #[must_use]
     pub fn series_source(&self, name: &str) -> Option<&TimeSeries<IoError>> {
         self.series_sources.get(name)
+    }
+
+    /// Returns the simulation time values `[t_0, t_1, ...]` of the first time-series source
+    /// referenced by `scene`, or `[0.0]` for static single-step scenes (`M4.5`).
+    #[must_use]
+    pub fn available_time_steps(&self, scene: &Scene) -> Vec<f64> {
+        for src_name in scene.sources.keys() {
+            if let Some(series) = self.series_sources.get(src_name)
+                && !series.times().is_empty()
+            {
+                return series.times().to_vec();
+            }
+            if let Some(loaded) = self.sources.get(src_name)
+                && !loaded.metadata.time_steps.is_empty()
+            {
+                return loaded.metadata.time_steps.clone();
+            }
+        }
+        vec![0.0]
+    }
+
+    /// Resolves the inclusive sequence of `(step_index, time_value)` pairs selected by `frames`
+    /// against `scene`'s time-series sources (`M4.5`).
+    pub fn resolve_frame_steps(
+        &self,
+        scene: &Scene,
+        frames: &FramesConfig,
+    ) -> Result<Vec<(usize, f64)>, SceneError> {
+        let times = self.available_time_steps(scene);
+        frames.resolve_step_range(&times).map_err(|err_msg| {
+            SceneError::Validation(ValidationReport {
+                issues: vec![ValidationIssue::new(
+                    "output.frames",
+                    err_msg,
+                    Some(format!(
+                        "use \"first\", \"last\", a step in 0..={}, or a time in [{}, {}]",
+                        times.len().saturating_sub(1),
+                        times.first().copied().unwrap_or(0.0),
+                        times.last().copied().unwrap_or(0.0)
+                    )),
+                )],
+            })
+        })
     }
 
     fn insert_shared_source_with_time_steps(

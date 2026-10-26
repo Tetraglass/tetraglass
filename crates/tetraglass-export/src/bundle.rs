@@ -484,6 +484,15 @@ pub fn export_evaluated_scene_to_bundle(
     build_bundle_from_evaluated_steps(scene, std::slice::from_ref(evaluated))
 }
 
+/// Exports a sequence of pre-evaluated [`EvaluatedScene`] steps into an in-memory
+/// [`BundleArchive`] (`M4.5`).
+pub fn export_evaluated_steps_to_bundle(
+    scene: &Scene,
+    evaluated_steps: &[EvaluatedScene],
+) -> Result<BundleArchive, ExportError> {
+    build_bundle_from_evaluated_steps(scene, evaluated_steps)
+}
+
 /// Evaluates `scene` across time steps using `evaluator` and exports all requested steps into an
 /// in-memory [`BundleArchive`] (`M3.5`).
 ///

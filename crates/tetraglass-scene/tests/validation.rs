@@ -878,3 +878,60 @@ fn validates_resample_dimensions_volume_style_and_transfer_function() {
     assert!(!by_path.contains_key("view.show[3].color_by"));
     assert!(!by_path.contains_key("view.show[3].transfer_function"));
 }
+
+#[test]
+fn validates_output_frames_against_time_series_metadata() {
+    let grid = read_vtu_from_path(testdata_vtu("mixed_linear.vtu")).expect("load mixed_linear.vtu");
+    let mut meta_map = BTreeMap::new();
+    meta_map.insert(
+        "series".to_string(),
+        DatasetMetadata::from_grid(&grid).with_time_steps(vec![0.0, 0.25, 0.5, 0.75]),
+    );
+
+    let out_of_bounds_scene = Scene::from_json_str(
+        r#"{
+            "version": 1,
+            "sources": { "series": { "file": "series.pvd" } },
+            "view": { "show": [{ "input": "series" }] },
+            "output": {
+                "image": "out.png",
+                "frames": {
+                    "from": { "step": 1 },
+                    "to": { "step": 9 },
+                    "pattern": "frame_%04d.png"
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+    let report = out_of_bounds_scene
+        .validate_with_metadata(&meta_map)
+        .expect_err("step 9 must be out of range");
+    assert_eq!(report.issues()[0].path, "output.frames.to.step");
+
+    let inverted_scene = Scene::from_json_str(
+        r#"{
+            "version": 1,
+            "sources": { "series": { "file": "series.pvd" } },
+            "view": { "show": [{ "input": "series" }] },
+            "output": {
+                "image": "out.png",
+                "frames": {
+                    "from": { "step": 3 },
+                    "to": { "step": 1 },
+                    "pattern": "frame_%04d.png"
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+    let report_inv = inverted_scene
+        .validate_with_metadata(&meta_map)
+        .expect_err("from > to must be rejected");
+    assert_eq!(report_inv.issues()[0].path, "output.frames");
+    assert!(
+        report_inv.issues()[0]
+            .message
+            .contains("frame start step 3 is after frame end step 1")
+    );
+}

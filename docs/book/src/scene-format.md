@@ -72,6 +72,10 @@ Coding agents and scripts can go from an unfamiliar mesh file to a verified figu
    ```sh
    tetraglass render scene.json -o slice.png
    ```
+   For transient time-series datasets (`.pvd` or multi-step `.msh`), export a PNG animation sequence across all steps or a step subrange using `output.frames` (`{ "from": "first", "to": "last", "pattern": "frame_%04d.png" }`) or CLI flags (`--all-steps`, `--from-step <n>`, `--to-step <n>`), with either `--engine raster` or `--engine cycles`:
+   ```sh
+   tetraglass render series-scene.json --from-step 0 --to-step 10 -o frame_%04d.png
+   ```
 
 ## 2. Array reference syntax (`color_by` and filter `field`)
 

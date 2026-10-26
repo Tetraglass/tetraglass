@@ -598,18 +598,18 @@ def _create_blender_edge_object(
 
 
 def _keyframe_step_visibility(
-    objs: list[Any], active_step: int, num_steps: int
+    objs: list[Any], active_step: int, step_values: list[int]
 ) -> None:
-    if num_steps <= 1:
+    if len(step_values) <= 1:
         return
-    for step_idx in range(num_steps):
+    for step_idx in step_values:
         hidden = step_idx != active_step
         for obj in objs:
             obj.hide_viewport = hidden
             obj.hide_render = hidden
             obj.keyframe_insert(data_path="hide_viewport", frame=step_idx)
             obj.keyframe_insert(data_path="hide_render", frame=step_idx)
-    initial_hidden = active_step != 0
+    initial_hidden = active_step != step_values[0]
     for obj in objs:
         obj.hide_viewport = initial_hidden
         obj.hide_render = initial_hidden
@@ -656,10 +656,11 @@ def import_bundle(
     light_objs = _configure_lights(collection, manifest.get("lights", {}))
 
     time_steps = manifest.get("time_steps", [{"step": 0, "time": None}])
-    num_steps = max(1, len(time_steps))
-    scene.frame_start = 0
-    scene.frame_end = num_steps - 1
-    scene.frame_set(0)
+    step_values = [int(ts.get("step", i)) for i, ts in enumerate(time_steps)] or [0]
+    num_steps = len(step_values)
+    scene.frame_start = min(step_values)
+    scene.frame_end = max(step_values)
+    scene.frame_set(step_values[0])
 
     # Estimate characteristic length from camera clip range for wireframe edge thickness
     cam_spec = manifest.get("camera", {})
@@ -719,12 +720,15 @@ def import_bundle(
 
             for created_obj in step_objs:
                 created_obj["tetraglass_step"] = step_idx
-            _keyframe_step_visibility(step_objs, active_step=step_idx, num_steps=num_steps)
+            _keyframe_step_visibility(
+                step_objs, active_step=step_idx, step_values=step_values
+            )
 
-    scene.frame_set(0)
+    scene.frame_set(step_values[0])
     return {
         "bundle_dir": str(bundle_dir),
         "num_steps": num_steps,
+        "steps": step_values,
         "objects": imported_objects,
         "camera": camera_obj.name,
         "lights": [l.name for l in light_objs],
