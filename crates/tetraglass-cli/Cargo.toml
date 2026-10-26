@@ -13,6 +13,7 @@ publish.workspace = true
 [[bin]]
 name = "tetraglass"
 path = "src/main.rs"
+doc = false
 
 [lints]
 workspace = true

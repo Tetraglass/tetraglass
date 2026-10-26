@@ -1,0 +1,35 @@
+[package]
+name = "tetraglass"
+description = "Rust-native scientific visualization toolkit for FEM/CFD results on unstructured meshes."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/tetraglass"
+readme = "../../README.md"
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["io", "filters", "scene", "export", "render", "egui"]
+io = ["dep:tetraglass-io"]
+filters = ["dep:tetraglass-filters"]
+scene = ["io", "filters", "dep:tetraglass-scene"]
+export = ["scene", "dep:tetraglass-export"]
+render = ["dep:tetraglass-render"]
+egui = ["render", "dep:tetraglass-egui"]
+viewer = ["egui", "scene", "dep:tetraglass-viewer"]
+full = ["io", "filters", "scene", "export", "render", "egui", "viewer"]
+
+[dependencies]
+tetraglass-core.workspace = true
+tetraglass-egui = { workspace = true, optional = true }
+tetraglass-export = { workspace = true, optional = true }
+tetraglass-filters = { workspace = true, optional = true }
+tetraglass-io = { workspace = true, optional = true }
+tetraglass-render = { workspace = true, optional = true }
+tetraglass-scene = { workspace = true, optional = true }
+tetraglass-viewer = { workspace = true, optional = true }

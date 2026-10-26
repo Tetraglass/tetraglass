@@ -117,3 +117,28 @@ If your application manages its own `wgpu::Device`, `wgpu::Queue`, and window/of
 - `renderer.update_surface_style(&queue, &mut gpu_surface, &surface_mesh, &new_style)` updates colormap, range, log scale, or edge visibility via a uniform write with zero geometry re-upload.
 - `renderer.set_surface_clip_plane(&queue, &mut gpu_surface, Some(plane))` updates only the 16-byte fragment clip-plane uniform (`<= 1 ms/frame`).
 - `renderer.render_with_annotations(&device, &mut encoder, &queue, &target, &camera, bg_srgb, &[&gpu_surface], &annotations)` records the 3D and annotation draw calls into your command encoder.
+
+## 3. Using the `tetraglass` umbrella crate and `SceneBuilder`
+
+Instead of depending on individual sub-crates, Rust applications can depend on the `tetraglass` umbrella crate and build declarative [`Scene`] pipelines in code via `Scene::builder()`:
+
+```rust,no_run
+use tetraglass::prelude::*;
+
+let mut builder = Scene::builder();
+let flow = builder.source("flow", Source::file("results.pvd"));
+let cut = builder.filter("cut", SliceFilter::new(&flow, [0.0, 0.0, 1.0]));
+let iso = builder.filter("iso", ContourFilter::new(&flow, "pressure", [101_325.0]));
+
+builder
+    .show(&cut)
+    .color_by("velocity")
+    .magnitude()
+    .colormap(ColormapName::Viridis)
+    .colorbar(true);
+builder.show(&iso).opacity(0.4);
+builder.camera().fit("all").orbit(30.0, 20.0);
+builder.output("out.png").size(1600, 900).time(TimeSelector::LAST);
+
+let scene = builder.build_validated().expect("valid v1 scene");
+```

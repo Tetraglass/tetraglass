@@ -2139,6 +2139,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tetraglass"
+version = "0.2.0"
+dependencies = [
+ "tetraglass-core",
+ "tetraglass-egui",
+ "tetraglass-export",
+ "tetraglass-filters",
+ "tetraglass-io",
+ "tetraglass-render",
+ "tetraglass-scene",
+ "tetraglass-viewer",
+]
+
+[[package]]
 name = "tetraglass-cli"
 version = "0.2.0"
 dependencies = [

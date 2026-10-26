@@ -27,14 +27,16 @@ cargo run -p tetraglass-cli -- schema
 
 | Crate | Description | `wasm32` |
 | --- | --- | --- |
-| `tetraglass-core` | `UnstructuredGrid`, `CellType` (linear, quadratic, Lagrange, polyhedra), `DataArray`, `TimeSeries`, `SurfaceMesh`, `TetView` | Yes |
-| `tetraglass-io` | Pure-Rust byte-buffer readers for `.vtu`, `.pvd`, and `.msh` (MSH 4.1 & 2.2) plus `.vtu` writer | Yes |
-| `tetraglass-filters` | `linearize`, `extract_external_surface`, `slice`, `contour`, `clip` (`exact` & `crinkle`), `threshold` | Yes |
-| `tetraglass-scene` | Declarative `Scene` model, JSON Schema, semantic validation, and cached `SceneEvaluator` | Yes |
-| `tetraglass-render` | Embeddable `wgpu` offscreen renderer, colormaps, annotations, GPU ID picking, headless helper | WebGPU / Native |
+| `tetraglass` | Umbrella crate re-exporting sub-crates behind feature flags (`io`, `filters`, `scene`, `export`, `render`, `egui`, `viewer`, `full`) and `prelude` | WebGPU / Native |
+| `tetraglass-core` | `UnstructuredGrid`, `CellType` (linear, quadratic, Lagrange, polyhedra), `DataArray`, `TimeSeries`, `SurfaceMesh`, `TetView`, `RegularGrid`, `PolylineSet` | Yes |
+| `tetraglass-io` | Pure-Rust byte-buffer readers for `.vtu`, `.vtk`, `.pvd`, and `.msh` (MSH 4.1 & 2.2) plus `.vtu` writer | Yes |
+| `tetraglass-filters` | `linearize`, `extract_external_surface`, `slice`, `contour`, `clip` (`exact` & `crinkle`), `threshold`, `streamlines`, `glyphs`, `resample` | Yes |
+| `tetraglass-scene` | Declarative `Scene` model, fluent Rust `SceneBuilder`, JSON Schema, semantic validation, and cached `SceneEvaluator` | Yes |
+| `tetraglass-render` | Embeddable `wgpu` offscreen renderer, colormaps, annotations, SSAO, progressive path tracer, GPU ID picking, headless helper | WebGPU / Native |
 | `tetraglass-egui` | Embeddable `ViewportState` and `ViewportWidget` for `egui-wgpu` applications | WebGPU / Native |
-| `tetraglass-viewer` | `eframe` desktop viewer application library | Native (Web in M3) |
-| `tetraglass-cli` | `tetraglass` command-line binary (`inspect`, `validate`, `render`, `schema`, `view`) | Native |
+| `tetraglass-export` | Binary glTF 2.0 (`.glb`) and renderer-neutral Blender bundle (`.tgbin`) exporters plus persistent Blender worker client | Yes (worker client on native) |
+| `tetraglass-viewer` | `eframe` desktop and WebGPU browser viewer application library | WebGPU / Native |
+| `tetraglass-cli` | `tetraglass` command-line binary (`inspect`, `validate`, `render`, `schema`, `view`, `export`) | Native |
 
 ## Documentation
 

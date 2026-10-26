@@ -105,9 +105,10 @@ fn wasm_crates() -> Result<Vec<String>, String> {
         let name = entry.file_name().to_string_lossy().into_owned();
         let is_crate = entry.path().join("Cargo.toml").is_file();
         if is_crate
-            && WASM_CRATE_SUFFIXES
-                .iter()
-                .any(|suffix| name.ends_with(suffix))
+            && (name == "tetraglass"
+                || WASM_CRATE_SUFFIXES
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix)))
         {
             names.push(name);
         }

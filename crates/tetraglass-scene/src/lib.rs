@@ -37,6 +37,7 @@
 //! ```
 
 mod array_ref;
+mod builder;
 mod error;
 mod eval;
 mod migrate;
@@ -46,6 +47,11 @@ mod validate;
 pub use array_ref::{
     ArrayAssociation, ComponentSelector, ParsedArrayRef, ResolvedComponent, TensorComponent,
     VectorAxis,
+};
+pub use builder::{
+    CameraBuilder, ClipFilter, ContourFilter, DatasetRef, GlyphsFilter, OutputBuilder,
+    RepresentationBuilder, ResampleFilter, SceneBuilder, SliceFilter, StreamlinesFilter,
+    SurfaceFilter, ThresholdFilter,
 };
 pub use error::SceneError;
 pub use eval::{
