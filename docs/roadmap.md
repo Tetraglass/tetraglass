@@ -91,4 +91,4 @@ Status: **M0 complete (2026-10-23); M1 complete (2026-10-24); M2 complete (2026-
 - [x] **M5.3a GPU triangle BVH and compute-shader progressive path tracer.** Linear BVH over rendered triangles and compute-shader progressive path-tracing pipeline (`path_tracer.wgsl`, `PathTracer`, `PathTraceConfig`) in `tetraglass-render` with multi-bounce shading, soft shadows, colormap evaluation, and progressive sample accumulation across all wgpu backends including WebGPU.
 - [x] **M5.3b Progressive path tracer in the viewer and CLI.** Interactive viewport accumulation when stationary in `tetraglass-egui` and `tetraglass-viewer`, plus headless path-traced rendering and tests (`/render-check`).
 - [x] **M5.4 Persistent Blender worker and live link.** Socket worker mode in `blender/render.py` and client support in `tetraglass-cli` / `tetraglass-viewer` to keep a Blender session warm across renders and push live camera/scene updates (`/blender-bridge`).
-- [ ] **M5.5 Gate.** `/milestone-gate` (`docs/milestones/m5-gate.md`).
+- [x] **M5.5 Gate.** `/milestone-gate` (`docs/milestones/m5-gate.md`, completed 2026-10-26).

@@ -488,3 +488,11 @@ Newest entries at the bottom. `/next-task` appends one entry per finished task u
 - Decisions: none (implemented per D-002, D-011, and `.agents/rules/blender-gpl.md`).
 - Dependencies added: none.
 - Follow-ups: M5.5 Gate (`/milestone-gate`).
+
+## 2026-10-26: M5.5 Gate & Milestone M5 Retrospective (`docs/milestones/m5-gate.md`)
+- Done: verified the Milestone M5 gate across all 9 crates (`cargo xtask verify` and `cargo doc --workspace --no-deps`); rendered the M5 gate demonstration figures (`docs/milestones/m5-threshold-pathtracer.png`, `docs/milestones/m5-threshold-ssao.png`, and `docs/milestones/m5-streamlines-pathtracer.png`); and recorded the gate evidence in `docs/milestones/m5-gate.md`.
+- Retrospective:
+  - **Planned vs. actual:** Milestone M5 (`M5.1` Legacy `.vtk` reader, `M5.2` SSAO, `M5.3a`/`M5.3b` GPU triangle BVH and compute-shader progressive path tracer, `M5.4` Persistent Blender worker and live link, and `M5.5` Gate) completed in 6 focused steps with zero scope cuts and zero external C or GPU ray-tracing extension dependencies.
+  - **What worked well:** Implementing the progressive path tracer in a pure WGSL compute shader (`path_tracer.wgsl`) over a 12-bucket SAH pre-order flattened linear BVH (`TriangleBvh`) made hardware-agnostic global illumination, soft shadows, and progressive accumulation work identically on Metal, Vulkan, DX12, and WebGPU without requiring vendor-specific RT extensions (`D-010`). Supporting both loopback TCP (`host:port`) and atomic directory IPC (`ipc:<dir>`) in `blender/render.py --serve` and `BlenderWorkerClient` allowed warm multi-render Cycles sessions and live camera updates to run both on standard desktops and inside network-isolated sandboxes.
+  - **All roadmap milestones (`M0`–`M5`) complete:** Future enhancements are driven by user feedback and real-world FEM/CFD datasets (e.g., CGNS/EXODUS/VTKHDF readers, Python bindings `D-001` on demand, or multi-volume rendering).
+- Follow-ups: All planned roadmap tasks across Milestones `M0`–`M5` are complete.
