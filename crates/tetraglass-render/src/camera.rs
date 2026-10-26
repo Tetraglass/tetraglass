@@ -117,15 +117,22 @@ impl Camera {
         ]
     }
 
+    /// Returns the near and far clipping plane distances `(near, far)` in view space.
+    #[must_use]
+    pub fn near_far_f64(&self) -> (f64, f64) {
+        let dist = self.effective_distance();
+        let radius = self.scene_radius.max(1e-3);
+        let near = (dist - radius * 2.5).max(dist * 0.01).max(1e-4);
+        let far = (dist + radius * 3.5).max(near + 1.0);
+        (near, far)
+    }
+
     /// Returns the right-handed column-major 4x4 perspective matrix for WebGPU (`z in [0, 1]`).
     #[must_use]
     pub fn proj_matrix(&self, aspect: f32) -> [[f32; 4]; 4] {
         let aspect = (aspect as f64).max(1e-4);
         let f = 1.0 / (0.5 * self.view_angle_deg.clamp(1.0, 170.0).to_radians()).tan();
-        let dist = self.effective_distance();
-        let radius = self.scene_radius.max(1e-3);
-        let near = (dist - radius * 2.5).max(dist * 0.01).max(1e-4);
-        let far = (dist + radius * 3.5).max(near + 1.0);
+        let (near, far) = self.near_far_f64();
         let nf = 1.0 / (near - far);
 
         [

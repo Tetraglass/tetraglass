@@ -308,6 +308,7 @@ pub struct ViewerDocument {
     show_axes: bool,
     opacity: f64,
     transfer_function: Vec<[f64; 2]>,
+    ssao: ViewportSsaoConfig,
     watcher: Option<SceneFileWatcher>,
     last_reload_error: Option<String>,
     reload_count: usize,
@@ -366,6 +367,7 @@ impl ViewerDocument {
             show_axes: true,
             opacity: 1.0,
             transfer_function: vec![[0.0, 0.0], [1.0, 1.0]],
+            ssao: ViewportSsaoConfig::default(),
             watcher,
             last_reload_error: None,
             reload_count: 0,
@@ -402,6 +404,7 @@ impl ViewerDocument {
             show_axes: true,
             opacity: 1.0,
             transfer_function: vec![[0.0, 0.0], [1.0, 1.0]],
+            ssao: ViewportSsaoConfig::default(),
             watcher: None,
             last_reload_error: None,
             reload_count: 0,
@@ -486,6 +489,7 @@ impl ViewerDocument {
             show_axes: true,
             opacity: 1.0,
             transfer_function: vec![[0.0, 0.0], [1.0, 1.0]],
+            ssao: ViewportSsaoConfig::default(),
             watcher: None,
             last_reload_error: None,
             reload_count: 0,
@@ -550,6 +554,7 @@ impl ViewerDocument {
             show_axes: true,
             opacity: 1.0,
             transfer_function: vec![[0.0, 0.0], [1.0, 1.0]],
+            ssao: ViewportSsaoConfig::default(),
             watcher: None,
             last_reload_error: None,
             reload_count: 0,
@@ -1033,6 +1038,58 @@ impl ViewerDocument {
         Ok(true)
     }
 
+    /// Returns the active [`ViewportSsaoConfig`] (`M5.2`).
+    #[must_use]
+    pub const fn ssao(&self) -> ViewportSsaoConfig {
+        self.ssao
+    }
+
+    /// Updates the [`ViewportSsaoConfig`] on this document (`M5.2`).
+    pub fn set_ssao(&mut self, ssao: ViewportSsaoConfig) -> bool {
+        if self.ssao == ssao {
+            return false;
+        }
+        self.ssao = ssao;
+        true
+    }
+
+    /// Enables or disables screen-space ambient occlusion (`M5.2`).
+    pub fn set_ssao_enabled(&mut self, enabled: bool) -> bool {
+        if self.ssao.enabled == enabled {
+            return false;
+        }
+        self.ssao.enabled = enabled;
+        true
+    }
+
+    /// Sets the SSAO darkening strength in `[0.0, 2.0]` (`M5.2`).
+    pub fn set_ssao_strength(&mut self, strength: f32) -> Result<bool, ViewerError> {
+        if !strength.is_finite() || !(0.0..=2.0).contains(&strength) {
+            return Err(ViewerError::Validation(format!(
+                "ssao strength `{strength}` must be finite and in [0.0, 2.0]"
+            )));
+        }
+        if (self.ssao.strength - strength).abs() <= 1e-6 {
+            return Ok(false);
+        }
+        self.ssao.strength = strength;
+        Ok(true)
+    }
+
+    /// Sets the SSAO normalized hemisphere radius in `[0.005, 1.0]` (`M5.2`).
+    pub fn set_ssao_radius(&mut self, radius: f32) -> Result<bool, ViewerError> {
+        if !radius.is_finite() || !(0.005..=1.0).contains(&radius) {
+            return Err(ViewerError::Validation(format!(
+                "ssao radius `{radius}` must be finite and in [0.005, 1.0]"
+            )));
+        }
+        if (self.ssao.radius - radius).abs() <= 1e-6 {
+            return Ok(false);
+        }
+        self.ssao.radius = radius;
+        Ok(true)
+    }
+
     /// Returns the most recent hot-reload error message, if the last reload attempt failed.
     #[must_use]
     pub fn last_reload_error(&self) -> Option<&str> {
@@ -1489,6 +1546,7 @@ impl ViewerSession {
         viewport.set_camera(camera);
         viewport.set_background_srgb(bg);
         viewport.set_annotations(annotations);
+        viewport.set_ssao(doc.ssao());
 
         let (clip_base_hull, clip_base_tet_view, clip_state) = match doc.resolve_clip_volume()? {
             Some((hull, tet_view, state)) => (Some(hull), Some(tet_view), state),
@@ -2185,7 +2243,20 @@ impl ViewerSession {
         self.viewport
             .set_background_srgb(self.doc.background_srgb());
         self.viewport.set_annotations(self.doc.annotations());
+        self.viewport.set_ssao(self.doc.ssao());
         Ok(())
+    }
+
+    /// Returns the active [`ViewportSsaoConfig`] on the session (`M5.2`).
+    #[must_use]
+    pub fn ssao(&self) -> ViewportSsaoConfig {
+        self.viewport.ssao()
+    }
+
+    /// Updates the [`ViewportSsaoConfig`] on both the document and the GPU viewport (`M5.2`).
+    pub fn set_ssao(&mut self, ssao: ViewportSsaoConfig) {
+        let _ = self.doc.set_ssao(ssao);
+        self.viewport.set_ssao(self.doc.ssao());
     }
 
     /// Renders the viewer UI (left control panel, time slider, field/colormap pickers, hot-reload status,
@@ -2334,6 +2405,7 @@ impl ViewerSession {
         let mut colorbar_changed_to: Option<bool> = None;
         let mut axes_changed_to: Option<bool> = None;
         let mut opacity_changed_to: Option<f64> = None;
+        let mut ssao_changed_to: Option<ViewportSsaoConfig> = None;
         let mut transfer_function_changed_to: Option<Vec<[f64; 2]>> = None;
         let mut trigger_reload = false;
         let mut trigger_load_url = false;
@@ -2529,6 +2601,36 @@ impl ViewerSession {
                     .changed()
                 {
                     opacity_changed_to = Some(opacity_val);
+                }
+
+                let mut ssao_cfg = self.doc.ssao();
+                if ui
+                    .checkbox(&mut ssao_cfg.enabled, "Ambient occlusion (SSAO)")
+                    .changed()
+                {
+                    ssao_changed_to = Some(ssao_cfg);
+                }
+                if ssao_cfg.enabled {
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut ssao_cfg.strength, 0.05..=2.0)
+                                .text("AO strength")
+                                .show_value(true),
+                        )
+                        .changed()
+                    {
+                        ssao_changed_to = Some(ssao_cfg);
+                    }
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut ssao_cfg.radius, 0.02..=0.5)
+                                .text("AO radius")
+                                .show_value(true),
+                        )
+                        .changed()
+                    {
+                        ssao_changed_to = Some(ssao_cfg);
+                    }
                 }
 
                 if let Some([lo, hi]) = self.viewport.effective_range() {
@@ -2924,6 +3026,11 @@ impl ViewerSession {
             && let Ok(true) = self.doc.set_opacity(new_opacity)
         {
             style_or_annotations_dirty = true;
+        }
+        if let Some(new_ssao) = ssao_changed_to
+            && self.doc.set_ssao(new_ssao)
+        {
+            self.viewport.set_ssao(self.doc.ssao());
         }
         if let Some(new_tf) = transfer_function_changed_to
             && let Ok(true) = self.doc.set_transfer_function(new_tf)
@@ -3671,14 +3778,37 @@ fn format_probe_value(pv: &PickProbeValue) -> String {
     }
 }
 
-/// Re-exported clip-plane and pick result types (`M2.7`, `M2.8`).
+/// Re-exported clip-plane, SSAO, and pick result types (`M2.7`, `M2.8`, `M5.2`).
 pub use tetraglass_egui::{
     ViewportClipKeep, ViewportClipPlane, ViewportPickProbeValue, ViewportPickResult,
+    ViewportSsaoConfig,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn viewer_document_ssao_controls_validate_and_update() {
+        let mut doc = ViewerDocument::default_demo().expect("default demo document");
+        assert!(!doc.ssao().enabled);
+        assert!((doc.ssao().strength - 0.8).abs() < 1e-6);
+        assert!((doc.ssao().radius - 0.15).abs() < 1e-6);
+
+        assert!(doc.set_ssao_enabled(true));
+        assert!(doc.ssao().enabled);
+        assert!(!doc.set_ssao_enabled(true));
+
+        assert!(doc.set_ssao_strength(1.25).expect("set valid strength"));
+        assert!((doc.ssao().strength - 1.25).abs() < 1e-6);
+        assert!(doc.set_ssao_strength(-0.1).is_err());
+        assert!(doc.set_ssao_strength(2.5).is_err());
+
+        assert!(doc.set_ssao_radius(0.25).expect("set valid radius"));
+        assert!((doc.ssao().radius - 0.25).abs() < 1e-6);
+        assert!(doc.set_ssao_radius(0.0).is_err());
+        assert!(doc.set_ssao_radius(1.5).is_err());
+    }
 
     #[test]
     fn volume_document_updates_transfer_function_without_recomputing_filter() {

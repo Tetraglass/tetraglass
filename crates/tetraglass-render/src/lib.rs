@@ -104,7 +104,8 @@ pub use pick::{
 };
 pub use pipeline::{
     ColorBy, DEFAULT_COLOR_FORMAT, DEFAULT_TRANSFER_FUNCTION_LUT_SIZE, DEPTH_FORMAT, GpuSurface,
-    OffscreenTarget, Renderer, ScalarComponent, ShaderClipKeep, ShaderClipPlane, SurfaceStyle,
-    VOLUME_TEXTURE_FORMAT, WBOIT_ACCUM_FORMAT, WBOIT_REVEAL_FORMAT, evaluate_transfer_function_lut,
+    OffscreenTarget, Renderer, SSAO_RAW_FORMAT, ScalarComponent, ShaderClipKeep, ShaderClipPlane,
+    SsaoConfig, SurfaceStyle, VOLUME_TEXTURE_FORMAT, WBOIT_ACCUM_FORMAT, WBOIT_REVEAL_FORMAT,
+    evaluate_transfer_function_lut,
 };
 pub use text::{EmbeddedFont, FontRasterizer, RasterizedText, TextMetrics};

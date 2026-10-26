@@ -51,7 +51,7 @@ use tetraglass_core::{BoundingBox, SurfaceMesh};
 use tetraglass_render::{
     Annotations, Camera, ColorBy, DEFAULT_COLOR_FORMAT, GpuSurface, OffscreenTarget,
     PendingPixelPick, PickTarget, RawPickHit, RenderError, Renderer, ScalarComponent,
-    ShaderClipPlane, SurfacePickResult, SurfaceStyle, probe_surface_triangle,
+    ShaderClipPlane, SsaoConfig, SurfacePickResult, SurfaceStyle, probe_surface_triangle,
 };
 
 /// A selectable coloring option for a [`SurfaceMesh`] in a UI field picker.
@@ -555,6 +555,22 @@ impl ViewportState {
         }
     }
 
+    /// Returns the active [`SsaoConfig`] on the viewport renderer (`M5.2`).
+    #[must_use]
+    pub fn ssao(&self) -> SsaoConfig {
+        self.inner
+            .lock()
+            .map(|g| g.renderer.ssao())
+            .unwrap_or_default()
+    }
+
+    /// Updates the [`SsaoConfig`] (ambient occlusion enable, radius, strength, and bias) on the viewport renderer (`M5.2`).
+    pub fn set_ssao(&mut self, ssao: SsaoConfig) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.renderer.set_ssao(ssao);
+        }
+    }
+
     /// Updates only the 16-byte GPU shader clip-plane uniform on the uploaded surface(s) (`M2.8`, `D-019`).
     ///
     /// Pass `Some(plane)` while interactively dragging a clip plane for instant 60 FPS feedback,
@@ -1002,10 +1018,11 @@ fn handle_camera_input(
     changed
 }
 
-/// Re-exported colormap, style, clip-plane, and pick types for convenience when configuring [`ViewportState`].
+/// Re-exported colormap, style, clip-plane, SSAO, and pick types for convenience when configuring [`ViewportState`].
 pub use tetraglass_render::{
     Camera as ViewportCamera, ColorBy as ViewportColorBy, ColormapKind as ViewportColormap,
     PickProbeValue as ViewportPickProbeValue, ScalarComponent as ViewportScalarComponent,
     ShaderClipKeep as ViewportClipKeep, ShaderClipPlane as ViewportClipPlane,
-    SurfacePickResult as ViewportPickResult, SurfaceStyle as ViewportSurfaceStyle,
+    SsaoConfig as ViewportSsaoConfig, SurfacePickResult as ViewportPickResult,
+    SurfaceStyle as ViewportSurfaceStyle,
 };

@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use egui_wgpu::wgpu;
 use tetraglass_egui::{
     ViewportClipKeep, ViewportClipPlane, ViewportColorBy, ViewportColormap,
-    ViewportScalarComponent, ViewportState, ViewportSurfaceStyle, ViewportWidget,
-    available_field_options,
+    ViewportScalarComponent, ViewportSsaoConfig, ViewportState, ViewportSurfaceStyle,
+    ViewportWidget, available_field_options,
 };
 use tetraglass_filters::extract_external_surface;
 use tetraglass_io::read_vtu_from_path;
@@ -246,6 +246,16 @@ fn viewport_widget_resizes_and_runs_prepare_callback_in_egui_wgpu() {
     assert_eq!(viewport.clip_plane(), Some(clip_plane));
     viewport.set_clip_plane(headless.queue(), None);
     assert_eq!(viewport.clip_plane(), None);
+
+    // Configure and query SSAO via `ViewportState::set_ssao`.
+    assert!(!viewport.ssao().enabled);
+    let ssao_cfg = ViewportSsaoConfig::enabled()
+        .with_radius(0.2)
+        .with_strength(0.9);
+    viewport.set_ssao(ssao_cfg);
+    assert_eq!(viewport.ssao(), ssao_cfg);
+    viewport.set_ssao(ViewportSsaoConfig::default());
+    assert!(!viewport.ssao().enabled);
 
     // Switch style to vector magnitude and verify range updates.
     let vec_style = ViewportSurfaceStyle {

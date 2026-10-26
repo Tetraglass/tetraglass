@@ -29,6 +29,9 @@ pub const WBOIT_REVEAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8U
 /// Filterable 3D texture format used for GPU volume ray marching (`M4.4b`).
 pub const VOLUME_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
+/// Intermediate 1x raw ambient-occlusion texture format (`M5.2`).
+pub const SSAO_RAW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+
 /// Number of samples in the pre-evaluated 1D opacity transfer function table (`M4.4b`).
 pub const DEFAULT_TRANSFER_FUNCTION_LUT_SIZE: usize = 256;
 
@@ -285,6 +288,83 @@ impl Default for SurfaceStyle {
     }
 }
 
+/// Screen-space ambient occlusion (SSAO) configuration (`M5.2`).
+///
+/// Disabled by default (`enabled = false`) so existing gallery scenes and baselines are unchanged
+/// unless SSAO is explicitly enabled.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SsaoConfig {
+    /// Whether SSAO post-processing is enabled (`false` by default).
+    pub enabled: bool,
+    /// Occlusion hemisphere radius as a fraction of the camera's `scene_radius` (`0.15` by default).
+    pub radius: f32,
+    /// Occlusion darkening strength in `[0.0, 2.0]` (`0.8` by default).
+    pub strength: f32,
+    /// Depth bias as a fraction of the occlusion radius to prevent self-shadowing (`0.05` by default).
+    pub bias: f32,
+}
+
+impl Default for SsaoConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            radius: 0.15,
+            strength: 0.8,
+            bias: 0.05,
+        }
+    }
+}
+
+impl SsaoConfig {
+    /// Returns an enabled [`SsaoConfig`] with default `radius = 0.15`, `strength = 0.8`, and `bias = 0.05`.
+    #[must_use]
+    pub const fn enabled() -> Self {
+        Self {
+            enabled: true,
+            radius: 0.15,
+            strength: 0.8,
+            bias: 0.05,
+        }
+    }
+
+    /// Sets the normalized hemisphere radius (`0.005..=2.0`, relative to `scene_radius`).
+    #[must_use]
+    pub const fn with_radius(mut self, radius: f32) -> Self {
+        self.radius = radius;
+        self
+    }
+
+    /// Sets the occlusion darkening strength (`0.0..=2.0`).
+    #[must_use]
+    pub const fn with_strength(mut self, strength: f32) -> Self {
+        self.strength = strength;
+        self
+    }
+
+    /// Sets the depth bias fraction (`0.0..=0.5`, relative to the occlusion radius).
+    #[must_use]
+    pub const fn with_bias(mut self, bias: f32) -> Self {
+        self.bias = bias;
+        self
+    }
+}
+
+fn create_ssao_raw_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("tetraglass_ssao_raw_bgl"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        }],
+    })
+}
+
 fn create_volume_depth_bind_group_layout(
     device: &wgpu::Device,
     sample_count: u32,
@@ -354,6 +434,8 @@ pub struct OffscreenTarget {
     msaa_wboit_reveal_view: Option<wgpu::TextureView>,
     wboit_bind_group: wgpu::BindGroup,
     volume_depth_bind_group: wgpu::BindGroup,
+    ssao_raw_view: wgpu::TextureView,
+    ssao_raw_bind_group: wgpu::BindGroup,
 }
 
 struct TargetAttachments {
@@ -368,6 +450,8 @@ struct TargetAttachments {
     msaa_wboit_reveal_view: Option<wgpu::TextureView>,
     wboit_bind_group: wgpu::BindGroup,
     volume_depth_bind_group: wgpu::BindGroup,
+    ssao_raw_view: wgpu::TextureView,
+    ssao_raw_bind_group: wgpu::BindGroup,
 }
 
 impl OffscreenTarget {
@@ -404,6 +488,8 @@ impl OffscreenTarget {
             msaa_wboit_reveal_view: att.msaa_wboit_reveal_view,
             wboit_bind_group: att.wboit_bind_group,
             volume_depth_bind_group: att.volume_depth_bind_group,
+            ssao_raw_view: att.ssao_raw_view,
+            ssao_raw_bind_group: att.ssao_raw_bind_group,
         })
     }
 
@@ -436,6 +522,8 @@ impl OffscreenTarget {
         self.msaa_wboit_reveal_view = att.msaa_wboit_reveal_view;
         self.wboit_bind_group = att.wboit_bind_group;
         self.volume_depth_bind_group = att.volume_depth_bind_group;
+        self.ssao_raw_view = att.ssao_raw_view;
+        self.ssao_raw_bind_group = att.ssao_raw_bind_group;
         Ok(true)
     }
 
@@ -632,6 +720,27 @@ impl OffscreenTarget {
             ],
         });
 
+        let ssao_raw_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("tetraglass_ssao_raw"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SSAO_RAW_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let ssao_raw_view = ssao_raw_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let ssao_raw_bgl = create_ssao_raw_bind_group_layout(device);
+        let ssao_raw_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tetraglass_ssao_raw_bg"),
+            layout: &ssao_raw_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&ssao_raw_view),
+            }],
+        });
+
         TargetAttachments {
             color_texture,
             color_view,
@@ -644,8 +753,19 @@ impl OffscreenTarget {
             msaa_wboit_reveal_view,
             wboit_bind_group,
             volume_depth_bind_group,
+            ssao_raw_view,
+            ssao_raw_bind_group,
         }
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct SsaoUniforms {
+    viewport_size: [f32; 4],
+    proj_scale: [f32; 4],
+    clip_and_radius: [f32; 4],
+    params: [f32; 4],
 }
 
 #[repr(C)]
@@ -832,12 +952,17 @@ impl GpuSurface {
 pub struct Renderer {
     target_format: wgpu::TextureFormat,
     sample_count: u32,
+    ssao: SsaoConfig,
     frame_uniform_buffer: wgpu::Buffer,
     frame_bind_groups: [wgpu::BindGroup; 3],
     surface_bind_group_layout: wgpu::BindGroupLayout,
     surface_pipeline: wgpu::RenderPipeline,
     wboit_accum_pipeline: wgpu::RenderPipeline,
     wboit_composite_pipeline: wgpu::RenderPipeline,
+    ssao_uniform_buffer: wgpu::Buffer,
+    ssao_uniform_bind_group: wgpu::BindGroup,
+    ssao_raw_pipeline: wgpu::RenderPipeline,
+    ssao_apply_pipeline: wgpu::RenderPipeline,
     volume_sampler: wgpu::Sampler,
     volume_bind_group_layout: wgpu::BindGroupLayout,
     volume_pipeline: wgpu::RenderPipeline,
@@ -1558,15 +1683,173 @@ impl Renderer {
             cache: None,
         });
 
+        let ssao_depth_snippet = if sample_count > 1 {
+            "@group(1) @binding(0)\nvar scene_depth_tex: texture_depth_multisampled_2d;\nfn load_scene_depth(px: vec2<i32>) -> f32 { return textureLoad(scene_depth_tex, px, 0); }\n"
+        } else {
+            "@group(1) @binding(0)\nvar scene_depth_tex: texture_depth_2d;\nfn load_scene_depth(px: vec2<i32>) -> f32 { return textureLoad(scene_depth_tex, px, 0); }\n"
+        };
+        let ssao_shader_source = format!(
+            "{}\n{}",
+            ssao_depth_snippet,
+            include_str!("shaders/ssao.wgsl"),
+        );
+        let ssao_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("tetraglass_ssao_shader"),
+            source: wgpu::ShaderSource::Wgsl(ssao_shader_source.into()),
+        });
+
+        let ssao_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tetraglass_ssao_uniforms"),
+            size: std::mem::size_of::<SsaoUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let ssao_uniform_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("tetraglass_ssao_uniform_bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let ssao_uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tetraglass_ssao_uniform_bg"),
+            layout: &ssao_uniform_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: ssao_uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        let ssao_raw_bgl = create_ssao_raw_bind_group_layout(device);
+        let ssao_raw_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("tetraglass_ssao_raw_pipeline_layout"),
+                bind_group_layouts: &[Some(&ssao_uniform_bgl), Some(&volume_depth_bgl)],
+                immediate_size: 0,
+            });
+
+        let ssao_raw_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("tetraglass_ssao_raw_pipeline"),
+            layout: Some(&ssao_raw_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &ssao_shader,
+                entry_point: Some("vs_ssao"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &ssao_shader,
+                entry_point: Some("fs_ssao_raw"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: SSAO_RAW_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let ssao_apply_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("tetraglass_ssao_apply_pipeline_layout"),
+                bind_group_layouts: &[
+                    Some(&ssao_uniform_bgl),
+                    Some(&volume_depth_bgl),
+                    Some(&ssao_raw_bgl),
+                ],
+                immediate_size: 0,
+            });
+
+        let ssao_apply_blend = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::Src,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        };
+
+        let ssao_apply_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("tetraglass_ssao_apply_pipeline"),
+            layout: Some(&ssao_apply_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &ssao_shader,
+                entry_point: Some("vs_ssao"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &ssao_shader,
+                entry_point: Some("fs_ssao_apply"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(ssao_apply_blend),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         Ok(Self {
             target_format,
             sample_count,
+            ssao: SsaoConfig::default(),
             frame_uniform_buffer,
             frame_bind_groups,
             surface_bind_group_layout,
             surface_pipeline,
             wboit_accum_pipeline,
             wboit_composite_pipeline,
+            ssao_uniform_buffer,
+            ssao_uniform_bind_group,
+            ssao_raw_pipeline,
+            ssao_apply_pipeline,
             volume_sampler,
             volume_bind_group_layout,
             volume_pipeline,
@@ -1589,6 +1872,17 @@ impl Renderer {
     #[must_use]
     pub const fn sample_count(&self) -> u32 {
         self.sample_count
+    }
+
+    /// Returns the active [`SsaoConfig`] (`M5.2`).
+    #[must_use]
+    pub const fn ssao(&self) -> SsaoConfig {
+        self.ssao
+    }
+
+    /// Sets the [`SsaoConfig`] used by subsequent [`Self::render`] and [`Self::render_with_annotations`] calls (`M5.2`).
+    pub const fn set_ssao(&mut self, ssao: SsaoConfig) {
+        self.ssao = ssao;
     }
 
     /// Uploads a [`SurfaceMesh`] to GPU buffers using `surface.bounds()` center as the dataset center.
@@ -2183,8 +2477,20 @@ impl Renderer {
             None => (&target.color_view, None),
         };
 
+        let has_opaque = surfaces.iter().any(|s| s.is_opaque());
         let has_transparent = surfaces.iter().any(|s| s.is_transparent());
         let has_volume = surfaces.iter().any(|s| s.is_volume() && s.opacity > 1e-5);
+        let use_ssao = self.ssao.enabled && self.ssao.strength > 1e-5 && has_opaque;
+
+        if use_ssao {
+            let ssao_uniforms =
+                build_ssao_uniforms(camera, target.width(), target.height(), self.ssao);
+            queue.write_buffer(
+                &self.ssao_uniform_buffer,
+                0,
+                bytemuck::bytes_of(&ssao_uniforms),
+            );
+        }
 
         if has_volume {
             let inv_view_proj = invert_mat4(view_proj);
@@ -2204,7 +2510,7 @@ impl Renderer {
             }
         }
 
-        if !has_transparent && !has_volume {
+        if !has_transparent && !has_volume && !use_ssao {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("tetraglass_surface_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2289,6 +2595,59 @@ impl Renderer {
                     pass.set_vertex_buffer(0, surface.geometry_buffer.slice(..));
                     pass.set_vertex_buffer(1, surface.scalar_buffer.slice(..));
                     pass.draw(0..surface.vertex_count, 0..1);
+                }
+            }
+
+            if use_ssao {
+                // Pass 1b: Raw hemisphere SSAO pass into 1x `R8Unorm` `target.ssao_raw_view`.
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("tetraglass_ssao_raw_pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &target.ssao_raw_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+
+                    pass.set_pipeline(&self.ssao_raw_pipeline);
+                    pass.set_bind_group(0, &self.ssao_uniform_bind_group, &[]);
+                    pass.set_bind_group(1, &target.volume_depth_bind_group, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+
+                // Pass 1c: Depth-aware bilateral blur + multiplicative darkening onto opaque color target.
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("tetraglass_ssao_apply_pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: color_attachment_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+
+                    pass.set_pipeline(&self.ssao_apply_pipeline);
+                    pass.set_bind_group(0, &self.ssao_uniform_bind_group, &[]);
+                    pass.set_bind_group(1, &target.volume_depth_bind_group, &[]);
+                    pass.set_bind_group(2, &target.ssao_raw_bind_group, &[]);
+                    pass.draw(0..3, 0..1);
                 }
             }
 
@@ -2433,11 +2792,13 @@ impl Renderer {
                         pass.draw(0..3, 0..1);
                     }
                 }
+            }
 
+            if has_volume || (use_ssao && !has_transparent) {
                 // Final overlay pass for wireframe edges, annotations, and MSAA resolve.
                 {
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("tetraglass_volume_overlay_pass"),
+                        label: Some("tetraglass_overlay_pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view: color_attachment_view,
                             depth_slice: None,
@@ -2677,6 +3038,27 @@ impl Renderer {
         };
         device.poll(wgpu::PollType::wait_indefinitely())?;
         pending.finish()
+    }
+}
+
+fn build_ssao_uniforms(camera: &Camera, width: u32, height: u32, ssao: SsaoConfig) -> SsaoUniforms {
+    let w = (width.max(1)) as f32;
+    let h = (height.max(1)) as f32;
+    let aspect = (w / h).max(1e-4);
+    let tan_half_fov = (0.5 * camera.view_angle_deg.clamp(1.0, 170.0).to_radians()).tan() as f32;
+    let scale_x = (aspect * tan_half_fov).max(1e-6);
+    let scale_y = tan_half_fov.max(1e-6);
+    let (near_f64, far_f64) = camera.near_far_f64();
+    let scene_radius = (camera.scene_radius.max(1e-3)) as f32;
+    let world_radius = (ssao.radius.clamp(0.005, 2.0) * scene_radius).max(1e-5);
+    let world_bias = (ssao.bias.clamp(0.0, 0.5) * world_radius).max(1e-6);
+    let strength = ssao.strength.clamp(0.0, 4.0);
+
+    SsaoUniforms {
+        viewport_size: [w, h, 1.0 / w, 1.0 / h],
+        proj_scale: [scale_x, scale_y, 1.0 / scale_x, 1.0 / scale_y],
+        clip_and_radius: [near_f64 as f32, far_f64 as f32, world_radius, world_bias],
+        params: [strength, scene_radius, 0.0, 0.0],
     }
 }
 

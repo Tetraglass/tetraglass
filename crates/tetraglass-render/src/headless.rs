@@ -16,7 +16,7 @@ use crate::annotations::Annotations;
 use crate::camera::Camera;
 use crate::error::RenderError;
 use crate::pick::{PickTarget, SurfacePickResult, probe_surface_triangle};
-use crate::pipeline::{DEFAULT_COLOR_FORMAT, OffscreenTarget, Renderer, SurfaceStyle};
+use crate::pipeline::{DEFAULT_COLOR_FORMAT, OffscreenTarget, Renderer, SsaoConfig, SurfaceStyle};
 use crate::png::{decode_rgba8_png, encode_rgba8_png};
 
 /// Per-channel tolerance for image regression tests (`.agents/rules/testing.md`: `<= 2` of `255`).
@@ -343,12 +343,24 @@ impl HeadlessContext {
         surface: &SurfaceMesh,
         options: &HeadlessRenderOptions,
     ) -> Result<RenderedImage, RenderError> {
-        let renderer = Renderer::new(
+        self.render_surface_with_ssao(surface, options, SsaoConfig::default())
+    }
+
+    /// Renders `surface` offscreen with `options` and explicit [`SsaoConfig`] (`M5.2`), reading back
+    /// the resulting [`RenderedImage`].
+    pub fn render_surface_with_ssao(
+        &self,
+        surface: &SurfaceMesh,
+        options: &HeadlessRenderOptions,
+        ssao: SsaoConfig,
+    ) -> Result<RenderedImage, RenderError> {
+        let mut renderer = Renderer::new(
             &self.device,
             &self.queue,
             DEFAULT_COLOR_FORMAT,
             options.sample_count,
         )?;
+        renderer.set_ssao(ssao);
         let target = OffscreenTarget::new(
             &self.device,
             options.width,

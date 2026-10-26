@@ -6,7 +6,7 @@ use tetraglass_filters::extract_external_surface;
 use tetraglass_io::read_vtu_from_path;
 use tetraglass_render::{
     Camera, ColorBy, ColormapKind, DEFAULT_COLOR_FORMAT, HeadlessContext, HeadlessRenderOptions,
-    OffscreenTarget, RenderedImage, Renderer, SurfaceStyle,
+    OffscreenTarget, RenderedImage, Renderer, SsaoConfig, SurfaceStyle,
 };
 
 fn workspace_root() -> PathBuf {
@@ -714,6 +714,122 @@ fn volume_ray_marching_modulates_transfer_function_and_terminates_at_opaque_dept
         assert!(
             cmp_vs_slice_only.differing_pixels > 3000,
             "volume in front of and around the opaque slice must visibly composite over it (sample_count={sample_count})"
+        );
+    }
+}
+
+#[test]
+fn ssao_darkens_concave_crevices_and_leaves_background_and_disabled_renders_intact() {
+    use tetraglass_core::{SyntheticCellLayout, SyntheticGridSpec};
+    use tetraglass_filters::{
+        ClipMode, ClipParams, LinearizeParams, clip, extract_tet_view_surface, linearize,
+    };
+
+    let root = workspace_root();
+    let grid = SyntheticGridSpec::new(8, 8, 8, SyntheticCellLayout::Hexahedra)
+        .generate()
+        .expect("generate 8x8x8 hex grid");
+    let tet_view = linearize(&grid, &LinearizeParams::default()).expect("linearize");
+    let crinkle = clip(
+        &tet_view,
+        &ClipParams::with_origin([0.5, 0.5, 0.5], [-1.0, -1.0, -1.0]).mode(ClipMode::Crinkle),
+    )
+    .expect("crinkle clip");
+    let surface = extract_tet_view_surface(&crinkle).expect("extract crinkle surface");
+
+    let bounds = surface.bounds().expect("surface bounds");
+    let camera = Camera::fit_bounds(bounds, 35.0, 28.0);
+    let ctx = HeadlessContext::new().expect("headless context");
+
+    for sample_count in [1u32, 4u32] {
+        let opts = HeadlessRenderOptions {
+            width: 480,
+            height: 360,
+            sample_count,
+            background_srgb: [1.0, 1.0, 1.0, 1.0],
+            style: SurfaceStyle {
+                color_by: ColorBy::point("linear"),
+                colormap: ColormapKind::Viridis,
+                draw_edges: true,
+                edge_color_srgb: [0.12, 0.14, 0.18, 1.0],
+                ..SurfaceStyle::default()
+            },
+            camera: Some(camera.clone()),
+            ..HeadlessRenderOptions::default()
+        };
+
+        let img_base = ctx.render_surface(&surface, &opts).expect("render base");
+        let img_disabled = ctx
+            .render_surface_with_ssao(&surface, &opts, SsaoConfig::default())
+            .expect("render ssao disabled");
+
+        let cmp_disabled = img_base
+            .compare(&img_disabled, 0, 0.0)
+            .expect("compare base vs ssao disabled");
+        assert_eq!(
+            cmp_disabled.differing_pixels, 0,
+            "SsaoConfig::default() must produce bit-for-bit identical output (sample_count={sample_count})"
+        );
+
+        let ssao_low = SsaoConfig::enabled().with_radius(0.18).with_strength(0.6);
+        let ssao_high = SsaoConfig::enabled().with_radius(0.18).with_strength(1.3);
+
+        let img_low = ctx
+            .render_surface_with_ssao(&surface, &opts, ssao_low)
+            .expect("render ssao low");
+        let img_high = ctx
+            .render_surface_with_ssao(&surface, &opts, ssao_high)
+            .expect("render ssao high");
+
+        if sample_count == 4 {
+            let out_dir = root.join("target/render-tests");
+            img_disabled
+                .save_png(out_dir.join("ssao_disabled.png"))
+                .expect("save ssao_disabled.png");
+            img_high
+                .save_png(out_dir.join("ssao_enabled.png"))
+                .expect("save ssao_enabled.png");
+        }
+
+        // Background corners must remain pure white.
+        for (x, y) in [(4, 4), (475, 4), (4, 355), (475, 355)] {
+            assert_eq!(
+                img_high.pixel(x, y),
+                [255, 255, 255, 255],
+                "background pixel ({x}, {y}) must remain untouched by SSAO"
+            );
+        }
+
+        // Interior staircase crevices must darken measurably compared to disabled SSAO,
+        // and higher strength must darken more than lower strength.
+        let total_luma = |img: &RenderedImage| -> u64 {
+            img.as_rgba8()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|px| u64::from(px[0]) + u64::from(px[1]) + u64::from(px[2]))
+                .sum()
+        };
+        let luma_off = total_luma(&img_disabled);
+        let luma_low = total_luma(&img_low);
+        let luma_high = total_luma(&img_high);
+
+        assert!(
+            luma_low < luma_off,
+            "enabling SSAO must reduce total scene luminance in concave staircase crevices (sample_count={sample_count}: luma_low={luma_low} vs luma_off={luma_off})"
+        );
+        assert!(
+            luma_high < luma_low,
+            "increasing SSAO strength must monotonically darken occluded crevices (sample_count={sample_count}: luma_high={luma_high} vs luma_low={luma_low})"
+        );
+
+        let cmp_on_off = img_disabled
+            .compare(&img_high, 2, 0.0)
+            .expect("compare disabled vs high ssao");
+        assert!(
+            cmp_on_off.differing_pixels > 1500,
+            "expected > 1500 occluded pixels on crinkle staircase surface, got {} (sample_count={sample_count})",
+            cmp_on_off.differing_pixels
         );
     }
 }
